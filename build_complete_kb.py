@@ -16,7 +16,7 @@ import ollama
 # CONFIGURATION
 # ============================================================================
 class Config:
-    BASE_URL="https://www.exportgenius.in/"
+    BASE_URL="https://www.exportgenius.in"
     PAGES_TO_SCRAPE=[
         f"{BASE_URL}/company/global-trade-data.php",
         f"{BASE_URL}/about-us/product-and-services.php",
@@ -28,7 +28,7 @@ class Config:
         f"{BASE_URL}/plan-and-pricing.php",
         f"{BASE_URL}/company/about-us.php",
         f"{BASE_URL}/about-us/product-and-services.php",
-        # f"{BASE_URL}/company/api.php"
+        # f"{BASE_URL}/company/api.php" 
         f"{BASE_URL}/countries-covered.php",
         f"{BASE_URL}/company/career.php",
         f"{BASE_URL}/about-us/why-choose-us.php",
