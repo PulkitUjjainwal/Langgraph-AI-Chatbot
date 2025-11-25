@@ -1,0 +1,23 @@
+{
+  "build_timestamp": "2025-11-25T14:43:49.766384",
+  "build_time": "99.06s",
+  "total_documents": 17,
+  "total_chunks": 103,
+  "total_words": 60905,
+  "embedding_count": 103,
+  "embedding_dimensions": 768,
+  "cost": 0.0,
+  "config": {
+    "embedding_model": "nomic-embed-text",
+    "embeddings_normalized": true,
+    "faiss_index_type": "IndexFlatIP",
+    "chunk_size": 800
+  },
+  "output_files": {
+    "scraped": "data\\scraped_pages.json",
+    "chunks": "data\\kb_chunks.json",
+    "embeddings": "data\\kb_embeddings.json",
+    "faiss_index": "data\\faiss_normalized.index",
+    "metadata": "data\\kb_metadata.json"
+  }
+}
