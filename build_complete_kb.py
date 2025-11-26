@@ -25,7 +25,7 @@ class Config:
         f"{BASE_URL}/countries-covered.php",
         f"{BASE_URL}/search-live-data.php",
         f"{BASE_URL}/about-us/advantages-of-our-data-report.php",
-        f"{BASE_URL}/plan-and-pricing.php",
+        f"{BASE_URL}/company/plan-and-pricing.php",
         f"{BASE_URL}/company/about-us.php",
         f"{BASE_URL}/about-us/product-and-services.php",
         # f"{BASE_URL}/company/api.php" 
