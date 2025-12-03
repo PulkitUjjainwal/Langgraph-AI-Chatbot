@@ -2,7 +2,7 @@
   "build_timestamp": "2025-11-26T12:07:24.883107",
   "build_time": "106.59s",
   "total_documents": 18,
-  "total_chunks": 379,
+  "total_chunks": 131,
   "total_words": 63826,
   "embedding_count": 131,
   "embedding_dimensions": 768,
@@ -19,15 +19,5 @@
     "embeddings": "data\\kb_embeddings.json",
     "faiss_index": "data\\faiss_normalized.index",
     "metadata": "data\\kb_metadata.json"
-  },
-  "last_api_update": "2025-11-28T15:37:57.214189",
-  "api_chunks_added": 248,
-  "total_embeddings": 379,
-  "api_updates": [
-    {
-      "timestamp": "2025-11-28T15:37:57.215168",
-      "chunks_added": 248,
-      "total_chunks_after": 379
-    }
-  ]
+  }
 }

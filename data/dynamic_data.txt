@@ -1,0 +1,135 @@
+Oil Import Data of Afghanistan | 4.83 K Shipments Worth $445.54 Mn
+
+Access comprehensive Oil import data of Afghanistan, featuring 4.83 K shipments and $445.54 Mn import value during 31-08-2024 to 31-07-2025. Analyze importer activity and trade movement for better business opportunities.
+
+Afghanistan - Imports - Product: oil
+
+Imports Data of Oil
+Period: 31-08-2024 to 31-07-2025
+Total Shipment: 4825
+Total Value USD: 445.54 Mn
+
+HS Code (Top 20):
+1512199002 (1528 shipments)
+1511902000 (585 shipments)
+1512119101 (435 shipments)
+1512299000 (433 shipments)
+17049090 (334 shipments)
+15149900 (161 shipments)
+2710124130 (144 shipments)
+1512199009 (103 shipments)
+39249000 (101 shipments)
+15119020 (97 shipments)
+2710198200 (94 shipments)
+23040000 (92 shipments)
+15162010 (78 shipments)
+1204009000 (74 shipments)
+1511903600 (66 shipments)
+15119030 (53 shipments)
+27101951 (43 shipments)
+1101001509 (39 shipments)
+15141100 (39 shipments)
+15079000 (37 shipments)
+
+Origin Country:
+UZBEKISTAN
+PAKISTAN
+RUSSIA
+MALAYSIA
+KAZAKHSTAN
+INDONESIA
+PHILIPPINES
+VIETNAM
+
+Port of Unloading (Top 20):
+KARACHI (579 shipments)
+ST SOVIETSKAYA (236 shipments)
+S GALAKTIONOVO (115 shipments)
+VOLGODONSK (67 shipments)
+BANDAR ABBAS (57 shipments)
+LEAKAGE (52 shipments)
+NEVINNOMYSK (42 shipments)
+DZERZHINSK (30 shipments)
+JEBEL ALI (28 shipments)
+P KOLODEZNY (25 shipments)
+NOVOTITAROVSKAYA (24 shipments)
+UST LABINSK (22 shipments)
+G ARMAVIR (20 shipments)
+G MARX (20 shipments)
+G KIRSANOV (13 shipments)
+G LABINSK (12 shipments)
+ST IMMAMNAZAR (12 shipments)
+KARTALY 1 (11 shipments)
+KIGASH (11 shipments)
+RICH (11 shipments)
+
+Sample Shipment Records:
+
+Date: 31-07-2025
+HS Code: 1512199002
+Product Description: 1) Sunflower Oil, Trade Mark "noor", Chilled, Refined, Deodorized, Premium Grade
+Origin Country: UZBEKISTAN
+Quantity: 32790.00
+
+Date: 31-07-2025
+HS Code: 1512199002
+Product Description: 1) Sunflower Oil, Brand Name "russkoe", Chilled, Refined, Deodorized, Premium Grade
+Origin Country: UZBEKISTAN
+
+Date: 31-07-2025
+HS Code: 1512199002
+Product Description: 1) Sunflower Oil, Trade Mark "noor", Chilled, Refined, Deodorized, Premium Grade
+Origin Country: UZBEKISTAN
+Quantity: 24162.3
+
+Date: 31-07-2025
+HS Code: 1512199002
+Product Description: 1) Sunflower Oil, Brand Name "ziraat", Chilled, Refined, Deodorized, Premium Grade
+Origin Country: UZBEKISTAN
+Quantity: 32490.00
+
+Date: 31-07-2025
+HS Code: 17049090
+Product Description: Karyana Goods (1 Can Honey Sweets Masala Mustard Oil Etc)
+Origin Country: PAKISTAN
+
+Date: 31-07-2025
+HS Code: 1512199002
+Product Description: 1. Refined Deodorized Sunflower Oil Yuzhanka In Pet Bottles Of 4.6 Kg (5l) - 14
+Origin Country: KAZAKHSTAN
+Quantity: 89377.20
+
+Date: 31-07-2025
+HS Code: 1512199002
+Product Description: 1. Sunflower Oil Refined Deodorized First Grade Has The Smell And Color Characteristic
+Origin Country: UZBEKISTAN
+Quantity: 22977
+
+Date: 31-07-2025
+HS Code: 1512199002
+Product Description: 1) Sunflower Oil, Brand Name "russkoe", Chilled, Refined, Deodorized, Premium Grade
+Origin Country: UZBEKISTAN
+Quantity: 31935.00
+
+HS Code Product Descriptions:
+
+1512199002 - Sunflower Oil (refined, deodorized, premium grade, chilled). Trade marks include "noor", "russkoe", "ziraat", "Yuzhanka"
+1511902000 - Palm Oil
+1512119101 - Sunflower Oil (crude)
+1512299000 - Safflower Oil
+17049090 - Sugar confectionery and sweets (includes Karyana Goods, Honey Sweets, Masala, Mustard Oil, etc.)
+15149900 - Other fixed vegetable or microbial fats and oils
+2710124130 - Petroleum oils and oils from bituminous minerals
+1512199009 - Other sunflower seed or safflower oil
+39249000 - Household and toilet articles of plastics
+15119020 - Palm oil (other)
+2710198200 - Lubricating oils and other heavy petroleum oils
+23040000 - Oil cakes and other solid residues from soybean oil
+15162010 - Vegetable fats and oils (hydrogenated, inter-esterified, re-esterified or elaidinised)
+1204009000 - Linseed (flax seeds)
+1511903600 - Palm oil (fractions)
+15119030 - Palm oil (crude)
+27101951 - Motor gasoline
+1101001509 - Wheat flour
+15141100 - Rape or colza oil (crude)
+15079000 - Soybean oil and its fractions

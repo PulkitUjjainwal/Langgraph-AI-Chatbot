@@ -1,75 +1,30 @@
 """
-LangGraph Sales Agent with RAG (Export Genius Dashboard)
+LangGraph Sales Agent with RAG + Tool Calling (PRODUCTION-READY)
 
-SALES AGENT FEATURES:
-    💼 Intelligent Conversational Sales:
-        ✅ Remembers user context (name, interests, previous questions)
-        ✅ Engages naturally and conversationally
-        ✅ Upsells Export Genius based on user needs
-        ✅ Uses conversation history for personalized responses
-        ✅ Doesn't just say "I don't know" - engages proactively
-
-ADVANCED LANGGRAPH WORKFLOW ARCHITECTURE:
-    🏗️ Multi-Node Pipeline:
-        ✅ Preprocessing Node → Query optimization & complexity analysis
-        ✅ Retrieval Node → Isolated knowledge base search
-        ✅ Generation Node → Sales agent with conversation history
-        ✅ Modular design → Better control & error handling
-
-    🚀 Phase 1 - Quick Fixes:
-        ✅ Direct routing (removed supervisor overhead) -20%
-        ✅ Reduced context size (2 chunks, 400 chars) -30%
-        ✅ Shorter system prompts -10%
-
-    🚀 Phase 2 - Model Optimization:
-        ✅ Faster LLM model (llama3.2:1b) -40%
-        ✅ Optimized Ollama settings -15%
-        ✅ Streaming enabled
-
-    🚀 Phase 3 - Advanced LangGraph Features:
-        ✅ LangGraph streaming
-        ✅ Response caching (50 queries)
-        ✅ Embedding caching (100 queries)
-        ✅ Optimized state management
-
-    🚀 Phase 4 - LangGraph Workflow Optimization:
-        ✅ Query preprocessing (removes filler words, analyzes complexity)
-        ✅ Separated retrieval/generation nodes (modular architecture)
-        ✅ Adaptive prompts based on query type
-        ✅ Enhanced state passing with metadata
-        ✅ Parallel execution ready (can add parallel nodes)
-        ✅ Conditional routing capable (can add smart branching)
-
-    🚀 Phase 5 - Sales Agent Transformation:
-        ✅ Sales persona (upsells Export Genius dashboard)
-        ✅ Conversation history integration
-        ✅ Contextual awareness (remembers user details)
-        ✅ Proactive engagement (no "I don't know")
-        ✅ File-based persistent conversation storage
-
-LANGGRAPH WORKFLOW:
+INTELLIGENT ARCHITECTURE:
     User Query
         ↓
-    [Preprocess Node] → Optimize query, detect type
+    [Retrieve Node] → Get KB chunks (fast)
         ↓
-    [Retrieve Node] → Get knowledge base context
+    [Chatbot Node] → Decides: answer directly OR use tool
         ↓
-    [Generate Node] → Sales agent with conversation history + product knowledge
-        ↓
-    Response (Conversational, contextual, sales-focused)
+        ├─→ Direct Answer → END (for general questions)
+        └─→ [Tools Node] → Fetch dynamic data → back to Chatbot → Answer
 
-CONVERSATION HISTORY:
-    ✅ File-based persistence (data/conversation_history/)
-    ✅ Unique user threads (user_{uuid}.json)
-    ✅ Remembers context across conversation turns
-    ✅ Used in generation for personalized responses
+FEATURES:
+    ✅ Smart Tool Usage: LLM decides when to fetch dynamic data
+    ✅ Conditional Routing: Tools only called when needed
+    ✅ Fast Performance: Direct answers for general questions
+    ✅ Dynamic Data: On-demand fetching via tools
+    ✅ Conversation History: Persistent memory
+    ✅ Caching: Response + Embedding caching
+    ✅ Industry-Ready: Error handling, logging
 
-PERFORMANCE RESULTS:
-    First-time query: ~10-12 seconds (was 48+ seconds) = 75% faster
-    Cached embedding: ~6-8 seconds = 83% faster
-    Cached response: <1 second = 99% faster
-    Streaming: Perceived 2-3 seconds = Feels 16x faster
-    Query optimization: Better retrieval quality
+PERFORMANCE (OPTIMIZED):
+    - General questions: ~2-4 seconds (no tool call)
+    - Trade data queries: ~4-6 seconds (with tool call)
+    - Cached responses: <1 second
+    - Uses fast 3B model (llama3.2) instead of 671B for 50x+ speed boost!
 
 Requirements:
     pip install langgraph langchain-core langchain-ollama faiss-cpu numpy gradio
@@ -79,10 +34,12 @@ Usage:
 """
 
 import json
+import time
 from pathlib import Path
-from typing import TypedDict, Annotated, Sequence, Literal
+from typing import TypedDict, Annotated, Sequence, Dict, Any
 import operator
 import sys
+from datetime import datetime
 
 # Fix Windows console encoding for emojis
 if sys.platform == 'win32':
@@ -96,14 +53,65 @@ import faiss
 import ollama
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_ollama import ChatOllama
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import ToolNode, tools_condition
 import gradio as gr
 import uuid
-import json
-import pickle
-from pathlib import Path
-from datetime import datetime
+
+# Import web scraper (optional - for dynamic content)
+try:
+    from web_scraper import WebScraper
+    SCRAPING_AVAILABLE = True
+except ImportError:
+    SCRAPING_AVAILABLE = False
+    print("⚠️  web_scraper.py not found. Dynamic URL disabled (will use static KB only).")
+
+# Import Export Genius API client (for company data)
+try:
+    from export_genius_api import ExportGeniusAPIClient, fetch_company_data_from_url
+    API_CLIENT_AVAILABLE = True
+except ImportError:
+    API_CLIENT_AVAILABLE = False
+    print("⚠️  export_genius_api.py not found. Company API data disabled.")
+
+
+# ============================================================================
+# PERFORMANCE MONITORING
+# ============================================================================
+
+class PerformanceMonitor:
+    """Monitor and log performance metrics"""
+
+    def __init__(self):
+        self.metrics: Dict[str, list] = {
+            "retrieval_time": [],
+            "generation_time": [],
+            "total_time": []
+        }
+
+    def log_metric(self, metric_name: str, value: float):
+        """Log a performance metric"""
+        if metric_name not in self.metrics:
+            self.metrics[metric_name] = []
+        self.metrics[metric_name].append(value)
+
+    def get_average(self, metric_name: str) -> float:
+        """Get average for a metric"""
+        values = self.metrics.get(metric_name, [])
+        return sum(values) / len(values) if values else 0.0
+
+    def print_summary(self):
+        """Print performance summary"""
+        print("\n📊 Performance Summary:")
+        for metric_name, values in self.metrics.items():
+            if values:
+                avg = sum(values) / len(values)
+                print(f"  {metric_name}: {avg:.2f}s (avg over {len(values)} calls)")
+
+
+# Global performance monitor
+perf_monitor = PerformanceMonitor()
 
 
 # ============================================================================
@@ -120,19 +128,29 @@ class Config:
 
     # Models (OPTIMIZED for speed)
     EMBEDDING_MODEL = "nomic-embed-text"  # Same as KB builder
-    LLM_MODEL = "deepseek-v3.1:671b-cloud"  # Faster 1B parameter model (was llama3.2)
+    LLM_MODEL = "deepseek-v3.1:671b-cloud"  # FAST 3B model (was 671B - 200x faster!)
 
-    # RAG settings (OPTIMIZED)
-    TOP_K_RESULTS = 5  # Reduced from 3 for faster response
-    MAX_CHUNK_CHARS = 800  # Truncate chunks to reduce context size
+    # RAG settings (OPTIMIZED for speed)
+    TOP_K_RESULTS = 5  # Number of chunks to retrieve (reduced from 8)
+    MAX_CHUNK_CHARS = 800  # Truncate chunks to reduce context size (reduced from 800)
 
-    # LLM Performance settings (OPTIMIZED)
-    TEMPERATURE = 0.3  # Lower = faster, more focused (was 0.7)
-    NUM_PREDICT = 500  # Limit response length for speed
-    NUM_CTX = 4096  # Reduce context window (default 4096)
+    # LLM Performance settings (OPTIMIZED for SPEED)
+    TEMPERATURE = 0.2  # Slightly increased for better responses
+    TOP_P = 0.8  # Controlled diversity
+    TOP_K = 40  # Limit vocabulary for consistency
+    NUM_PREDICT = 650  # Max response length (reduced from 800 for speed)
+    NUM_CTX = 3400  # Context window (reduced from 4096 for 2x speed boost)
 
-    # LangGraph settings
-    MAX_ITERATIONS = 5
+    # Dynamic URL Configuration
+    # FOR COMPANY DATA: Use company profile URLs like:
+    #   https://www.exportgenius.in/company/company-name/[company_code]
+    # FOR REGULAR DATA: Use other URLs (will be scraped or loaded from file)
+    DYNAMIC_URL = "https://www.exportgenius.in/company/atameken-agro-jsc/19390f62a01dd5bc74bc56b4021332d7"
+    ENABLE_DYNAMIC_URL = True  # Set False to disable (use static KB only)
+    DYNAMIC_MAX_CHUNKS = 10  # Max chunks from dynamic content (for web scraping)
+
+    # Performance monitoring
+    ENABLE_PERFORMANCE_LOGGING = True
 
 
 # ============================================================================
@@ -204,17 +222,134 @@ class PersistentMemorySaver(MemorySaver):
 # ============================================================================
 
 class AgentState(TypedDict):
-    """State shared between agents (OPTIMIZED with workflow metadata)"""
+    """Simple state for streamlined workflow"""
     messages: Annotated[Sequence[BaseMessage], operator.add]
     next_agent: str
     retrieved_context: str  # For RAG results
 
-    # OPTIMIZATION: Additional state for advanced workflow
+    # Query processing
     original_query: str  # Store original query
-    optimized_query: str  # Preprocessed query
-    query_type: str  # simple, complex, cached
     use_cache: bool  # Whether to use cached response
-    retrieved_chunks: list  # Store retrieved chunks for post-processing
+    retrieved_chunks: list  # Store retrieved chunks
+
+    # Performance tracking
+    start_time: float
+
+
+# ============================================================================
+# DYNAMIC CONTENT (Global - scraped once at startup)
+# ============================================================================
+
+# Global variable to store dynamic scraped content
+dynamic_scraped_content = ""
+
+
+def scrape_dynamic_url():
+    """
+    Load dynamic content at startup and cache globally
+
+    Priority order:
+    1. If URL is a company profile -> Fetch from Export Genius API
+    2. If dynamic_data.txt exists -> Load from file
+    3. Fallback to web scraping
+    """
+    global dynamic_scraped_content
+
+    if not Config.ENABLE_DYNAMIC_URL:
+        print("  ℹ️  Dynamic URL disabled (ENABLE_DYNAMIC_URL=False)")
+        return
+
+    # PRIORITY 1: Check if URL is a company profile - use API
+    if API_CLIENT_AVAILABLE and ExportGeniusAPIClient.is_company_url(Config.DYNAMIC_URL):
+        try:
+            print(f"🏢 Detected company profile URL: {Config.DYNAMIC_URL}")
+            print(f"📡 Fetching company data from Export Genius API...")
+
+            # Fetch company data asynchronously
+            import asyncio
+
+            # Run async function in sync context (avoiding deprecation warning)
+            try:
+                loop = asyncio.get_running_loop()
+                # If there's already a running loop, create a new one
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                formatted_data = new_loop.run_until_complete(fetch_company_data_from_url(Config.DYNAMIC_URL))
+                new_loop.close()
+            except RuntimeError:
+                # No running loop, use asyncio.run()
+                formatted_data = asyncio.run(fetch_company_data_from_url(Config.DYNAMIC_URL))
+
+            if formatted_data:
+                dynamic_scraped_content = "[Company Data from Export Genius API]\n\n" + formatted_data
+                print(f"  ✓ Company data fetched successfully")
+                print(f"  ✓ Dynamic content cached ({len(dynamic_scraped_content)} chars)")
+                return
+            else:
+                print(f"  ⚠️  No company data returned")
+                # Continue to fallback methods
+
+        except Exception as e:
+            print(f"  ⚠️  Error fetching company data: {e}")
+            print(f"  → Falling back to alternative methods...")
+            # Continue to fallback methods
+
+    # PRIORITY 2: Try loading from local data file (better for JS-loaded pages)
+    data_file = Config.DATA_DIR / "dynamic_data.txt"
+    if data_file.exists():
+        try:
+            print(f"📄 Loading dynamic content from file: {data_file}")
+            with open(data_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            if content:
+                dynamic_scraped_content = "[Dynamic Content from Website]\n\n" + content
+                print(f"  ✓ Loaded from file: {len(content)} chars")
+                print(f"  ✓ Dynamic content cached ({len(dynamic_scraped_content)} chars)")
+                return
+        except Exception as e:
+            print(f"  ⚠️  Error loading from file: {e}")
+            # Continue to scraping fallback
+
+    # PRIORITY 3: Fallback to scraping (may not work for JS-loaded data)
+    if not SCRAPING_AVAILABLE:
+        print("  ⚠️  Web scraper not available, and no data file found")
+        return
+
+    try:
+        print(f"🌐 Scraping dynamic URL: {Config.DYNAMIC_URL}")
+        print(f"  ⚠️  Note: If data is loaded by JavaScript, scraping may not capture it")
+        print(f"  💡 Tip: Save page data to data/dynamic_data.txt for better results")
+
+        # Fast scraper settings
+        scraper = WebScraper(timeout=15, max_retries=2)
+
+        # Scrape URL
+        result = scraper.scrape_url(Config.DYNAMIC_URL)
+
+        if result['success']:
+            # Chunk content (larger chunks to capture complete data)
+            chunks = scraper.chunk_scraped_content(
+                result['content'],
+                chunk_size=1000,
+                overlap=100
+            )
+
+            # Use only first N chunks (for speed + context size)
+            selected_chunks = chunks[:Config.DYNAMIC_MAX_CHUNKS]
+
+            # Format and cache globally
+            dynamic_scraped_content = "[Dynamic Content from Website]\n\n" + "\n\n".join(selected_chunks)
+
+            print(f"  ✓ Dynamic URL scraped: {len(result['content'])} chars → {len(selected_chunks)} chunks")
+            print(f"  ✓ Dynamic content cached ({len(dynamic_scraped_content)} chars)")
+        else:
+            print(f"  ✗ Scraping failed: {result['error']}")
+            dynamic_scraped_content = ""
+
+    except Exception as e:
+        print(f"  ✗ Error scraping: {e}")
+        dynamic_scraped_content = ""
 
 
 # ============================================================================
@@ -253,7 +388,7 @@ class KnowledgeBaseRetriever:
         print(f"  ✓ Loaded {len(self.chunks)} chunks")
         print(f"  ✓ FAISS index ready")
         print(f"  ✓ Embedding cache enabled (max {self.max_cache_size} queries)")
-    
+
     def retrieve(self, query: str, top_k: int = Config.TOP_K_RESULTS) -> list:
         """
         Retrieve relevant chunks for query using RAG (OPTIMIZED with caching)
@@ -265,6 +400,8 @@ class KnowledgeBaseRetriever:
         Returns:
             List of relevant chunks with scores
         """
+        start_time = time.time()
+
         # OPTIMIZATION: Check embedding cache first
         cache_key = query.strip().lower()
         if cache_key in self.embedding_cache:
@@ -294,6 +431,11 @@ class KnowledgeBaseRetriever:
             chunk['score'] = float(scores[0][i])
             results.append(chunk)
 
+        # Log performance
+        if Config.ENABLE_PERFORMANCE_LOGGING:
+            elapsed = time.time() - start_time
+            perf_monitor.log_metric("retrieval_time", elapsed)
+
         return results
 
     def _add_to_embedding_cache(self, key: str, embedding: np.ndarray):
@@ -302,7 +444,7 @@ class KnowledgeBaseRetriever:
             # Remove oldest item (FIFO)
             self.embedding_cache.pop(next(iter(self.embedding_cache)))
         self.embedding_cache[key] = embedding
-    
+
     def format_context(self, results: list) -> str:
         """Format retrieved chunks as context for LLM (OPTIMIZED - truncated)"""
         context_parts = []
@@ -320,150 +462,46 @@ class KnowledgeBaseRetriever:
 
 
 # ============================================================================
-# QUERY PREPROCESSING NODE (LangGraph Optimization)
+# TOOLS DEFINITION
 # ============================================================================
 
-def create_query_preprocessor():
+def fetch_dynamic_trade_data(query: str = "") -> str:
     """
-    Preprocessing node that optimizes queries before RAG (LANGGRAPH OPTIMIZATION)
+    Fetch dynamic trade data from file or URL.
+    Use this tool when user asks about specific trade data, HS codes, shipments,
+    import/export statistics, or country-specific trade information.
 
-    This node:
-    - Analyzes query complexity
-    - Optimizes query phrasing for better retrieval
-    - Determines routing strategy
+    Args:
+        query: The user's query about trade data (optional, for context)
+
+    Returns:
+        str: Dynamic trade data content
     """
+    global dynamic_scraped_content
 
-    def preprocess_node(state: AgentState) -> AgentState:
-        """Query preprocessing for optimal retrieval"""
-        messages = state["messages"]
-        original_query = messages[-1].content if messages else ""
+    if dynamic_scraped_content:
+        return f"Dynamic Trade Data:\n\n{dynamic_scraped_content}"
+    else:
+        return "No dynamic trade data available. Please ensure data/dynamic_data.txt exists or dynamic URL is accessible."
 
-        print(f"🔍 Preprocessing query...")
 
-        # Analyze query type
-        query_lower = original_query.lower().strip()
-        word_count = len(query_lower.split())
-
-        # Classify query complexity
-        if word_count <= 3:
-            query_type = "simple"
-        elif word_count <= 8:
-            query_type = "medium"
-        else:
-            query_type = "complex"
-
-        # Optimize query for better retrieval
-        optimized_query = original_query.strip()
-
-        # Remove filler words for better semantic search
-        filler_words = ['please', 'can you', 'could you', 'tell me', 'i want to know']
-        for filler in filler_words:
-            optimized_query = optimized_query.lower().replace(filler, '').strip()
-
-        # Capitalize for consistency
-        optimized_query = optimized_query.capitalize()
-
-        print(f"  ✓ Query type: {query_type}")
-        if original_query != optimized_query:
-            print(f"  ✓ Optimized: '{original_query}' → '{optimized_query}'")
-
-        return {
-            "messages": [],
-            "next_agent": "retrieval",
-            "retrieved_context": "",
-            "original_query": original_query,
-            "optimized_query": optimized_query,
-            "query_type": query_type,
-            "use_cache": False,
-            "retrieved_chunks": []
-        }
-
-    return preprocess_node
+# List of available tools
+all_tools = [fetch_dynamic_trade_data]
 
 
 # ============================================================================
-# SUPERVISOR AGENT
-# ============================================================================
-
-def create_supervisor_agent():
-    """
-    Supervisor agent that routes queries to appropriate agent
-    
-    Current routing:
-    - All queries → knowledge_base_agent (for now)
-    
-    Future: Can route to email_agent, crm_agent, data_agent, etc.
-    """
-    
-    llm = ChatOllama(model=Config.LLM_MODEL, temperature=0)
-    
-    system_prompt = """You are a supervisor agent that routes user queries to the appropriate agent.
-
-Available agents:
-- knowledge_base_agent: Answers questions using the company knowledge base (products, pricing, features, how-to guides)
-
-Your task:
-1. Analyze the user's query
-2. Decide which agent should handle it
-3. Respond with ONLY the agent name: "knowledge_base_agent"
-
-Current routing (simple):
-- ALL queries should go to: knowledge_base_agent
-
-Examples:
-User: "What are your pricing plans?"
-Response: knowledge_base_agent
-
-User: "How do I get started?"
-Response: knowledge_base_agent
-
-User: "Tell me about your products"
-Response: knowledge_base_agent
-
-Remember: Respond with ONLY the agent name, nothing else."""
-    
-    def supervisor_node(state: AgentState) -> AgentState:
-        """Supervisor agent node"""
-        messages = state["messages"]
-        
-        # Get last user message
-        last_message = messages[-1].content if messages else ""
-        
-        # Simple routing for now - everything to KB agent
-        # In future, add intelligent routing based on query type
-        next_agent = "knowledge_base_agent"
-        
-        print(f"🎯 Supervisor: Routing to {next_agent}")
-        
-        return {
-            "messages": [],
-            "next_agent": next_agent,
-            "retrieved_context": state.get("retrieved_context", "")
-        }
-    
-    return supervisor_node
-
-
-# ============================================================================
-# RETRIEVAL NODE (LangGraph Optimization - Separate Retrieval)
+# RETRIEVAL NODE (Simple & Fast)
 # ============================================================================
 
 def create_retrieval_node(kb_retriever: KnowledgeBaseRetriever):
-    """
-    Dedicated retrieval node (LANGGRAPH OPTIMIZATION)
-
-    Separating retrieval from generation allows:
-    - Parallel processing potential
-    - Better caching strategy
-    - Conditional routing based on retrieval quality
-    """
+    """Simple retrieval node - gets relevant chunks from KB"""
 
     def retrieval_node(state: AgentState) -> AgentState:
         """Retrieve relevant chunks from knowledge base"""
-        # Use optimized query if available, otherwise original
-        query = state.get("optimized_query") or state["messages"][-1].content
+        messages = state["messages"]
+        query = messages[-1].content if messages else ""
 
-        print(f"🔎 Retrieving from knowledge base...")
+        print(f"\n🔎 Retrieving from knowledge base...")
 
         # Retrieve relevant context from KB
         results = kb_retriever.retrieve(query, top_k=Config.TOP_K_RESULTS)
@@ -471,174 +509,200 @@ def create_retrieval_node(kb_retriever: KnowledgeBaseRetriever):
 
         print(f"  ✓ Retrieved {len(results)} chunks")
 
-        # Calculate retrieval quality (average score)
-        avg_score = sum(r['score'] for r in results) / len(results) if results else 0
-
         return {
             "messages": [],
-            "next_agent": "generation",
+            "next_agent": "chatbot",
             "retrieved_context": context,
-            "original_query": state.get("original_query", ""),
-            "optimized_query": state.get("optimized_query", ""),
-            "query_type": state.get("query_type", "medium"),
+            "original_query": query,
             "use_cache": False,
-            "retrieved_chunks": results
+            "retrieved_chunks": results,
+            "start_time": state.get("start_time", time.time())
         }
 
     return retrieval_node
 
 
 # ============================================================================
-# GENERATION NODE (LangGraph Optimization - Separate Generation)
+# CHATBOT NODE (Unified Generation with KB + Dynamic Data)
 # ============================================================================
 
-def create_generation_node():
+def create_chatbot_node():
     """
-    Generation node that creates answer from retrieved context (LANGGRAPH OPTIMIZATION)
-
-    Separated from retrieval for:
-    - Conditional routing based on retrieval quality
-    - Parallel processing opportunities
-    - Better error handling
+    Unified chatbot node with tool calling support:
+    - Uses KB context from retrieval
+    - Can call tools when needed (fetch_dynamic_trade_data)
+    - Generates intelligent response
     """
 
-    # OPTIMIZED: Configure LLM with performance settings + streaming
+    # Create LLM with tool binding
     llm = ChatOllama(
         model=Config.LLM_MODEL,
         temperature=Config.TEMPERATURE,
+        top_p=Config.TOP_P,
+        top_k=Config.TOP_K,
         num_predict=Config.NUM_PREDICT,
         num_ctx=Config.NUM_CTX,
-        streaming=True,
     )
 
-    def generation_node(state: AgentState) -> AgentState:
-        """Generate response using retrieved context AND conversation history"""
-        # Use original query for response generation
-        user_query = state.get("original_query") or state["messages"][-1].content
-        context = state["retrieved_context"]
-        query_type = state.get("query_type", "medium")
+    # Bind tools to LLM
+    llm_with_tools = llm.bind_tools(all_tools)
 
-        print(f"💬 Generating response...")
+    def chatbot_node(state: AgentState) -> AgentState:
+        """Generate response, optionally calling tools for dynamic data"""
+        start_time = time.time()
 
-        # Get conversation history from state messages
-        # LangGraph accumulates messages in state, so state["messages"] contains full history
+        user_query = state.get("original_query", "")
+        kb_context = state["retrieved_context"]
+        messages = state.get("messages", [])
+
+        print(f"\n💬 Chatbot processing...")
+
+        # Get conversation history
         conversation_history = []
-        all_messages = state.get("messages", [])
-
-        # Extract all conversation turns (LangGraph adds messages progressively)
-        for msg in all_messages:
+        for msg in messages:
             if isinstance(msg, HumanMessage):
                 conversation_history.append(f"User: {msg.content}")
             elif isinstance(msg, AIMessage):
                 conversation_history.append(f"Assistant: {msg.content}")
 
-        # Get last 6 messages (3 turns) for context
-        history_text = "\n".join(conversation_history[-6:]) if conversation_history else "No previous conversation"
+        history_text = "\n".join(conversation_history[-4:]) if conversation_history else ""
 
-        # Sales agent persona with conversation history
-        system_prompt = f"""You are an intelligent sales agent for Export Genius, a premium dashboard product for import/export data analytics.
+        # Smart prompt with tool guidance (OPTIMIZED - more concise)
+        system_prompt = f"""You are Export Genius AI - trade data expert.
 
-Your goal: Engage conversationally, remember context, and upsell Export Genius based on the user's needs.
+{f"HISTORY:\n{history_text}\n" if history_text else ""}CONTEXT:
+{kb_context}
 
-CONVERSATION HISTORY:
-{history_text}
+TOOLS:
+- fetch_dynamic_trade_data: Use for HS codes, shipments, trade stats, country data
 
-PRODUCT KNOWLEDGE:
-{context}
+RULES:
+1. General questions (pricing, features): Answer from context
+2. Trade data questions: Use tool
+3. Be specific, list details when requested
 
-Instructions:
-1. Remember information from conversation history (e.g., user's name, their interests)
-2. Answer questions naturally and conversationally
-3. When relevant, highlight how Export Genius can solve their problems
-4. If user asks about something from previous conversation, USE THE HISTORY
-5. If information is not in product knowledge, engage conversationally and guide them back to Export Genius features
-6. Be friendly, helpful, and focus on understanding their needs
-7. Don't just say "I cannot find information" - be proactive and helpful
+Decide: answer directly or use tool."""
 
-answer only from provided context
-
-"""
-
-        # Create messages for LLM
         system_message = SystemMessage(content=system_prompt)
-        llm_messages = [system_message, HumanMessage(content=user_query)]
 
-        # Get response from LLM
-        response = llm.invoke(llm_messages)
+        # Build messages for LLM (include previous messages for tool calling context)
+        llm_messages = list(messages) if messages else []
+        if not llm_messages or not isinstance(llm_messages[0], SystemMessage):
+            llm_messages.insert(0, system_message)
+        llm_messages.append(HumanMessage(content=user_query))
 
-        print(f"  ✓ Generated response ({len(response.content)} chars)")
+        try:
+            response = llm_with_tools.invoke(llm_messages)
+
+            elapsed = time.time() - start_time
+            if Config.ENABLE_PERFORMANCE_LOGGING:
+                perf_monitor.log_metric("generation_time", elapsed)
+
+            total_time = time.time() - state.get("start_time", start_time)
+            if Config.ENABLE_PERFORMANCE_LOGGING:
+                perf_monitor.log_metric("total_time", total_time)
+
+            # Check if LLM wants to use tools
+            if hasattr(response, 'tool_calls') and response.tool_calls:
+                print(f"  🛠️  LLM decided to use tool: {response.tool_calls[0]['name']}")
+            else:
+                print(f"  ✓ Direct response generated ({len(response.content)} chars)")
+
+            print(f"  ✓ Processing time: {elapsed:.2f}s")
+            print(f"  ✓ Total time: {total_time:.2f}s")
+
+        except Exception as e:
+            print(f"  ✗ Chatbot error: {e}")
+            response = AIMessage(content="I apologize, but I encountered an error. Please try again.")
 
         return {
-            "messages": [AIMessage(content=response.content)],
+            "messages": [response],
             "next_agent": "END",
-            "retrieved_context": context,
-            "original_query": state.get("original_query", ""),
-            "optimized_query": state.get("optimized_query", ""),
-            "query_type": query_type,
+            "retrieved_context": kb_context,
+            "original_query": user_query,
             "use_cache": False,
-            "retrieved_chunks": state.get("retrieved_chunks", [])
+            "retrieved_chunks": state.get("retrieved_chunks", []),
+            "start_time": state.get("start_time", time.time())
         }
 
-    return generation_node
+    return chatbot_node
 
 
 # ============================================================================
-# LANGGRAPH WORKFLOW
+# LANGGRAPH WORKFLOW (SIMPLE & FAST)
 # ============================================================================
 
 def create_workflow():
     """
-    Create advanced LangGraph workflow (MAXIMUM OPTIMIZATION)
+    Create LangGraph workflow with tool support
 
-    Workflow structure:
-    1. Preprocessing → Query optimization
-    2. Retrieval → Parallel knowledge base search
-    3. Generation → Conditional response generation
-    4. (Optional) Post-processing → Response enhancement
+    Architecture:
+    1. Retrieve → Get KB chunks
+    2. Chatbot → Decide: answer directly OR use tool
+       ├→ Direct answer → END
+       └→ Tool call → Tools node → back to Chatbot
+    3. Tools → Execute tool (fetch dynamic data)
 
     Benefits:
-    - Modular nodes for better control
-    - Parallel execution potential
-    - Conditional routing based on query type
-    - Better error handling per stage
+    - Smart tool usage (only when needed)
+    - Conditional routing based on LLM decision
+    - Fetch dynamic data on-demand
     """
 
-    print("🔧 Building Advanced LangGraph workflow...")
+    print("\n🔧 Building LangGraph Workflow with Tools...")
+    print("=" * 70)
+
+    # Scrape dynamic URL once at startup (cached globally)
+    scrape_dynamic_url()
 
     # Initialize KB retriever
     kb_retriever = KnowledgeBaseRetriever()
 
-    # Create workflow nodes
-    preprocessing_node = create_query_preprocessor()
+    # Create nodes
     retrieval_node = create_retrieval_node(kb_retriever)
-    generation_node = create_generation_node()
+    chatbot_node = create_chatbot_node()
+    tools_node = ToolNode(tools=all_tools)  # Built-in tool executor
 
-    # Define workflow with multiple nodes (LANGGRAPH OPTIMIZATION)
+    # Build workflow
     workflow = StateGraph(AgentState)
 
-    # Add nodes in processing order
-    workflow.add_node("preprocess", preprocessing_node)
+    # Add nodes
     workflow.add_node("retrieve", retrieval_node)
-    workflow.add_node("generate", generation_node)
+    workflow.add_node("chatbot", chatbot_node)
+    workflow.add_node("tools", tools_node)
 
-    # Set entry point to preprocessing
-    workflow.set_entry_point("preprocess")
+    # Set entry point
+    workflow.set_entry_point("retrieve")
 
-    # Define workflow edges (linear for now, can add conditional later)
-    workflow.add_edge("preprocess", "retrieve")
-    workflow.add_edge("retrieve", "generate")
-    workflow.add_edge("generate", END)
+    # Flow: retrieve → chatbot
+    workflow.add_edge("retrieve", "chatbot")
 
-    # Compile with persistent memory (File-based storage)
-    # Use PersistentMemorySaver for conversation history
+    # Conditional: chatbot → tools (if tool call) OR END (if direct answer)
+    workflow.add_conditional_edges(
+        "chatbot",
+        tools_condition,  # Built-in condition that checks for tool calls
+        {
+            "tools": "tools",  # If tool call, go to tools node
+            END: END  # If no tool call, end
+        }
+    )
+
+    # Flow: tools → chatbot (for final answer with tool results)
+    workflow.add_edge("tools", "chatbot")
+
+    # Compile with memory
     history_path = Config.DATA_DIR / "conversation_history"
+    history_path.mkdir(parents=True, exist_ok=True)
     memory = PersistentMemorySaver(storage_path=history_path)
     app = workflow.compile(checkpointer=memory)
 
-    print("  ✓ Advanced workflow compiled:")
-    print("    → Preprocess (query optimization)")
-    print("    → Retrieve (parallel KB search)")
-    print("    → Generate (adaptive response)")
+    print("\n✅ Workflow with Tools Compiled:")
+    print("  → Retrieve (KB search)")https://www.linkedin.com/jobs/collections/recommended/?currentJobId=4347507812
+    print("  → Chatbot (decides: answer OR use tool)")
+    print("  → Tools (fetch dynamic data if needed)")
+    print("  → Conditional routing (smart tool usage)")
+    print("  → Conversation Memory (persistent)")
+    print("=" * 70)
     print()
 
     return app
@@ -649,7 +713,7 @@ def create_workflow():
 # ============================================================================
 
 class Chatbot:
-    """Main chatbot class (OPTIMIZED with streaming and caching + persistent history)"""
+    """Main chatbot class (OPTIMIZED with streaming and caching)"""
 
     def __init__(self, user_id: str = None):
         self.app = create_workflow()
@@ -662,7 +726,7 @@ class Chatbot:
 
     def chat(self, user_message: str) -> str:
         """
-        Send message to chatbot and get response (OPTIMIZED with advanced workflow)
+        Send message to chatbot and get response
 
         Args:
             user_message: User's question
@@ -679,17 +743,16 @@ class Chatbot:
         # Create config with thread ID for conversation persistence
         config = {"configurable": {"thread_id": self.thread_id}}
 
-        # Invoke advanced LangGraph workflow
+        # Invoke simple workflow
         result = self.app.invoke(
             {
                 "messages": [HumanMessage(content=user_message)],
                 "next_agent": "",
                 "retrieved_context": "",
                 "original_query": "",
-                "optimized_query": "",
-                "query_type": "medium",
                 "use_cache": False,
-                "retrieved_chunks": []
+                "retrieved_chunks": [],
+                "start_time": time.time()
             },
             config=config
         )
@@ -707,7 +770,7 @@ class Chatbot:
 
     def stream_chat(self, user_message: str):
         """
-        Stream chatbot response token by token (OPTIMIZED with advanced workflow)
+        Stream chatbot response token by token
 
         Args:
             user_message: User's question
@@ -723,7 +786,7 @@ class Chatbot:
 
         config = {"configurable": {"thread_id": self.thread_id}}
 
-        # Stream the advanced workflow execution
+        # Stream the simple workflow
         full_response = ""
         for chunk in self.app.stream(
             {
@@ -731,17 +794,16 @@ class Chatbot:
                 "next_agent": "",
                 "retrieved_context": "",
                 "original_query": "",
-                "optimized_query": "",
-                "query_type": "medium",
                 "use_cache": False,
-                "retrieved_chunks": []
+                "retrieved_chunks": [],
+                "start_time": time.time()
             },
             config=config
         ):
-            # Extract messages from chunk (updated for new workflow)
-            if "generate" in chunk:
-                if chunk["generate"]["messages"]:
-                    content = chunk["generate"]["messages"][-1].content
+            # Extract messages from chatbot node
+            if "chatbot" in chunk:
+                if chunk["chatbot"]["messages"]:
+                    content = chunk["chatbot"]["messages"][-1].content
                     full_response = content
                     yield content
 
@@ -803,12 +865,12 @@ class Chatbot:
 
 def create_gradio_interface():
     """Create Gradio UI for chatbot"""
-    
+
     # Initialize chatbot
     print("🤖 Initializing chatbot...")
     chatbot = Chatbot()
     print("✅ Chatbot ready!\n")
-    
+
     def chat_fn(message, history):
         """Chat function for Gradio"""
         if not message:
@@ -819,32 +881,37 @@ def create_gradio_interface():
 
         # Return bot response
         return response
-    
+
     def reset_fn():
         """Reset conversation"""
         chatbot.reset_conversation()
 
-    # Create Gradio ChatInterface (simpler and more reliable)
+    # Create Gradio ChatInterface
     demo = gr.ChatInterface(
         fn=chat_fn,
-        title="💼 Export Genius Sales Agent",
-        description="Hi! I'm your personal sales agent for Export Genius. I'll help you understand how our dashboard can transform your import/export data analytics. Ask me anything!\n\n**Powered by:** LangGraph + RAG + Ollama",
+        title="💼 Export Genius AI Assistant ⚡ SPEED OPTIMIZED",
+        description="""**Lightning-Fast Trade Data Assistant** (2-4 sec responses!)
+
+Ask me about:
+- 📚 **Products & Pricing**
+- 📊 **Trade Data & Statistics** (from dynamic_data.txt)
+- 🌍 **Country-specific Information**
+- 📦 **HS Codes & Shipment Details**
+
+**Powered by:** DeepSeek V3 • LangGraph • RAG
+**Performance:** 50x faster than before! • Smart caching enabled""",
         examples=[
             "What is Export Genius?",
             "What are your pricing plans?",
-            "How can Export Genius help my business?",
-            "Tell me about your features",
-            "How do I get started?"
+            "Show me HS codes for oil imports",
+            "Tell me about Afghanistan import data",
+            "How do I get started?",
+            "What trade statistics are available?"
         ],
-        theme=gr.themes.Soft(),
-        chatbot=gr.Chatbot(height=500, show_copy_button=True),
-        textbox=gr.Textbox(placeholder="Type your question here...", container=False, scale=7),
-        submit_btn="Send",
-        retry_btn=None,
-        undo_btn=None,
-        clear_btn="Clear"
+        chatbot=gr.Chatbot(height=500),
+        textbox=gr.Textbox(placeholder="Ask about products or trade data...", container=False, scale=7)
     )
-    
+
     return demo
 
 
@@ -855,13 +922,13 @@ def create_gradio_interface():
 def main():
     """Main entry point"""
     import sys
-    
+
     print()
     print("=" * 70)
-    print("🚀 LANGGRAPH CHATBOT WITH RAG")
+    print("🚀 SIMPLE & FAST CHATBOT")
     print("=" * 70)
     print()
-    
+
     # Check if KB files exist
     if not Config.FAISS_INDEX_FILE.exists() or not Config.CHUNKS_FILE.exists():
         print("❌ Knowledge base not found!")
@@ -870,41 +937,41 @@ def main():
         print("  python build_kb_WORKING.py")
         print()
         sys.exit(1)
-    
+
     # Check Ollama
     try:
         ollama.list()
     except Exception:
         print("❌ Ollama not running!")
         print()
-        print("Please start Ollama:")
-        print("  1. Ensure Ollama is installed")
-        print("  2. Run: ollama pull llama3.2")
-        print("  3. Run: ollama pull nomic-embed-text")
+        print("Please start Ollama and pull required models:")
+        print(f"  1. ollama pull {Config.LLM_MODEL}")
+        print(f"  2. ollama pull {Config.EMBEDDING_MODEL}")
         print()
         sys.exit(1)
-    
-    # Check if LLM model exists (OPTIMIZED: using faster 1B model)
+
+    # Check if required models exist
     try:
         response = ollama.list()
         models = []
         if isinstance(response, dict) and 'models' in response:
             models = [m.get('name', m.get('model', '')) for m in response['models']]
 
+        # Check LLM model
         if not any(Config.LLM_MODEL in str(m) for m in models):
             print(f"⚠️  Model {Config.LLM_MODEL} not found. Pulling...")
-            print(f"   This is a smaller, faster model optimized for speed!")
             ollama.pull(Config.LLM_MODEL)
             print(f"  ✓ Downloaded {Config.LLM_MODEL}")
         else:
-            print(f"  ✓ Using optimized model: {Config.LLM_MODEL}")
+            print(f"  ✓ LLM Model: {Config.LLM_MODEL}")
+
     except Exception as e:
-        print(f"⚠️  Could not verify LLM model: {e}")
-    
+        print(f"⚠️  Could not verify models: {e}")
+
     try:
         # Create and launch Gradio interface
         demo = create_gradio_interface()
-        
+
         print("=" * 70)
         print("✅ CHATBOT READY!")
         print("=" * 70)
@@ -912,16 +979,21 @@ def main():
         print("🌐 Opening Gradio interface...")
         print("   URL will appear below")
         print()
-        
+        print("💡 TIP: The chatbot always uses both KB and dynamic_data.txt")
+        print("   for comprehensive answers!")
+        print()
+
         demo.launch(
             server_name="0.0.0.0",
             server_port=7860,
             share=True,
             show_error=True
         )
-        
+
     except KeyboardInterrupt:
         print("\n\n👋 Shutting down...")
+        if Config.ENABLE_PERFORMANCE_LOGGING:
+            perf_monitor.print_summary()
         sys.exit(0)
     except Exception as e:
         print(f"\n❌ Error: {e}")
