@@ -1,34 +1,33 @@
 name: Deploy to Production
-
+ 
 on:
   push:
     branches:
-      - main # Trigger on push to main branch
-  workflow_dispatch: # Allow manual trigger
-
+      - main
+  workflow_dispatch:
+ 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
+ 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
+ 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
+ 
       - name: Install SSH key
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
+ 
       - name: Add server to known hosts
         run: |
-          mkdir -p ~/.ssh
           ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
-
+ 
       - name: Deploy to server
         env:
           SERVER_IP: ${{ secrets.SERVER_IP }}
@@ -36,8 +35,8 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           echo "🚀 Starting deployment to $SERVER_IP..."
-
-          # Copy files to server
+ 
+          # Copy project files
           rsync -avz --delete \
             --exclude '.git' \
             --exclude '.github' \
@@ -47,36 +46,31 @@ jobs:
             --exclude '.env' \
             --exclude 'test_*.py' \
             ./ $SERVER_USER@$SERVER_IP:$DEPLOY_PATH/
-
-          # Run deployment script on server
+ 
+          # Connect to server and deploy
           ssh $SERVER_USER@$SERVER_IP << 'ENDSSH'
             cd ${{ secrets.DEPLOY_PATH }}
-
+ 
             echo "📦 Installing dependencies..."
             source venv/bin/activate
             pip install --upgrade pip
             pip install -r requirements.txt
-
+ 
             echo "🔄 Reloading PM2..."
             pm2 reload ecosystem.config.js --env production
-
+ 
             echo "✅ Deployment complete!"
             pm2 status
           ENDSSH
-
+ 
       - name: Health check
         run: |
           echo "🏥 Running health check..."
-          sleep 10 # Wait for app to start
+          sleep 10
           curl --fail http://${{ secrets.SERVER_IP }}:8000/health || exit 1
           echo "✅ Health check passed!"
-
+ 
       - name: Notify deployment status
         if: always()
         run: |
-          if [ $? -eq 0 ]; then
-            echo "✅ Deployment successful!"
-          else
-            echo "❌ Deployment failed!"
-            exit 1
-          fi
+          echo "🎉 Deployment finished (success or failure message already shown)"
