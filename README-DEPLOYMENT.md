@@ -495,6 +495,10 @@ Since CI/CD needs the app directory to exist first, do manual first deploy:
 # 1. Copy files to server
 scp -r * deploy@YOUR_SERVER_IP:/opt/eg-chatbot/
 
+scp -r * deploy@192.168.2.51:/opt/eg-chatbot/
+
+scp -r "C:\MI Ticket\MI Chat Bot\Scrapper Function\*" deploy@192.168.2.51:/opt/eg-chatbot/
+
 # 2. SSH to server
 ssh deploy@YOUR_SERVER_IP
 
@@ -734,6 +738,8 @@ sudo systemctl start redis-server
 
 # 2. Ollama not running
 ollama list
+
+.
 
 # 3. Missing dependencies
 cd /opt/eg-chatbot
