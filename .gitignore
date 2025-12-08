@@ -74,3 +74,5 @@ Thumbs.db
 # data/
 # data/kb_chunks.json
 # data/faiss_normalized.index
+
+.claude

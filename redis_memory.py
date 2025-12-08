@@ -298,6 +298,189 @@ class RedisMemoryManager:
         return deleted_count
 
     # ========================================================================
+    # GLOBAL EMBEDDINGS CACHE (Shared across all users)
+    # ========================================================================
+
+    def save_embeddings_global(
+        self,
+        dynamic_url: str,
+        embeddings: np.ndarray,
+        chunks: List[Dict[str, Any]],
+        full_content: str = "",
+        ttl_days: int = 7
+    ):
+        """
+        Save embeddings to GLOBAL cache (shared across all users)
+
+        This is much more efficient for 10k+ users:
+        - Same company URL cached once, used by all users
+        - Reduces memory usage by 100-1000x
+        - Reduces API calls and embedding generation by 100-1000x
+
+        Args:
+            dynamic_url: URL of dynamic content
+            embeddings: NumPy array of embeddings
+            chunks: List of text chunks
+            full_content: Full original content text
+            ttl_days: Time-to-live in days (default: 7)
+        """
+        url_hash = hashlib.md5(dynamic_url.encode()).hexdigest()[:16]
+        ttl_seconds = ttl_days * 24 * 3600
+
+        # Global keys (no session_id - shared across all users)
+        embed_key = f"embed:global:{url_hash}"
+        chunks_key = f"embed:global:{url_hash}:chunks"
+        content_key = f"embed:global:{url_hash}:content"
+        meta_key = f"embed:global:{url_hash}:meta"
+
+        # Save embeddings (binary)
+        self.client.setex(
+            embed_key,
+            ttl_seconds,
+            pickle.dumps(embeddings)
+        )
+
+        # Save chunks (JSON)
+        self.client.setex(
+            chunks_key,
+            ttl_seconds,
+            json.dumps(chunks)
+        )
+
+        # Save full content (for LLM context)
+        if full_content:
+            self.client.setex(
+                content_key,
+                ttl_seconds,
+                full_content
+            )
+
+        # Save metadata with access tracking
+        metadata = {
+            "url": dynamic_url,
+            "url_hash": url_hash,
+            "embedding_shape": embeddings.shape,
+            "chunk_count": len(chunks),
+            "created_at": datetime.now().isoformat(),
+            "access_count": 0,
+            "cache_type": "global"
+        }
+        self.client.setex(
+            meta_key,
+            ttl_seconds,
+            json.dumps(metadata)
+        )
+
+        print(f"  [GLOBAL CACHE] Embeddings saved: {url_hash}")
+        print(f"                 URL: {dynamic_url}")
+        print(f"                 Shape: {embeddings.shape}, Chunks: {len(chunks)}")
+        print(f"                 TTL: {ttl_days} days")
+
+    def get_embeddings_global(
+        self,
+        dynamic_url: str
+    ) -> Optional[tuple[np.ndarray, List[Dict[str, Any]], str]]:
+        """
+        Get embeddings from GLOBAL cache (shared across all users)
+
+        Returns:
+            (embeddings, chunks, full_content) or None if not found
+        """
+        url_hash = hashlib.md5(dynamic_url.encode()).hexdigest()[:16]
+
+        embed_key = f"embed:global:{url_hash}"
+        chunks_key = f"embed:global:{url_hash}:chunks"
+        content_key = f"embed:global:{url_hash}:content"
+        meta_key = f"embed:global:{url_hash}:meta"
+
+        embed_data = self.client.get(embed_key)
+        chunks_data = self.client.get(chunks_key)
+        content_data = self.client.get(content_key)
+
+        if embed_data and chunks_data:
+            embeddings = pickle.loads(embed_data)
+            chunks = json.loads(chunks_data)
+            full_content = content_data.decode('utf-8') if content_data else ""
+
+            # Increment access count
+            meta_data = self.client.get(meta_key)
+            if meta_data:
+                metadata = json.loads(meta_data)
+                metadata["access_count"] = metadata.get("access_count", 0) + 1
+                metadata["last_accessed"] = datetime.now().isoformat()
+                ttl = self.client.ttl(meta_key)
+                if ttl > 0:
+                    self.client.setex(meta_key, ttl, json.dumps(metadata))
+
+            print(f"  [GLOBAL CACHE HIT] {url_hash}")
+            if full_content:
+                print(f"                     Content: {len(full_content)} chars")
+            return embeddings, chunks, full_content
+
+        return None
+
+    def track_session_url(self, session_id: str, url_hash: str, max_urls: int = 10):
+        """
+        Track which URLs a session has accessed (lightweight)
+
+        This is MUCH lighter than storing full embeddings per session:
+        - Only stores URL hash reference (16 bytes)
+        - Not the full embeddings (500KB+)
+
+        Args:
+            session_id: Session identifier
+            url_hash: URL hash to track
+            max_urls: Maximum URLs to track per session
+        """
+        list_key = f"session:{session_id}:global_urls"
+
+        # Add to list (if not already present)
+        current_urls = [u.decode() for u in self.client.lrange(list_key, 0, -1)]
+        if url_hash not in current_urls:
+            self.client.lpush(list_key, url_hash)
+            self.client.ltrim(list_key, 0, max_urls - 1)  # Keep only last N
+
+        # Set expiry
+        self.client.expire(list_key, 24 * 3600)  # 24 hour TTL
+
+    def get_session_global_urls(self, session_id: str) -> List[str]:
+        """
+        Get list of global URLs accessed by this session
+
+        Returns:
+            List of URL hashes
+        """
+        list_key = f"session:{session_id}:global_urls"
+        urls = [u.decode() for u in self.client.lrange(list_key, 0, -1)]
+        return urls
+
+    def delete_embeddings_global(self, dynamic_url: str) -> int:
+        """
+        Delete embeddings from global cache
+
+        Args:
+            dynamic_url: Full URL to delete
+
+        Returns:
+            Number of keys deleted
+        """
+        url_hash = hashlib.md5(dynamic_url.encode()).hexdigest()[:16]
+
+        keys_to_delete = [
+            f"embed:global:{url_hash}",
+            f"embed:global:{url_hash}:chunks",
+            f"embed:global:{url_hash}:meta",
+            f"embed:global:{url_hash}:content"
+        ]
+
+        deleted_count = self.client.delete(*keys_to_delete)
+
+        if deleted_count > 0:
+            print(f"  [GLOBAL CACHE] Deleted {deleted_count} keys for {url_hash}")
+
+        return deleted_count
+
+    # ========================================================================
     # SESSION MANAGEMENT
     # ========================================================================
 

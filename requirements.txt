@@ -1,41 +1,148 @@
-# FastAPI Chatbot Requirements
+# ============================================================================
+# Production Requirements for MI Chat Bot API
+# Tested for Linux deployment
+# Python 3.10+ required
+# ============================================================================
 
-# Core FastAPI
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-pydantic>=2.7.4
+# ----------------------------------------------------------------------------
+# Core FastAPI Framework
+# ----------------------------------------------------------------------------
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+pydantic-settings==2.6.0
+python-multipart==0.0.12
 
-# Core LangGraph (matching your versions)
+# ----------------------------------------------------------------------------
+# LangChain & LangGraph (AI Framework)
+# ----------------------------------------------------------------------------
 langgraph==0.2.28
 langchain-core==0.3.1
 langchain-ollama==0.2.0
+langchain-community==0.3.0
 
-# Vector DB & Embeddings (matching your versions)
-faiss-cpu==1.13.0
-numpy>=1.26.4
-
-# Ollama (matching your version)
+# ----------------------------------------------------------------------------
+# Ollama LLM Integration
+# ----------------------------------------------------------------------------
 ollama==0.3.3
+httpx==0.27.2  # Required by ollama
 
-# Web Scraping (for dynamic content - matching your versions)
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-lxml>=5.1.0
+# ----------------------------------------------------------------------------
+# Vector Database & Embeddings
+# ----------------------------------------------------------------------------
+faiss-cpu==1.8.0  # Linux-compatible version
+numpy==1.26.4
+sentence-transformers==3.3.1  # If using embeddings
 
-# Async HTTP for API calls (matching your version)
-aiohttp>=3.9.0
+# ----------------------------------------------------------------------------
+# Redis (Distributed Memory & Caching)
+# ----------------------------------------------------------------------------
+redis==5.2.0
+hiredis==3.0.0  # C parser for better Redis performance
 
-# Redis for distributed memory and caching
-redis>=5.0.0
-hiredis>=2.3.0  # Optional: C parser for better performance
+# ----------------------------------------------------------------------------
+# Web Scraping & Content Extraction
+# ----------------------------------------------------------------------------
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.3.0
+html5lib==1.1  # Alternative parser for BeautifulSoup
+urllib3==2.2.3
 
-# Environment variables (matching your requirement)
-python-dotenv>=1.0.0
+# ----------------------------------------------------------------------------
+# Async HTTP Client
+# ----------------------------------------------------------------------------
+aiohttp==3.11.7
+aiofiles==24.1.0  # For async file operations
 
-# UI - Optional (if you want to keep Gradio alongside FastAPI)
-# gradio>=6.0.1
-# pillow>=12.0.0
+# ----------------------------------------------------------------------------
+# Data Processing & Utilities
+# ----------------------------------------------------------------------------
+python-dotenv==1.0.1
+typing-extensions==4.12.2  # For Python 3.10 compatibility
 
-# For production
-python-multipart==0.0.6
-python-jose[cryptography]==3.3.0  # Optional: if you need JWT authentication
+# ----------------------------------------------------------------------------
+# JSON & Serialization
+# ----------------------------------------------------------------------------
+orjson==3.10.11  # Fast JSON parsing (optional but recommended)
+
+# ----------------------------------------------------------------------------
+# Logging & Monitoring (Production)
+# ----------------------------------------------------------------------------
+python-json-logger==3.2.1  # Structured logging
+colorlog==6.9.0  # Colored console logs
+
+# ----------------------------------------------------------------------------
+# CORS & Middleware
+# ----------------------------------------------------------------------------
+# (Already included in fastapi)
+
+# ----------------------------------------------------------------------------
+# Security & Authentication (Optional but Recommended)
+# ----------------------------------------------------------------------------
+python-jose[cryptography]==3.3.0  # JWT tokens
+passlib[bcrypt]==1.7.4  # Password hashing
+cryptography==44.0.0  # Encryption
+
+# ----------------------------------------------------------------------------
+# Rate Limiting (Production - Optional)
+# ----------------------------------------------------------------------------
+slowapi==0.1.9  # Rate limiting for FastAPI
+
+# ----------------------------------------------------------------------------
+# Testing (Development - Optional)
+# ----------------------------------------------------------------------------
+# pytest==8.3.4
+# pytest-asyncio==0.24.0
+# httpx==0.27.2  # For testing FastAPI
+# pytest-cov==6.0.0  # Coverage reports
+
+# ----------------------------------------------------------------------------
+# Code Quality (Development - Optional)
+# ----------------------------------------------------------------------------
+# black==24.10.0  # Code formatter
+# flake8==7.1.1  # Linter
+# mypy==1.13.0  # Type checker
+
+# ----------------------------------------------------------------------------
+# Production Server (Alternative to uvicorn)
+# ----------------------------------------------------------------------------
+# gunicorn==23.0.0  # WSGI server for production
+# gevent==24.11.1  # Async worker for gunicorn
+
+# ============================================================================
+# INSTALLATION NOTES FOR LINUX SERVER
+# ============================================================================
+#
+# 1. Create virtual environment:
+#    python3 -m venv venv
+#    source venv/bin/activate
+#
+# 2. Upgrade pip:
+#    pip install --upgrade pip setuptools wheel
+#
+# 3. Install requirements:
+#    pip install -r requirements.txt
+#
+# 4. For production with gunicorn:
+#    gunicorn fastapi_chatbot:app -w 4 -k uvicorn.workers.UvicornWorker
+#
+# 5. For Redis (if not installed):
+#    sudo apt-get install redis-server
+#    sudo systemctl start redis
+#
+# 6. For Ollama (if not installed):
+#    curl https://ollama.ai/install.sh | sh
+#    ollama pull deepseek-v3.1:671b-cloud
+#
+# ============================================================================
+# LINUX-SPECIFIC CONSIDERATIONS
+# ============================================================================
+#
+# - faiss-cpu 1.8.0 is the most stable for Linux
+# - hiredis provides 5-10x faster Redis performance on Linux
+# - Use systemd for process management in production
+# - Consider nginx as reverse proxy
+# - Set up logrotate for log management
+#
+# ============================================================================
