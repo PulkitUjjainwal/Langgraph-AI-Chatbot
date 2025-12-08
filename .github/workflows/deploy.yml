@@ -26,7 +26,10 @@ jobs:
  
       - name: Add server to known hosts
         run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
           ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
  
       - name: Deploy to server
         env:
@@ -48,8 +51,8 @@ jobs:
             ./ $SERVER_USER@$SERVER_IP:$DEPLOY_PATH/
  
           # Connect to server and deploy
-          ssh $SERVER_USER@$SERVER_IP << 'ENDSSH'
-            cd ${{ secrets.DEPLOY_PATH }}
+          ssh $SERVER_USER@$SERVER_IP << ENDSSH
+            cd $DEPLOY_PATH
  
             echo "📦 Installing dependencies..."
             source venv/bin/activate
