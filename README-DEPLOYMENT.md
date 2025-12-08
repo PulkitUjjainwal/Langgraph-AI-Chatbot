@@ -739,8 +739,6 @@ sudo systemctl start redis-server
 # 2. Ollama not running
 ollama list
 
-.
-
 # 3. Missing dependencies
 cd /opt/eg-chatbot
 source venv/bin/activate
