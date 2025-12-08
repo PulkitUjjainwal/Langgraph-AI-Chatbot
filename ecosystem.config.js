@@ -67,9 +67,9 @@ module.exports = {
   deploy: {
     production: {
       user: 'deploy', // SSH user
-      host: ['your-server-ip'], // Replace with your server IP
+      host: ['chatbot.exportgenius.in'], // Replace with your server IP
       ref: 'origin/main', // Git branch
-      repo: 'git@github.com:yourusername/eg-chatbot.git', // Replace with your repo
+      repo: 'https://github.com/Export-genius/EG-Chatbot_API.git', // Replace with your repo
       path: '/opt/eg-chatbot',
       'post-deploy':
         'source venv/bin/activate && pip install -r requirements.txt && pm2 reload ecosystem.config.js --env production',
