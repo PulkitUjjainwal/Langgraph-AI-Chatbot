@@ -1,12 +1,14 @@
 """
 LangGraph Sales Agent with RAG + Tool Calling - FastAPI Version
 
-API Endpoints:
-    POST /chat - Send a message and get response
-    POST /chat/stream - Stream chatbot response
-    POST /reset - Reset conversation for a session
-    GET /history/{session_id} - Get conversation history
-    GET /health - Health check
+API Endpoints (All under /api prefix):
+    POST /api/chat - Send a message and get response
+    POST /api/chat/stream - Stream chatbot response
+    POST /api/init - Initialize session with dynamic URL
+    POST /api/reset - Reset conversation for a session
+    GET /api/history/{session_id} - Get conversation history
+    GET /api/health - Health check
+    GET /api/redis/stats - Redis statistics
 
 Request Format:
     {
@@ -38,7 +40,7 @@ from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -1737,12 +1739,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Create API router with /api prefix
+router = APIRouter(prefix="/api")
+
 
 # ============================================================================
 # API ENDPOINTS
 # ============================================================================
 
-@app.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     """
     Send a message and get response
@@ -1785,7 +1790,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 
-@app.post("/chat/stream")
+@router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     """
     Stream chatbot response (Server-Sent Events)
@@ -1796,7 +1801,7 @@ async def chat_stream(request: ChatRequest):
     raise HTTPException(status_code=501, detail="Streaming not yet implemented")
 
 
-@app.post("/init", response_model=InitResponse)
+@router.post("/init", response_model=InitResponse)
 async def init_session(request: InitRequest):
     """
     Initialize session: Pre-cache dynamic URL and generate suggested questions
@@ -1949,7 +1954,7 @@ async def init_session(request: InitRequest):
         )
 
 
-@app.post("/reset")
+@router.post("/reset")
 async def reset_session(request: ResetRequest):
     """Reset conversation history for a session"""
     if not chatbot_manager:
@@ -1965,7 +1970,7 @@ async def reset_session(request: ResetRequest):
     )
 
 
-@app.get("/history/{session_id}", response_model=HistoryResponse)
+@router.get("/history/{session_id}", response_model=HistoryResponse)
 async def get_history(session_id: str, limit: int = 10):
     """Get conversation history for a session"""
     if not chatbot_manager:
@@ -1980,7 +1985,7 @@ async def get_history(session_id: str, limit: int = 10):
     )
 
 
-@app.get("/health", response_model=HealthResponse)
+@router.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint with Redis stats"""
     ollama_status = "healthy"
@@ -2010,7 +2015,7 @@ async def health_check():
     )
 
 
-@app.get("/redis/stats")
+@router.get("/redis/stats")
 async def redis_stats():
     """Get Redis cache statistics"""
     if not redis_manager:
@@ -2033,13 +2038,19 @@ async def root():
         "message": "Export Genius AI Chatbot API",
         "version": "1.0.0",
         "endpoints": {
-            "POST /chat": "Send a message",
-            "POST /reset": "Reset session",
-            "GET /history/{session_id}": "Get conversation history",
-            "GET /health": "Health check",
+            "POST /api/chat": "Send a message",
+            "POST /api/init": "Initialize session with dynamic URL",
+            "POST /api/reset": "Reset session",
+            "GET /api/history/{session_id}": "Get conversation history",
+            "GET /api/health": "Health check",
+            "GET /api/redis/stats": "Redis statistics",
             "GET /docs": "Interactive API documentation"
         }
     }
+
+
+# Include the API router
+app.include_router(router)
 
 
 # ============================================================================

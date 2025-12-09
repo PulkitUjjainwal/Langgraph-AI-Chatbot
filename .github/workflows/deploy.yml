@@ -70,7 +70,7 @@ jobs:
         run: |
           echo "🏥 Running health check..."
           sleep 10
-          curl --fail http://${{ secrets.SERVER_IP }}:8000/health || exit 1
+          curl --fail http://${{ secrets.SERVER_IP }}:8000/api/health || exit 1
           echo "✅ Health check passed!"
  
       - name: Notify deployment status
