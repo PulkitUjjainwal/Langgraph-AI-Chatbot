@@ -37,7 +37,10 @@ module.exports = {
         REDIS_PORT: 6379,
         REDIS_DB: 0,
         LLM_MODEL: 'deepseek-v3.1:671b-cloud',
-        OLLAMA_BASE_URL: 'http://localhost:11434',
+        EMBEDDING_MODEL: 'nomic-embed-text',
+        // Cloud API for LLM (add your API key via .env or secrets)
+        OLLAMA_BASE_URL: 'https://ollama.com',
+        // OLLAMA_API_KEY should be set via .env file on server
       },
 
       // Logging

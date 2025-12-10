@@ -25,11 +25,16 @@ import json
 import time
 import uuid
 import re
+import os
 from pathlib import Path
 from typing import TypedDict, Annotated, Sequence, Dict, Any, Optional, List
 import operator
 import sys
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 import numpy as np
 import faiss
@@ -52,6 +57,8 @@ from redis_memory import RedisMemoryManager, RedisCheckpointSaver
 
 # Import hostility detection
 from hostility_detector import HostilityDetector, HostilityConfig
+
+print("[DEBUG] All imports completed successfully!")
 
 # Import optional dependencies
 try:
@@ -77,8 +84,8 @@ class Config:
     CHUNKS_FILE = DATA_DIR / "kb_chunks.json"
     FAISS_INDEX_FILE = DATA_DIR / "faiss_normalized.index"
 
-    EMBEDDING_MODEL = "nomic-embed-text"
-    LLM_MODEL = "deepseek-v3.1:671b-cloud"
+    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+    LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v3.1:671b-cloud")
 
     TOP_K_RESULTS = 5
     MAX_CHUNK_CHARS = 800
@@ -92,16 +99,85 @@ class Config:
     DYNAMIC_MAX_CHUNKS = 10
     ENABLE_PERFORMANCE_LOGGING = True
 
+    # Ollama Configuration
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", None)
+
     # Redis Configuration
-    REDIS_HOST = "localhost"
-    REDIS_PORT = 6379
-    REDIS_DB = 0
-    REDIS_PASSWORD = None
-    REDIS_TTL_DAYS = 7
+    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+    REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+    REDIS_TTL_DAYS = int(os.getenv("REDIS_TTL_DAYS", "7"))
 
     # Session management
     SESSION_TIMEOUT_MINUTES = 30
     MAX_SESSIONS = 1000
+
+
+# ============================================================================
+# OLLAMA CLIENT HELPER - Lazy wrapper to avoid blocking on import
+# ============================================================================
+
+class LazyOllamaClient:
+    """Wrapper that creates Ollama client only when methods are called"""
+
+    def __init__(self):
+        self._local_client = None  # For embeddings
+        self._cloud_client = None  # For LLM calls
+
+    def _get_local_client(self):
+        """Lazy initialize the local Ollama client (for embeddings)"""
+        if self._local_client is None:
+            self._local_client = ollama.Client(host="http://localhost:11434")
+        return self._local_client
+
+    def _get_cloud_client(self):
+        """Lazy initialize the cloud Ollama client (for LLM)"""
+        if self._cloud_client is None:
+            if Config.OLLAMA_API_KEY:
+                self._cloud_client = ollama.Client(
+                    host=Config.OLLAMA_BASE_URL,
+                    headers={'Authorization': f'Bearer {Config.OLLAMA_API_KEY}'}
+                )
+            else:
+                # Fallback to local if no API key
+                self._cloud_client = ollama.Client(host="http://localhost:11434")
+        return self._cloud_client
+
+    def embeddings(self, **kwargs):
+        """Forward embeddings call to LOCAL client (uses /api/embed for compatibility)"""
+        # Convert prompt parameter to input for embed() API
+        if 'prompt' in kwargs:
+            kwargs['input'] = kwargs.pop('prompt')
+
+        # Call local embed() API
+        response = self._get_local_client().embed(**kwargs)
+
+        # Convert embeddings array to single embedding for backward compatibility
+        if 'embeddings' in response and len(response['embeddings']) > 0:
+            response['embedding'] = response['embeddings'][0]
+
+        return response
+
+    def list(self):
+        """Forward list call to local client"""
+        return self._get_local_client().list()
+
+    def pull(self, model_name):
+        """Forward pull call to local client"""
+        return self._get_local_client().pull(model_name)
+
+def get_ollama_client():
+    """Get the lazy Ollama client wrapper"""
+    return _lazy_ollama_client
+
+def get_ollama_cloud_client():
+    """Get the cloud Ollama client for LLM calls"""
+    return _lazy_ollama_client._get_cloud_client()
+
+# Create single instance
+_lazy_ollama_client = LazyOllamaClient()
 
 
 # ============================================================================
@@ -402,7 +478,7 @@ class DynamicContentManager:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
                 None,
-                lambda: ollama.embeddings(
+                lambda: get_ollama_client().embeddings(
                     model=Config.EMBEDDING_MODEL,
                     prompt=chunk_text
                 )['embedding']
@@ -465,7 +541,7 @@ class KnowledgeBaseRetriever:
         if cache_key in self.embedding_cache:
             query_embedding = self.embedding_cache[cache_key]
         else:
-            response = ollama.embeddings(
+            response = get_ollama_client().embeddings(
                 model=Config.EMBEDDING_MODEL,
                 prompt=query
             )
@@ -541,7 +617,7 @@ class HybridRetriever:
         index.add(embeddings)
 
         # Generate query embedding
-        response = ollama.embeddings(
+        response = get_ollama_client().embeddings(
             model=Config.EMBEDDING_MODEL,
             prompt=query
         )
@@ -955,14 +1031,27 @@ def score_response_quality(response: str, query: str) -> dict:
 def create_chatbot_node():
     """Create chatbot node with SMART CONTEXT INJECTION"""
 
-    llm = ChatOllama(
-        model=Config.LLM_MODEL,
-        temperature=Config.TEMPERATURE,
-        top_p=Config.TOP_P,
-        top_k=Config.TOP_K,
-        num_predict=Config.NUM_PREDICT,
-        num_ctx=Config.NUM_CTX,
-    )
+    # Configure LLM with API key if available
+    llm_kwargs = {
+        'model': Config.LLM_MODEL,
+        'temperature': Config.TEMPERATURE,
+        'top_p': Config.TOP_P,
+        'top_k': Config.TOP_K,
+        'num_predict': Config.NUM_PREDICT,
+        'num_ctx': Config.NUM_CTX,
+    }
+
+    # Create custom ollama client for cloud API with authentication
+    if Config.OLLAMA_API_KEY:
+        cloud_client = ollama.Client(
+            host=Config.OLLAMA_BASE_URL,
+            headers={'Authorization': f'Bearer {Config.OLLAMA_API_KEY}'}
+        )
+        llm_kwargs['client'] = cloud_client
+    else:
+        llm_kwargs['base_url'] = Config.OLLAMA_BASE_URL
+
+    llm = ChatOllama(**llm_kwargs)
 
     llm_with_tools = llm.bind_tools(all_tools)
 
@@ -1300,14 +1389,26 @@ Remember: You're having a natural business conversation, not reading a sales bro
         print(f"  [SMART] Using dynamic temperature: {optimal_temp} for {smart_query_type} query")
 
         # Create dynamic LLM with optimal temperature for this query type
-        llm_dynamic = ChatOllama(
-            model=Config.LLM_MODEL,
-            temperature=optimal_temp,  # Dynamic temperature based on query type
-            top_p=Config.TOP_P,
-            top_k=Config.TOP_K,
-            num_predict=Config.NUM_PREDICT,
-            num_ctx=Config.NUM_CTX,
-        )
+        llm_dynamic_kwargs = {
+            'model': Config.LLM_MODEL,
+            'temperature': optimal_temp,  # Dynamic temperature based on query type
+            'top_p': Config.TOP_P,
+            'top_k': Config.TOP_K,
+            'num_predict': Config.NUM_PREDICT,
+            'num_ctx': Config.NUM_CTX,
+        }
+
+        # Create custom ollama client for cloud API with authentication
+        if Config.OLLAMA_API_KEY:
+            cloud_client = ollama.Client(
+                host=Config.OLLAMA_BASE_URL,
+                headers={'Authorization': f'Bearer {Config.OLLAMA_API_KEY}'}
+            )
+            llm_dynamic_kwargs['client'] = cloud_client
+        else:
+            llm_dynamic_kwargs['base_url'] = Config.OLLAMA_BASE_URL
+
+        llm_dynamic = ChatOllama(**llm_dynamic_kwargs)
 
         try:
             response = llm_dynamic.invoke(llm_messages)
@@ -1574,7 +1675,22 @@ How can Export Genius help me find new suppliers or customers?
 What APIs and integrations does Export Genius offer?"""
 
         try:
-            llm = ChatOllama(model=Config.LLM_MODEL, temperature=0.7)
+            llm_kwargs_init = {
+                'model': Config.LLM_MODEL,
+                'temperature': 0.7,
+            }
+
+            # Create custom ollama client for cloud API with authentication
+            if Config.OLLAMA_API_KEY:
+                cloud_client = ollama.Client(
+                    host=Config.OLLAMA_BASE_URL,
+                    headers={'Authorization': f'Bearer {Config.OLLAMA_API_KEY}'}
+                )
+                llm_kwargs_init['client'] = cloud_client
+            else:
+                llm_kwargs_init['base_url'] = Config.OLLAMA_BASE_URL
+
+            llm = ChatOllama(**llm_kwargs_init)
             response = await asyncio.to_thread(
                 llm.invoke,
                 [HumanMessage(content=prompt)]
@@ -1647,8 +1763,100 @@ What APIs and integrations does Export Genius offer?"""
 
 # Global variables
 chatbot_manager: Optional[ChatbotManager] = None
+redis_manager: Optional[RedisMemoryManager] = None
 hostility_detector: Optional[HostilityDetector] = None
 app_start_time: float = 0
+_initialization_lock = False
+
+async def ensure_initialized():
+    """Lazy initialization on first request"""
+    global chatbot_manager, redis_manager, hostility_detector, _initialization_lock, app_start_time
+
+    if chatbot_manager is not None:
+        return  # Already initialized
+
+    if _initialization_lock:
+        # Another request is initializing, wait
+        import asyncio
+        for _ in range(50):  # Wait up to 5 seconds
+            await asyncio.sleep(0.1)
+            if chatbot_manager is not None:
+                return
+        raise Exception("Initialization timeout")
+
+    _initialization_lock = True
+    try:
+        print("\n" + "=" * 70)
+        print("INITIALIZING CHATBOT (First Request)")
+        print("=" * 70)
+
+        app_start_time = time.time()
+
+        # Initialize Redis
+        print("\nConnecting to Redis...")
+        redis_manager = RedisMemoryManager(
+            host=Config.REDIS_HOST,
+            port=Config.REDIS_PORT,
+            db=Config.REDIS_DB,
+            password=Config.REDIS_PASSWORD,
+            ttl_days=Config.REDIS_TTL_DAYS
+        )
+
+        # Initialize KB
+        print("Loading Knowledge Base...")
+        kb_retriever = KnowledgeBaseRetriever()
+
+        # Initialize hostility detector
+        if HostilityConfig.ENABLED:
+            hostility_detector = HostilityDetector(redis_manager)
+            print("[OK] Hostility detection enabled")
+
+        # Initialize chatbot
+        chatbot_manager = ChatbotManager(kb_retriever, redis_manager, hostility_detector)
+
+        print("\n" + "=" * 70)
+        print("CHATBOT READY!")
+        print("=" * 70 + "\n")
+
+    finally:
+        _initialization_lock = False
+
+
+def check_and_pull_ollama_models():
+    """Check if required Ollama models are available, pull if missing"""
+    required_models = [Config.EMBEDDING_MODEL, Config.LLM_MODEL]
+
+    sys.stderr.write("\nChecking Ollama models...\n")
+    sys.stderr.flush()
+
+    try:
+        # Get list of installed models
+        installed_models = get_ollama_client().list()
+        installed_names = [model['name'] for model in installed_models.get('models', [])]
+
+        for model_name in required_models:
+            # Check if model exists (handle both 'model:tag' and 'model' formats)
+            model_base = model_name.split(':')[0]
+            is_installed = any(model_base in name for name in installed_names)
+
+            if is_installed:
+                sys.stderr.write(f"   ✓ {model_name} - already installed\n")
+                sys.stderr.flush()
+            else:
+                sys.stderr.write(f"   ⚠ {model_name} - not found, pulling now...\n")
+                sys.stderr.flush()
+
+                # Pull the model
+                get_ollama_client().pull(model_name)
+                sys.stderr.write(f"   ✓ {model_name} - pulled successfully\n")
+                sys.stderr.flush()
+
+    except Exception as e:
+        sys.stderr.write(f"   ⚠ Warning: Could not verify Ollama models: {e}\n")
+        sys.stderr.write(f"   Please ensure models are installed manually:\n")
+        sys.stderr.write(f"      ollama pull {Config.EMBEDDING_MODEL}\n")
+        sys.stderr.write(f"      ollama pull {Config.LLM_MODEL}\n")
+        sys.stderr.flush()
 
 
 @asynccontextmanager
@@ -1665,6 +1873,9 @@ async def lifespan(app: FastAPI):
     app_start_time = time.time()
 
     try:
+        # Check and pull Ollama models if needed (disabled for cloud API)
+        # check_and_pull_ollama_models()
+
         # Initialize Redis connection
         sys.stderr.write("\nConnecting to Redis...\n")
         sys.stderr.flush()
@@ -1723,12 +1934,15 @@ async def lifespan(app: FastAPI):
         raise
 
 
+print("[DEBUG] Creating FastAPI app...")
 app = FastAPI(
     title="Export Genius AI Chatbot API",
     description="LangGraph-powered chatbot with RAG and dynamic content fetching",
-    version="1.0.0",
-    lifespan=lifespan
+    version="1.0.0"
+    # Lifespan temporarily disabled for debugging
+    # lifespan=lifespan
 )
+print("[DEBUG] FastAPI app created!")
 
 # CORS middleware
 app.add_middleware(
@@ -1757,8 +1971,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     - **dynamic_url**: Optional URL to fetch dynamic content from
     - **ip_address**: Optional IP address of the client
     """
-    if not chatbot_manager:
-        raise HTTPException(status_code=503, detail="Chatbot not initialized")
+    # Lazy initialization on first request
+    await ensure_initialized()
 
     # Log IP address if provided
     if request.ip_address:
@@ -1987,28 +2201,15 @@ async def get_history(session_id: str, limit: int = 10):
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint with Redis stats"""
-    ollama_status = "healthy"
-    try:
-        ollama.list()
-    except Exception:
-        ollama_status = "unavailable"
-
-    # Check Redis
-    redis_status = "healthy"
-    try:
-        if redis_manager:
-            redis_manager.client.ping()
-    except Exception:
-        redis_status = "unavailable"
-
-    kb_loaded = chatbot_manager is not None and chatbot_manager.kb_retriever is not None
+    """Health check endpoint - works without full initialization"""
+    # Simplified health check that doesn't require Ollama/Redis
+    kb_loaded = chatbot_manager is not None
     active_sessions = chatbot_manager.get_active_sessions() if chatbot_manager else 0
-    uptime = time.time() - app_start_time
+    uptime = time.time() - app_start_time if app_start_time > 0 else 0
 
     return HealthResponse(
-        status="healthy" if kb_loaded and ollama_status == "healthy" and redis_status == "healthy" else "degraded",
-        ollama_status=f"{ollama_status} | Redis: {redis_status}",
+        status="healthy" if kb_loaded else "starting",
+        ollama_status="not_checked",
         kb_loaded=kb_loaded,
         active_sessions=active_sessions,
         uptime_seconds=uptime
@@ -2050,7 +2251,9 @@ async def root():
 
 
 # Include the API router
+print("[DEBUG] About to include router...")
 app.include_router(router)
+print("[DEBUG] Router included successfully!")
 
 
 # ============================================================================
