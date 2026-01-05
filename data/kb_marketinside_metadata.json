@@ -1,0 +1,11 @@
+{
+  "site_id": "marketinside",
+  "site_name": "Market Inside Data",
+  "embedding_model": "nomic-embed-text",
+  "embedding_dimension": 768,
+  "total_chunks": 208,
+  "index_type": "IndexFlatIP (cosine similarity)",
+  "normalized": true,
+  "updated_at": "2025-12-19T17:08:07.811520",
+  "api_data_added": true
+}

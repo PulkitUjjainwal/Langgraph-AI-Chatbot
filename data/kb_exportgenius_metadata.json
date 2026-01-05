@@ -1,0 +1,12 @@
+{
+  "site_id": "exportgenius",
+  "site_name": "Export Genius",
+  "base_url": "https://www.exportgenius.in",
+  "embedding_model": "nomic-embed-text",
+  "embedding_dimension": 768,
+  "total_chunks": 378,
+  "index_type": "IndexFlatIP (cosine similarity)",
+  "normalized": true,
+  "updated_at": "2025-12-23T19:39:57.053717",
+  "includes_api_data": true
+}

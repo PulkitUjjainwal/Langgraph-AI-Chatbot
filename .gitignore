@@ -75,4 +75,22 @@ Thumbs.db
 # data/kb_chunks.json
 # data/faiss_normalized.index
 
+# Project specific
+data/conversation_history/
+data/backup*/
+data/api_data_*.json
+data/scraped_pages_*.json
+nul
+test_output.txt
+
+# Redis dump
+dump.rdb
+
+# Certificates and keys
+*.pem
+*.key
+*.crt
+*.cer
+
+# Claude Code
 .claude

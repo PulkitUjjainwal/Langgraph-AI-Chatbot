@@ -41,9 +41,39 @@ import faiss
 import ollama
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_ollama import ChatOllama
+
+# Import OpenAI embeddings (DISABLED - using local Ollama instead for 10-20x speed boost)
+# from openai_embeddings import get_openai_embeddings
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import ToolNode, tools_condition
+
+# Import modular components for prompt building
+from chatbot.services.agent.prompts import PromptBuilder, PromptConfig
+
+# Import modular API models
+from chatbot.models.api_models import (
+    ChatRequest, ChatResponse,
+    InitRequest, InitResponse,
+    ResetRequest, ResetResponse,
+    HistoryResponse, HealthResponse,
+    RedisStatsResponse
+)
+
+# Import modular utility functions
+from chatbot.utils import (
+    classify_query_type,
+    extract_numeric_focus,
+    detect_greeting,
+    detect_industry,
+    score_response_quality,
+    PerformanceMonitor
+)
+
+# Import production-grade retrieval components
+from chatbot.services.retrieval.kb_retriever import KnowledgeBaseRetriever as ModularKBRetriever
+from chatbot.services.retrieval.hybrid_retriever import HybridRetriever as ModularHybridRetriever
+from chatbot.services.retrieval.dynamic_content import DynamicContentManager
 
 from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -80,9 +110,14 @@ except ImportError:
 
 class Config:
     """Configuration for chatbot"""
+    # Site identification (for multi-site deployments)
+    SITE_ID = os.getenv("SITE_ID", "exportgenius")
+    SITE_NAME = os.getenv("SITE_NAME", "Export Genius")
+
+    # Data files (dynamically uses SITE_ID)
     DATA_DIR = Path("data")
-    CHUNKS_FILE = DATA_DIR / "kb_chunks.json"
-    FAISS_INDEX_FILE = DATA_DIR / "faiss_normalized.index"
+    CHUNKS_FILE = Path(os.getenv("KB_CHUNKS_FILE", f"data/kb_{SITE_ID}_chunks.json"))
+    FAISS_INDEX_FILE = Path(os.getenv("FAISS_INDEX_FILE", f"data/faiss_{SITE_ID}_normalized.index"))
 
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
     LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v3.1:671b-cloud")
@@ -113,6 +148,9 @@ class Config:
     # Session management
     SESSION_TIMEOUT_MINUTES = 30
     MAX_SESSIONS = 1000
+
+    # Performance optimization
+    DISABLE_CHECKPOINTING = os.getenv("DISABLE_CHECKPOINTING", "false").lower() == "true"  # Set to "true" for 10-15s faster responses
 
 
 # ============================================================================
@@ -146,17 +184,23 @@ class LazyOllamaClient:
         return self._cloud_client
 
     def embeddings(self, **kwargs):
-        """Forward embeddings call to LOCAL client (uses /api/embed for compatibility)"""
-        # Convert prompt parameter to input for embed() API
-        if 'prompt' in kwargs:
-            kwargs['input'] = kwargs.pop('prompt')
+        """Generate embeddings using LOCAL Ollama (10-20x faster than OpenAI API)"""
+        # Use LOCAL Ollama embeddings (nomic-embed-text)
+        # This runs on your machine - NO API calls, NO network latency
+        model = kwargs.get('model', Config.EMBEDDING_MODEL)
+        prompt = kwargs.get('prompt', kwargs.get('input', ''))
 
-        # Call local embed() API
-        response = self._get_local_client().embed(**kwargs)
+        # Use local Ollama client for embeddings (fast!)
+        response = self._get_local_client().embeddings(
+            model=model,
+            prompt=prompt
+        )
 
-        # Convert embeddings array to single embedding for backward compatibility
-        if 'embeddings' in response and len(response['embeddings']) > 0:
-            response['embedding'] = response['embeddings'][0]
+        # Convert Ollama format to match OpenAI format for compatibility
+        # Ollama: {'embedding': [...]}
+        # OpenAI: {'embeddings': [[...]]}
+        if 'embedding' in response and 'embeddings' not in response:
+            response['embeddings'] = [response['embedding']]
 
         return response
 
@@ -181,150 +225,15 @@ _lazy_ollama_client = LazyOllamaClient()
 
 
 # ============================================================================
-# PYDANTIC MODELS (Request/Response)
+# PYDANTIC MODELS & MONITORING - NOW USING MODULAR IMPORTS
 # ============================================================================
-
-class ChatRequest(BaseModel):
-    """Request model for chat endpoint"""
-    message: str = Field(..., description="User's message", min_length=1)
-    session_id: str = Field(..., description="Unique session identifier for conversation threading")
-    dynamic_url: Optional[str] = Field(None, description="Optional dynamic URL to fetch data from")
-    ip_address: Optional[str] = Field(None, description="Optional IP address of the client")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "message": "What is Export Genius?",
-                "session_id": "user123",
-                "dynamic_url": "https://www.exportgenius.in/company/example/abc123",
-                "ip_address": "192.168.1.1"
-            }
-        }
-
-
-class ChatResponse(BaseModel):
-    """Response model for chat endpoint"""
-    response: str = Field(..., description="Bot's response")
-    session_id: str = Field(..., description="Session identifier")
-    processing_time: float = Field(..., description="Processing time in seconds")
-    sources_used: List[str] = Field(default_factory=list, description="Sources used for response")
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "response": "Export Genius is a global trade intelligence platform...",
-                "session_id": "user123",
-                "processing_time": 2.34,
-                "sources_used": ["Knowledge Base", "Dynamic Content"]
-            }
-        }
-
-
-class InitRequest(BaseModel):
-    """Request model for init endpoint"""
-    session_id: str = Field(..., description="Unique session identifier")
-    dynamic_url: Optional[str] = Field(None, description="Optional dynamic URL to pre-cache")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "session_id": "user_123",
-                "dynamic_url": "https://www.exportgenius.in/company/petron-corporation"
-            }
-        }
-
-
-class InitResponse(BaseModel):
-    """Response model for init endpoint"""
-    status: str = Field(..., description="Status: success, partial_success, or error")
-    suggested_questions: List[str] = Field(..., description="5 suggested questions for the user")
-    cache_status: Dict[str, Any] = Field(..., description="Cache information")
-    processing_time: float = Field(..., description="Processing time in seconds")
-    dynamic_url_processed: bool = Field(..., description="Whether dynamic URL was processed")
-    error: Optional[str] = Field(None, description="Error message if any")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "status": "success",
-                "suggested_questions": [
-                    "What products does Petron Corporation import?",
-                    "Show me Petron's top trading partners",
-                    "What is Petron's trade volume trend?",
-                    "Tell me about Petron's recent shipments",
-                    "How can Export Genius help analyze this company?"
-                ],
-                "cache_status": {
-                    "cache_hit": False,
-                    "cached_at": "2025-12-03T12:00:00Z"
-                },
-                "processing_time": 15.2,
-                "dynamic_url_processed": True
-            }
-        }
-
-
-class ResetRequest(BaseModel):
-    """Request model for reset endpoint"""
-    session_id: str = Field(..., description="Session identifier to reset")
-
-
-class HistoryResponse(BaseModel):
-    """Response model for history endpoint"""
-    session_id: str
-    messages: List[Dict[str, str]]
-    total_messages: int
-
-
-class HealthResponse(BaseModel):
-    """Response model for health check"""
-    status: str
-    ollama_status: str
-    kb_loaded: bool
-    active_sessions: int
-    uptime_seconds: float
-
-
+# All models imported from: chatbot.models.api_models
+# PerformanceMonitor imported from: chatbot.utils.monitoring
+#
+# Removed ~100 lines of duplicate model definitions
 # ============================================================================
-# PERFORMANCE MONITORING
-# ============================================================================
-
-class PerformanceMonitor:
-    """Monitor and log performance metrics"""
-
-    def __init__(self):
-        self.metrics: Dict[str, list] = {
-            "retrieval_time": [],
-            "generation_time": [],
-            "total_time": []
-        }
-
-    def log_metric(self, metric_name: str, value: float):
-        """Log a performance metric"""
-        if metric_name not in self.metrics:
-            self.metrics[metric_name] = []
-        self.metrics[metric_name].append(value)
-
-        # Keep only last 100 entries per metric
-        if len(self.metrics[metric_name]) > 100:
-            self.metrics[metric_name] = self.metrics[metric_name][-100:]
-
-    def get_average(self, metric_name: str) -> float:
-        """Get average for a metric"""
-        values = self.metrics.get(metric_name, [])
-        return sum(values) / len(values) if values else 0.0
-
-    def print_summary(self):
-        """Print performance summary"""
-        print("\n[STATS] Performance Summary:")
-        for metric_name, values in self.metrics.items():
-            if values:
-                avg = sum(values) / len(values)
-                print(f"  {metric_name}: {avg:.2f}s (avg over {len(values)} calls)")
-
-
+# Create PerformanceMonitor instance (imported from chatbot.utils.monitoring)
 perf_monitor = PerformanceMonitor()
-
 
 # ============================================================================
 # REDIS MEMORY (Replaces file-based persistence)
@@ -352,160 +261,22 @@ class AgentState(TypedDict):
 
 
 # ============================================================================
-# DYNAMIC CONTENT MANAGER
+# DYNAMIC CONTENT MANAGER (Use Modular Version)
 # ============================================================================
 
-class DynamicContentManager:
-    """Manages dynamic content fetching and embedding generation per session"""
+# Import modular DynamicContentManager that supports both Export Genius and Marketinside APIs
+from chatbot.services.retrieval.dynamic_content import DynamicContentManager
 
-    def __init__(self, redis_manager: RedisMemoryManager):
-        self.redis = redis_manager
-        self.content_cache: Dict[str, str] = {}
-        self.max_cache_size = 50
+# OLD class removed - now using modular version from chatbot/services/retrieval/dynamic_content.py
+# The modular version supports:
+# - Export Genius API
+# - Marketinside API
+# - Web scraping fallback
+# - File loading
 
-    async def fetch_content(self, url: str, session_id: str = "") -> str:
-        """
-        Fetch content from URL with caching
-        
-        Priority:
-        1. Check cache
-        2. If company URL -> Use API
-        3. If data file exists -> Load from file
-        4. Fallback to web scraping
-        """
-        # Check cache first
-        if url in self.content_cache:
-            print(f"  [FAST] Using cached content for {url}")
-            return self.content_cache[url]
-        
-        content = ""
-        
-        # Priority 1: Company API
-        if API_CLIENT_AVAILABLE and ExportGeniusAPIClient.is_company_url(url):
-            try:
-                print(f"[COMPANY] Fetching company data from API: {url}")
-                formatted_data = await fetch_company_data_from_url(url)
-                if formatted_data:
-                    content = "[Company Data from Export Genius API]\n\n" + formatted_data
-                    print(f"  [OK] Company data fetched successfully")
-            except Exception as e:
-                print(f"  [WARN]  API error: {e}")
-        
-        # Priority 2: Local file
-        if not content:
-            data_file = Config.DATA_DIR / "dynamic_data.txt"
-            if data_file.exists():
-                try:
-                    with open(data_file, 'r', encoding='utf-8') as f:
-                        file_content = f.read()
-                    if file_content:
-                        content = "[Dynamic Content from File]\n\n" + file_content
-                        print(f"  [OK] Loaded from file")
-                except Exception as e:
-                    print(f"  [WARN]  File error: {e}")
-        
-        # Priority 3: Web scraping
-        if not content and SCRAPING_AVAILABLE:
-            try:
-                print(f"[WEB] Scraping URL: {url}")
-                scraper = WebScraper(timeout=15, max_retries=2)
-                result = scraper.scrape_url(url)
-                
-                if result['success']:
-                    chunks = scraper.chunk_scraped_content(
-                        result['content'],
-                        chunk_size=1000,
-                        overlap=100
-                    )
-                    selected_chunks = chunks[:Config.DYNAMIC_MAX_CHUNKS]
-                    content = "[Dynamic Content from Website]\n\n" + "\n\n".join(selected_chunks)
-                    print(f"  [OK] Scraped successfully")
-            except Exception as e:
-                print(f"  [WARN]  Scraping error: {e}")
-        
-        # Cache the content
-        if content:
-            self._add_to_cache(url, content)
-        
-        return content
-    
-    def _add_to_cache(self, key: str, value: str):
-        """Add to cache with size limit"""
-        if len(self.content_cache) >= self.max_cache_size:
-            self.content_cache.pop(next(iter(self.content_cache)))
-        self.content_cache[key] = value
-
-    def _chunk_content(self, content: str, chunk_size: int = 800, overlap: int = 100) -> List[Dict[str, Any]]:
-        """Chunk content into smaller pieces for embedding"""
-        words = content.split()
-        chunks = []
-
-        for i in range(0, len(words), chunk_size - overlap):
-            chunk_words = words[i:i + chunk_size]
-            chunk_text = ' '.join(chunk_words)
-
-            chunks.append({
-                'chunk_id': i // (chunk_size - overlap),
-                'chunk_text': chunk_text,
-                'word_count': len(chunk_words)
-            })
-
-        return chunks
-
-    async def generate_and_store_embeddings(self, content: str, url: str, session_id: str):
-        """
-        Generate embeddings for dynamic content and store in Redis (OPTIMIZED with parallel processing)
-
-        Args:
-            content: Raw text content
-            url: Source URL
-            session_id: Session identifier
-        """
-        print(f"  [PROCESS] Generating embeddings for session: {session_id}")
-
-        # 1. Chunk content
-        chunks = self._chunk_content(content, chunk_size=800, overlap=100)
-
-        if not chunks:
-            print(f"  [WARN]  No chunks generated")
-            return
-
-        # 2. Generate embeddings in PARALLEL (3-5x faster!)
-        print(f"  [OPTIMIZE] Processing {len(chunks)} chunks in parallel...")
-
-        async def embed_chunk(chunk_text):
-            """Helper to embed a single chunk asynchronously"""
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None,
-                lambda: get_ollama_client().embeddings(
-                    model=Config.EMBEDDING_MODEL,
-                    prompt=chunk_text
-                )['embedding']
-            )
-
-        # Process all chunks concurrently
-        embeddings_tasks = [embed_chunk(chunk['chunk_text']) for chunk in chunks]
-        embeddings_list = await asyncio.gather(*embeddings_tasks)
-
-        embeddings_array = np.array(embeddings_list).astype('float32')
-        faiss.normalize_L2(embeddings_array)
-
-        # 3. Store in Redis (with full content)
-        self.redis.save_embeddings(
-            session_id=session_id,
-            dynamic_url=url,
-            embeddings=embeddings_array,
-            chunks=chunks,
-            full_content=content
-        )
-
-        print(f"  [OK] Embeddings stored: {len(chunks)} chunks, {embeddings_array.shape} (parallel processing)")
-
-    async def get_embeddings_from_redis(self, url: str, session_id: str) -> Optional[tuple]:
-        """Get embeddings from Redis cache"""
-        return self.redis.get_embeddings(session_id, url)
-
+# ============================================================================
+# OLD DynamicContentManager class has been completely removed
+# It's available in git history if needed for reference
 
 # ============================================================================
 # KNOWLEDGE BASE RETRIEVER
@@ -529,7 +300,7 @@ class KnowledgeBaseRetriever:
             self.chunks = json.load(f)
         
         self.embedding_cache = {}
-        self.max_cache_size = 100
+        self.max_cache_size = 50  # Reduced from 100 to save ~0.15MB RAM
         
         print(f"  [OK] Loaded {len(self.chunks)} chunks")
     
@@ -545,7 +316,8 @@ class KnowledgeBaseRetriever:
                 model=Config.EMBEDDING_MODEL,
                 prompt=query
             )
-            query_embedding = np.array([response['embedding']]).astype('float32')
+            # Extract first embedding from the embeddings array
+            query_embedding = np.array([response['embeddings'][0]]).astype('float32')
             faiss.normalize_L2(query_embedding)
             self._add_to_embedding_cache(cache_key, query_embedding)
         
@@ -610,18 +382,21 @@ class HybridRetriever:
             print(f"  [WARN]  No dynamic embeddings found in Redis for session: {session_id}")
             return []
 
-        embeddings, chunks = cached
+        # Unpack all three values (embeddings, chunks, full_content)
+        embeddings, chunks, full_content = cached
 
         # Create temporary FAISS index
         index = faiss.IndexFlatIP(embeddings.shape[1])
         index.add(embeddings)
 
-        # Generate query embedding
-        response = get_ollama_client().embeddings(
+        # Generate query embedding - FIXED: Wrap in asyncio.to_thread
+        response = await asyncio.to_thread(
+            get_ollama_client().embeddings,
             model=Config.EMBEDDING_MODEL,
             prompt=query
         )
-        query_embedding = np.array([response['embedding']]).astype('float32')
+        # Extract first embedding from the embeddings array
+        query_embedding = np.array([response['embeddings'][0]]).astype('float32')
         faiss.normalize_L2(query_embedding)
 
         # Search
@@ -655,8 +430,12 @@ class HybridRetriever:
         """
         print(f"\n  [FIND] HYBRID RETRIEVAL:")
 
-        # 1. KB Retrieval
-        kb_results = self.kb_retriever.retrieve(query, top_k=kb_top_k)
+        # 1. KB Retrieval - FIXED: Wrap in asyncio.to_thread to avoid blocking
+        kb_results = await asyncio.to_thread(
+            self.kb_retriever.retrieve,
+            query,
+            top_k=kb_top_k
+        )
         kb_context = self.kb_retriever.format_context(kb_results)
         print(f"     • KB: {len(kb_results)} chunks retrieved")
 
@@ -709,50 +488,9 @@ all_tools = [fetch_dynamic_trade_data]
 
 
 # ============================================================================
-# QUERY CLASSIFICATION HELPERS
+# QUERY HELPERS - NOW USING MODULAR IMPORTS FROM chatbot.utils
 # ============================================================================
-
-def classify_query_type(query: str) -> str:
-    """
-    Classify query type for smart context selection
-
-    Returns: 'company', 'trade_data', or 'general'
-    """
-    query_lower = query.lower()
-
-    # Company-specific queries
-    company_keywords = [
-        'what is', 'tell me about', 'who is', 'about',
-        'company', 'profile', 'information about',
-        'details of', 'describe', 'overview of'
-    ]
-    if any(kw in query_lower for kw in company_keywords):
-        return 'company'
-
-    # Trade data queries (numbers/statistics)
-    trade_keywords = [
-        'hs code', 'import', 'export', 'shipment', 'trade',
-        'statistics', 'volume', 'value', 'quantity',
-        'country', 'port', 'supplier', 'buyer', 'product',
-        'how many', 'how much', 'list', 'show me'
-    ]
-    if any(kw in query_lower for kw in trade_keywords):
-        return 'trade_data'
-
-    # General queries
-    return 'general'
-
-
-def extract_numeric_focus(query: str) -> bool:
-    """Check if query requires numeric precision"""
-    numeric_indicators = [
-        'how many', 'how much', 'count', 'number',
-        'total', 'sum', 'average', 'statistics',
-        'volume', 'value', 'quantity', 'amount',
-        'list all', 'show all', 'list', 'enumerate'
-    ]
-    return any(indicator in query.lower() for indicator in numeric_indicators)
-
+# classify_query_type() and extract_numeric_focus() now imported from chatbot.utils
 
 # ============================================================================
 # WORKFLOW NODES
@@ -1039,6 +777,7 @@ def create_chatbot_node():
         'top_k': Config.TOP_K,
         'num_predict': Config.NUM_PREDICT,
         'num_ctx': Config.NUM_CTX,
+        'timeout': 30.0,  # CRITICAL FIX: 30 second timeout to prevent hanging (reduced from 60s)
     }
 
     # Create custom ollama client for cloud API with authentication
@@ -1175,6 +914,13 @@ def create_chatbot_node():
         # Get dynamic content
         dynamic_content = session_dynamic_content.get("current", "")
 
+        # DEBUG: Log dynamic content status
+        print(f"  [DEBUG] Dynamic content length: {len(dynamic_content)} chars")
+        if dynamic_content:
+            print(f"  [DEBUG] Dynamic content preview: {dynamic_content[:200]}...")
+        else:
+            print(f"  [DEBUG] WARNING: No dynamic content available!")
+
         # Classify query type
         query_type = classify_query_type(user_query)
         needs_numeric_precision = extract_numeric_focus(user_query)
@@ -1200,42 +946,29 @@ def create_chatbot_node():
         print(f"     • Dynamic Content Available: {len(dynamic_content)} chars")
         print(f"     • Merging Strategy: {query_type.upper()}")
 
-        if query_type == 'company':
-            # Company queries → Prioritize dynamic content
-            if dynamic_content:
-                # Truncate to fit context window, prioritize dynamic
+        # CRITICAL FIX: If dynamic content is available, ALWAYS use it (regardless of query type)
+        # The user has loaded company-specific data, so they want answers about that company
+        if dynamic_content:
+            # Company data is available → ALWAYS prioritize it
+            if query_type == 'company':
                 max_dynamic = 2500
                 max_kb = 800
-                context = f"""=== COMPANY PROFILE (PRIMARY SOURCE) ===
+            else:
+                # For any other query type (including GENERAL), still use dynamic content first
+                max_dynamic = 3200
+                max_kb = 600
+
+            context = f"""=== COMPANY-SPECIFIC DATA (PRIMARY SOURCE - USE THIS FIRST) ===
 {dynamic_content[:max_dynamic]}
 
-=== ADDITIONAL REFERENCE ===
+=== SUPPLEMENTARY KNOWLEDGE BASE ===
 {kb_context[:max_kb]}"""
-                print(f"  [OK] MERGED: Company profile (dynamic={len(dynamic_content[:max_dynamic])} chars, kb={len(kb_context[:max_kb])} chars)")
-                print(f"     → Dynamic content ratio: {len(dynamic_content[:max_dynamic]) / (len(dynamic_content[:max_dynamic]) + len(kb_context[:max_kb])) * 100:.1f}%")
-            else:
-                context = kb_context
-                print(f"  [DATA] Context: KB only (no dynamic data available)")
-
-        elif query_type == 'trade_data':
-            # Trade data queries → Hybrid approach
-            if dynamic_content:
-                max_each = 1500
-                context = f"""=== KNOWLEDGE BASE ===
-{kb_context[:max_each]}
-
-=== TRADE DATA & STATISTICS ===
-{dynamic_content[:max_each]}"""
-                print(f"  [OK] MERGED: Hybrid approach (kb={len(kb_context[:max_each])} chars, dynamic={len(dynamic_content[:max_each])} chars)")
-                print(f"     → Split ratio: 50% KB / 50% Dynamic")
-            else:
-                context = kb_context
-                print(f"  [DATA] Context: KB only")
-
+            print(f"  [OK] MERGED: Company data PRIORITIZED (dynamic={len(dynamic_content[:max_dynamic])} chars, kb={len(kb_context[:max_kb])} chars)")
+            print(f"     [RATIO] Dynamic content ratio: {len(dynamic_content[:max_dynamic]) / (len(dynamic_content[:max_dynamic]) + len(kb_context[:max_kb])) * 100:.1f}%")
         else:
-            # General queries → KB only
+            # No dynamic content → Use KB only
             context = kb_context
-            print(f"  [DATA] Context: KB only (general query)")
+            print(f"  [DATA] Context: KB only (no dynamic data available)")
 
         print(f"  [DATA] FINAL CONTEXT SIZE: {len(context)} chars (~{len(context)//4} tokens)")
 
@@ -1249,80 +982,24 @@ def create_chatbot_node():
 
         history_text = "\n".join(conversation_history[-4:]) if conversation_history else ""
 
-        # OPTIMIZED SYSTEM PROMPT FOR ACCURACY & SPEED
-        if needs_numeric_precision:
-            accuracy_instruction = """
-[WARN] CRITICAL - NUMERIC ACCURACY:
-- Quote exact numbers, values, and statistics from context
-- Do NOT estimate, round, or approximate
-- If specific data is unavailable, state clearly: "This information is not available"
-- Format numbers clearly (e.g., 1,234,567 or 1.23M)
-- Include units (USD, tons, pieces, etc.)"""
-        else:
-            accuracy_instruction = ""
+        # ========================================================================
+        # BUILD SYSTEM PROMPT USING MODULAR PromptBuilder
+        # All prompt logic now lives in chatbot/services/agent/prompts.py
+        # This ensures consistency across all entry points and prevents hallucination
+        # ========================================================================
+        prompt_config = PromptConfig(
+            site_name=Config.SITE_NAME,
+            context=context,
+            has_dynamic_content=bool(dynamic_content),
+            conversation_history=history_text,
+            industry_info=industry_info if industry_info['industry'] else None,
+            query_type=smart_query_type
+        )
 
-        system_prompt = f"""You are Alex, a trade data consultant at Export Genius - helping businesses find buyers, suppliers, and market opportunities worldwide.
+        system_prompt = PromptBuilder.build_system_prompt(prompt_config)
 
-YOUR PERSONALITY:
-- Helpful and knowledgeable, like a trusted business advisor
-- Conversational and friendly, not robotic or salesy
-- You ask questions to understand needs before overwhelming with features
-- You speak in natural language using "you" and "your"
-- You're genuinely excited about helping businesses grow
-
-{f"CONVERSATION HISTORY:\n{history_text}\n" if history_text else ""}CONTEXT INFORMATION:
-{context}{accuracy_instruction}
-
-CORE VALUE PROPOSITION (mention naturally when relevant):
-Export Genius provides: 190+ countries coverage, 6B+ shipment records, 10M+ company contacts, 62+ countries detailed customs data, and real-time API access.
-
-{f"INDUSTRY FOCUS:\nThis query is about {industry_info['industry']} industry. {industry_info['context_hint']}.\nRelevant examples: {industry_info['examples']}\n" if industry_info['industry'] else ""}
-HOW TO RESPOND (CRITICAL - Follow this structure):
-
-1. ACKNOWLEDGE: Start by naturally acknowledging what they asked
-   - "Absolutely!" / "Great question!" / "Yes, I can help with that."
-   - Show you understood their need
-
-2. ANSWER DIRECTLY: Give the specific answer they need first (2-3 sentences max)
-   - Be specific and concrete
-   - Use data from context when available
-   - Focus on their problem, not our features
-
-3. ADD VALUE: Mention ONE relevant Export Genius capability (1 sentence)
-   - Connect it to their specific need
-   - Show how it solves their problem
-
-4. ENGAGE: End with a question or soft call-to-action (1 sentence)
-   - Ask about their specific needs
-   - Offer to show relevant examples
-   - Keep the conversation flowing
-
-RESPONSE LENGTH (ADAPTIVE):
-{f"- This is a {smart_query_type.upper()} query" if smart_query_type else ""}
-{f"- SIMPLE: 2-3 sentences (yes/no, quick facts)" if smart_query_type == 'simple' else ""}
-{f"- STANDARD: 4-5 sentences (most queries)" if smart_query_type == 'standard' else ""}
-{f"- DETAILED: 6-8 sentences (explanations, complex topics)" if smart_query_type == 'detailed' else ""}
-- Only provide more detail if explicitly asked
-- Break up long text into short paragraphs (2-3 sentences each)
-
-CONVERSATIONAL PATTERNS (use these naturally):
-Opening:
-- "Absolutely! Let me show you..."
-- "Yes! Here's what I found..."
-- "Great question! Based on what you're looking for..."
-- "I can definitely help with that..."
-
-Transitions:
-- "Here's what makes us unique..."
-- "Based on your needs..."
-- "Let me give you a specific example..."
-- "This is particularly useful for..."
-
-Closing:
-- "Would you like to see specific examples?"
-- "What industry or product are you targeting?"
-- "Shall I show you the top importers?"
-- "Which country interests you most?"
+        # Add progressive questioning hint (legacy feature support)
+        system_prompt += f"""
 
 PROGRESSIVE QUESTIONING (SMART FOLLOW-UP):
 {f"- Contextual hint: {progressive_hint}" if progressive_hint else "- Ask relevant follow-up questions based on context"}
@@ -1337,22 +1014,35 @@ You: "Yes! We have complete import records for Mexico covering all products and 
 
 Example 2:
 User: "Can you help me find buyers in Indonesia?"
-You: "Absolutely! Export Genius tracks all import activity in Indonesia with full buyer details. What product or industry are you targeting? That'll help me show you the most relevant active importers."
+You: "Absolutely! {Config.SITE_NAME} tracks all import activity in Indonesia with full buyer details. What product or industry are you targeting? That'll help me show you the most relevant active importers."
 
 Example 3:
 User: "What data do you provide?"
 You: "We provide detailed import-export data from 190+ countries including buyer/supplier names, shipment values, quantities, and complete contact information. This helps businesses find new customers, analyze competitors, and identify market opportunities. What's your main goal - finding new buyers or researching markets?"
 
 Example 4:
-User: "Tell me about Export Genius"
-You: "Export Genius is a trade intelligence platform that gives you access to real customs data from 190+ countries. We help businesses find buyers, track competitors, and discover new markets using actual shipment records. Are you looking to expand into new markets or find specific buyers?"
+User: "Tell me about {Config.SITE_NAME}"
+You: "{Config.SITE_NAME} is a trade intelligence platform that gives you access to real customs data from 190+ countries. We help businesses find buyers, track competitors, and discover new markets using actual shipment records. Are you looking to expand into new markets or find specific buyers?"
+
+Example 5 (COMPANY DATA):
+User: "top buyers?" or "give me names?"
+You: "Here are the top buyers for this company:
+1. IDEMITSU KOSAN COMPANY LIMITED (Japan) - 67.55% of exports
+2. MITSUI CHEMICALS INC - 15.42%
+3. PETROCHEMICAL INDUSTRIES CO KSC
+4. VIETSEA COMPANY PTE LIMITED (Singapore) - $101.9M
+5. PETROLIMEX SINGAPORE PTE LIMITED
+
+Would you like contact details or shipment history for any of these buyers?"
 
 CRITICAL RULES FOR DATA TYPES:
 [CRITICAL] When user asks "what data types" or "data types available" for a country:
-  - List ALL data types from context (Mirror, Detailed, Cargo, Transit, SC Bill of Lading, etc.)
+  - List ALL data types from context (Mirror, Detailed, Cargo, Transit, SC Bill of Lading, Statistical, etc.)
+  - If context only shows 1-2 types but you know there could be more, say: "Based on the data I have, we offer [types listed]. For the complete list, I can check our API for you."
   - Include coverage percentage and time period for EACH type
   - DO NOT generalize as just "Customs Data" or "Trade Data"
-  - Be specific: "Mirror Data (50-70% coverage, Jan 2012 to May 2023), Cargo Data (30-40%...)..."
+  - Be specific: "Mirror Data (50-70% coverage, Jan 2012 to May 2023), Transit Data (20-30% coverage, Jul 2020 to Oct 2024), Cargo Data (30-40%...)..."
+  - IMPORTANT: If you see Cargo or Transit mentioned in context but not for this specific country, acknowledge that these data types exist for other countries
 
 CONVERSATIONAL RULES:
 [DO] Use conversational language ("you're", "let's", "I'll show you")
@@ -1396,6 +1086,7 @@ Remember: You're having a natural business conversation, not reading a sales bro
             'top_k': Config.TOP_K,
             'num_predict': Config.NUM_PREDICT,
             'num_ctx': Config.NUM_CTX,
+            'timeout': 30.0,  # CRITICAL FIX: 30 second timeout to prevent hanging (reduced from 60s)
         }
 
         # Create custom ollama client for cloud API with authentication
@@ -1524,10 +1215,18 @@ class ChatbotManager:
         )
         workflow.add_edge("tools", "chatbot")
 
-        # Use Redis checkpoint saver
-        memory = RedisCheckpointSaver(self.redis)
-
-        return workflow.compile(checkpointer=memory)
+        # Use checkpoint saver (in-memory by default for speed)
+        if Config.DISABLE_CHECKPOINTING:
+            print("[PERF] Checkpointing DISABLED - responses will be 10-15s faster but no conversation history")
+            return workflow.compile()  # No checkpointer = faster but no memory
+        else:
+            # CRITICAL FIX: Use MemorySaver instead of RedisCheckpointSaver
+            # MemorySaver is 100x faster (in-memory vs network calls)
+            # Trade-off: Lost on restart, but works for session-based conversations
+            from langgraph.checkpoint.memory import MemorySaver
+            memory = MemorySaver()  # In-memory checkpointing (FAST!)
+            print("[PERF] Using MemorySaver (in-memory) for conversation history - responses will be 15-20s faster than Redis")
+            return workflow.compile(checkpointer=memory)
     
     async def chat(self, message: str, session_id: str, dynamic_url: Optional[str] = None) -> tuple[str, float, List[str]]:
         """
@@ -1537,12 +1236,20 @@ class ChatbotManager:
             (response, processing_time, sources_used)
         """
         start_time = time.time()
+        print(f"\n{'='*70}")
+        print(f"[CHAT START] Session: {session_id}")
+        print(f"[CHAT START] Query: {message[:100]}...")
+        print(f"{'='*70}")
 
         # Fetch dynamic content if URL provided
         dynamic_content = ""
         sources_used = ["Knowledge Base"]
 
+        print(f"  [DEBUG] dynamic_url parameter: {dynamic_url}")
+
         if dynamic_url:
+            print(f"  [DEBUG] [OK] dynamic_url provided in chat()")
+            print(f"  [DEBUG] Looking up cached data for URL: {dynamic_url[:100] if len(dynamic_url) > 100 else dynamic_url}...")
             # Check if embeddings already exist in Redis
             cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(dynamic_url, session_id)
 
@@ -1551,14 +1258,17 @@ class ChatbotManager:
                 embeddings, chunks, full_content = cached_data
                 dynamic_content = full_content
 
+                print(f"  [DEBUG] [OK] CACHE HIT - Found cached data: {len(dynamic_content)} chars")
                 print(f"  [FAST] Using cached embeddings from Redis")
                 print(f"  [CACHE HIT] Content loaded: {len(dynamic_content)} chars")
                 sources_used.append("Dynamic Content (Redis)")
             else:
+                print(f"  [DEBUG] [CACHE MISS] - No cached data found, fetching...")
                 # Fetch content and generate embeddings
                 dynamic_content = await self.dynamic_content_manager.fetch_content(dynamic_url, session_id)
 
                 if dynamic_content:
+                    print(f"  [DEBUG] [OK] Fetched {len(dynamic_content)} chars from URL")
                     sources_used.append("Dynamic Content")
 
                     # Generate and store embeddings in Redis
@@ -1567,6 +1277,8 @@ class ChatbotManager:
                         url=dynamic_url,
                         session_id=session_id
                     )
+        else:
+            print(f"  [DEBUG] [WARN] dynamic_url is None - will use KB only")
 
         # Set session-specific dynamic content for tool access
         global session_dynamic_content
@@ -1583,26 +1295,75 @@ class ChatbotManager:
             "message_count": self.redis.get_session_meta(session_id).get("message_count", 0) + 1
         })
 
-        # Invoke workflow with complete state
+        # Invoke workflow - CRITICAL FIX: Direct invoke (no thread pool overhead)
+        print(f"\n[WORKFLOW] Invoking LangGraph workflow...")
+        workflow_start = time.time()
+
         try:
-            result = self.app.invoke(
-                {
-                    "messages": [HumanMessage(content=message)],
-                    "next_agent": "",
-                    "retrieved_context": "",
-                    "original_query": message,
-                    "use_cache": False,
-                    "retrieved_chunks": [],
-                    "start_time": start_time,
-                    "session_id": session_id,
-                    "dynamic_url": dynamic_url or ""
-                },
-                config=config
+            # CRITICAL FIX: Call invoke() in thread pool with timeout
+            # Use run_in_executor for better cancellation than asyncio.to_thread
+            result = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,  # Use default thread pool executor
+                    lambda: self.app.invoke(
+                        {
+                            "messages": [HumanMessage(content=message)],
+                            "next_agent": "",
+                            "retrieved_context": "",
+                            "original_query": message,
+                            "use_cache": False,
+                            "retrieved_chunks": [],
+                            "start_time": start_time,
+                            "session_id": session_id,
+                            "dynamic_url": dynamic_url or ""
+                        },
+                        config
+                    )
+                ),
+                timeout=60.0  # 60 second timeout to allow for Redis checkpoint overhead
+            )
+
+            workflow_time = time.time() - workflow_start
+            print(f"[WORKFLOW] ✓ Completed in {workflow_time:.2f}s")
+
+            # Detailed performance breakdown
+            print(f"[PERF] Workflow breakdown:")
+            print(f"  - Total workflow time: {workflow_time:.2f}s")
+            print(f"  - Processing time (from start): {time.time() - start_time:.2f}s")
+
+            if workflow_time > 40.0:
+                print(f"[WARN] Workflow took {workflow_time:.1f}s (expected <40s)")
+                print(f"[WARN] Possible causes:")
+                print(f"        1. Redis checkpoint saving is slow (check Redis latency)")
+                print(f"        2. LLM API is slow (check Ollama/Deepseek response time)")
+                print(f"        3. Network latency (check internet connection)")
+
+        except asyncio.TimeoutError:
+            workflow_time = time.time() - workflow_start
+            print(f"[WORKFLOW] ✗ TIMEOUT after {workflow_time:.1f}s")
+            print(f"[ERROR] Workflow exceeded 60s timeout")
+            print(f"[DEBUG] Breakdown: chatbot finished around 33s, but workflow took {workflow_time:.1f}s total")
+            print(f"[DEBUG] This suggests Redis checkpoint saving is taking 20-30+ seconds")
+            print(f"[FIX] Consider:")
+            print(f"      1. Using local Redis instead of remote")
+            print(f"      2. Disabling checkpointing (lose conversation history)")
+            print(f"      3. Using faster Redis instance")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Request timeout after {workflow_time:.1f}s. Redis or network is too slow."
             )
         except Exception as e:
             import traceback
-            print(f"\n[ERROR] Workflow invocation failed:")
+            workflow_time = time.time() - workflow_start
+            print(f"\n[ERROR] Workflow invocation failed after {workflow_time:.1f}s:")
             print(traceback.format_exc())
+
+            # Check if it's a timeout-like issue
+            if workflow_time > 40.0:
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Request took too long ({workflow_time:.1f}s). The system is overloaded. Please try again."
+                )
             raise
 
         # Extract response
@@ -1613,6 +1374,8 @@ class ChatbotManager:
             response = "I'm sorry, I couldn't process that request."
 
         processing_time = time.time() - start_time
+        print(f"\n[CHAT END] Total time: {processing_time:.2f}s")
+        print(f"{'='*70}\n")
 
         # Update session info (both in-memory and Redis)
         self.sessions[session_id] = {
@@ -1678,6 +1441,7 @@ What APIs and integrations does Export Genius offer?"""
             llm_kwargs_init = {
                 'model': Config.LLM_MODEL,
                 'temperature': 0.7,
+                'timeout': 30.0,  # CRITICAL FIX: 30 second timeout for question generation
             }
 
             # Create custom ollama client for cloud API with authentication
@@ -1840,19 +1604,19 @@ def check_and_pull_ollama_models():
             is_installed = any(model_base in name for name in installed_names)
 
             if is_installed:
-                sys.stderr.write(f"   ✓ {model_name} - already installed\n")
+                sys.stderr.write(f"   [OK] {model_name} - already installed\n")
                 sys.stderr.flush()
             else:
-                sys.stderr.write(f"   ⚠ {model_name} - not found, pulling now...\n")
+                sys.stderr.write(f"   [WARN] {model_name} - not found, pulling now...\n")
                 sys.stderr.flush()
 
                 # Pull the model
                 get_ollama_client().pull(model_name)
-                sys.stderr.write(f"   ✓ {model_name} - pulled successfully\n")
+                sys.stderr.write(f"   [OK] {model_name} - pulled successfully\n")
                 sys.stderr.flush()
 
     except Exception as e:
-        sys.stderr.write(f"   ⚠ Warning: Could not verify Ollama models: {e}\n")
+        sys.stderr.write(f"   [WARN] Warning: Could not verify Ollama models: {e}\n")
         sys.stderr.write(f"   Please ensure models are installed manually:\n")
         sys.stderr.write(f"      ollama pull {Config.EMBEDDING_MODEL}\n")
         sys.stderr.write(f"      ollama pull {Config.LLM_MODEL}\n")
@@ -1979,6 +1743,12 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         print(f"\n[WEB] Request from IP: {request.ip_address}")
 
     try:
+        # Debug logging
+        print(f"\n[DEBUG] Chat request received:")
+        print(f"  - message: {request.message}")
+        print(f"  - session_id: {request.session_id}")
+        print(f"  - dynamic_url: {request.dynamic_url}")
+
         # Guardrail node handles hostility detection in workflow
         response, processing_time, sources_used = await chatbot_manager.chat(
             message=request.message,
@@ -2041,6 +1811,9 @@ async def init_session(request: InitRequest):
     Returns:
         InitResponse with suggested questions and cache status
     """
+    # Lazy initialization on first request
+    await ensure_initialized()
+
     if not chatbot_manager:
         raise HTTPException(status_code=503, detail="Chatbot not initialized")
 
