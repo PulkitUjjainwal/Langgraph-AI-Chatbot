@@ -116,10 +116,12 @@ class HistoryResponse(BaseModel):
 class HealthResponse(BaseModel):
     """Response model for health check"""
     status: str
-    version: str
+    version: str = Field(default="3.0.0", description="API version")
     ollama_status: str
     kb_loaded: bool
     redis_connected: bool
+    active_sessions: Optional[int] = Field(default=0, description="Number of active sessions")
+    uptime_seconds: Optional[float] = Field(default=0.0, description="Server uptime in seconds")
 
 
 class RedisStatsResponse(BaseModel):

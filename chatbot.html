@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Export Genius AI Chatbot</title>
+    <title>Trade Intelligence AI Chatbot</title>
     <!-- Marked.js for Markdown rendering -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
@@ -726,8 +726,8 @@
         </div>
 
         <div class="chat-header">
-            <h1>🤖 Export Genius AI</h1>
-            <p>Your intelligent trade data assistant</p>
+            <h1>🤖 Trade Intelligence AI</h1>
+            <p>Your intelligent assistant for Export Genius & Market Inside Data</p>
             <div class="session-info">
                 Session ID: <span id="sessionId">Loading...</span>
             </div>
@@ -750,17 +750,20 @@
         <!-- URL Input Section (shown when Company Mode is ON) -->
         <div class="url-input-section" id="urlInputSection">
             <label for="dynamicUrl">
-                🔗 Enter Company URL (Export Genius company profile):
+                🔗 Enter URL (Company, Country, or Search Data):
             </label>
             <div class="url-input-wrapper">
-                <input 
-                    type="text" 
-                    id="dynamicUrl" 
-                    placeholder="https://www.exportgenius.in/company/..."
+                <input
+                    type="text"
+                    id="dynamicUrl"
+                    placeholder="Paste any URL from Export Genius or Market Inside..."
                 >
                 <button id="applyUrl">Apply URL</button>
                 <button id="clearUrl">Clear</button>
             </div>
+            <small style="color: #856404; font-size: 11px; margin-top: 5px; display: block;">
+                ℹ️ Supports: Company profiles, Country data, and Search data URLs
+            </small>
         </div>
 
         <!-- Suggested Questions -->
@@ -780,11 +783,17 @@
         <div class="chat-messages" id="chatMessages">
             <div class="message bot">
                 <div class="message-content">
-                    👋 Hello! I'm Export Genius AI. I can help you in two ways:
+                    👋 Hello! I'm your Trade Intelligence AI. I can help you in two ways:
                     <br><br>
-                    <strong>💬 General Mode:</strong> Ask about Export Genius features, trade data, or general questions
+                    <strong>💬 General Mode:</strong> Ask about Export Genius or Market Inside features, trade data, or general questions
                     <br><br>
-                    <strong>🏢 Company Mode:</strong> Get detailed insights about specific companies from Export Genius database
+                    <strong>📊 Data Mode:</strong> Get detailed insights by providing any URL from Export Genius or Market Inside:
+                    <br>
+                    • 🏢 Company profiles
+                    <br>
+                    • 🌍 Country trade data
+                    <br>
+                    • 🔍 Search data results
                     <br><br>
                     Use the toggle above to switch modes!
                     <div class="message-meta">Ready to help</div>
@@ -824,7 +833,7 @@
         const API_BASE_URL = 
         // window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
             // ? 
-            'http://localhost:8000/api'  // Local development
+            'http://localhost:8003/api'  // Local development
             // : 'https://chatbot.exportgenius.in/api';  // Production
 
         console.log('🌐 Environment:', window.location.hostname);
@@ -992,8 +1001,8 @@
         function updateModeUI() {
             if (currentMode === 'company') {
                 urlInputSection.classList.add('active');
-                modeText.textContent = 'Company-Specific Chat Mode';
-                modeIndicator.textContent = '🏢 Company';
+                modeText.textContent = 'Data-Specific Chat Mode';
+                modeIndicator.textContent = '📊 Data Mode';
                 modeIndicator.style.color = '#ff9800';
             } else {
                 urlInputSection.classList.remove('active');
@@ -1168,11 +1177,29 @@
                 return;
             }
             
-            // Validate URL format
-            if (!url.includes('exportgenius.in/company/')) {
-                showError('Please enter a valid Export Genius company URL');
-                return;
+            // Validate URL format - accept ALL URL types from Export Genius or Market Inside
+            // Supported: /company, /country, /search-data URLs
+            const isExportGenius = url.includes('exportgenius.in');
+            const isMarketInside = url.includes('marketinside.in') || url.includes('marketinsidedata.com');
+
+            // if (!isExportGenius && !isMarketInside) {
+            //     showError('❌ Please enter a valid URL from Export Genius or Market Inside');
+            //     return;
+            // }
+
+            // Detect and log URL type for debugging
+            let urlType = 'unknown';
+            if (url.includes('/company')) {
+                urlType = 'company';
+            } else if (url.includes('/country')) {
+                urlType = 'country';
+            } else if (url.includes('/search-data')) {
+                urlType = 'search-data';
             }
+
+            console.log(`📊 URL Type Detected: ${urlType}`);
+            console.log(`🌐 Platform: ${isExportGenius ? 'Export Genius' : 'Market Inside'}`);
+            console.log(`🔗 URL: ${url}`);
             
             // Set current dynamic URL
             currentDynamicUrl = url;
@@ -1187,8 +1214,12 @@
             applyUrlBtn.disabled = true;
             applyUrlBtn.textContent = '✓ Applied';
             
-            // Add welcome message
-            addMessage(`🏢 Company mode activated! I'm now ready to answer questions about this company. Use the suggested questions below or ask your own.`, false);
+            // Add welcome message with detected URL type
+            const urlTypeDisplay = urlType === 'company' ? '🏢 company' :
+                                   urlType === 'country' ? '🌍 country' :
+                                   urlType === 'search-data' ? '🔍 search data' : 'this data';
+
+            addMessage(`✅ Data mode activated! I'm now ready to answer questions about this ${urlTypeDisplay}. Use the suggested questions below or ask your own.`, false);
         }
         
         async function clearDynamicUrl() {
@@ -1288,10 +1319,10 @@
         
         modeToggle.addEventListener('change', async (e) => {
             if (e.target.checked) {
-                // Switch to company mode
+                // Switch to data mode
                 currentMode = 'company';
                 updateModeUI();
-                addMessage('🏢 Switched to Company Mode. Please enter a company URL and click "Apply URL" to get started.', false);
+                addMessage('📊 Switched to Data Mode. Please enter any URL (company, country, or search data) and click "Apply URL" to get started.', false);
             } else {
                 // Switch to general mode
                 currentMode = 'general';
@@ -1303,8 +1334,8 @@
                 
                 // Reinitialize with general mode
                 await initSession();
-                
-                addMessage('💬 Switched to General Mode. Ask me anything about Export Genius!', false);
+
+                addMessage('💬 Switched to General Mode. Ask me anything about Export Genius or Market Inside!', false);
             }
         });
         

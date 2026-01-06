@@ -1980,10 +1980,21 @@ async def health_check():
     active_sessions = chatbot_manager.get_active_sessions() if chatbot_manager else 0
     uptime = time.time() - app_start_time if app_start_time > 0 else 0
 
+    # Check Redis connection
+    redis_connected = False
+    try:
+        if chatbot_manager and chatbot_manager.redis:
+            chatbot_manager.redis.client.ping()
+            redis_connected = True
+    except:
+        redis_connected = False
+
     return HealthResponse(
         status="healthy" if kb_loaded else "starting",
+        version="3.0.0",
         ollama_status="not_checked",
         kb_loaded=kb_loaded,
+        redis_connected=redis_connected,
         active_sessions=active_sessions,
         uptime_seconds=uptime
     )
