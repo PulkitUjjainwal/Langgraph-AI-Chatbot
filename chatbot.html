@@ -1,0 +1,1357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Export Genius AI Chatbot</title>
+    <!-- Marked.js for Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .chat-container {
+            width: 100%;
+            max-width: 800px;
+            height: 90vh;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+            border-bottom: 3px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .chat-header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .chat-header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .session-info {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 8px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            margin-top: 10px;
+            display: inline-block;
+        }
+
+        /* Mode Toggle Section */
+        .mode-toggle-section {
+            padding: 15px 20px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .mode-label {
+            font-size: 14px;
+            font-weight: 500;
+            color: #555;
+        }
+
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+
+        input:checked + .slider {
+            background-color: #667eea;
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+
+        .mode-indicator {
+            font-size: 13px;
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        /* URL Input Section */
+        .url-input-section {
+            padding: 15px 20px;
+            background: #fff3cd;
+            border-bottom: 1px solid #ffc107;
+            display: none;
+        }
+
+        .url-input-section.active {
+            display: block;
+        }
+
+        .url-input-section label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            color: #856404;
+            margin-bottom: 8px;
+        }
+
+        .url-input-wrapper {
+            display: flex;
+            gap: 10px;
+        }
+
+        #dynamicUrl {
+            flex: 1;
+            padding: 10px 15px;
+            border: 2px solid #ffc107;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        #dynamicUrl:focus {
+            outline: none;
+            border-color: #ff9800;
+        }
+
+        #applyUrl {
+            padding: 10px 20px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.3s;
+        }
+
+        #applyUrl:hover {
+            background: #218838;
+        }
+
+        #applyUrl:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+
+        #clearUrl {
+            padding: 10px 20px;
+            background: #f44336;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.3s;
+        }
+
+        #clearUrl:hover {
+            background: #d32f2f;
+        }
+
+        /* Loading Overlay */
+        .loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(255, 255, 255, 0.95);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .loading-overlay.active {
+            display: flex;
+        }
+
+        .loading-spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+            font-size: 16px;
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .loading-subtext {
+            font-size: 13px;
+            color: #666;
+        }
+
+        /* Suggested Questions */
+        .suggested-questions {
+            padding: 12px 20px;
+            background: linear-gradient(to bottom, #e3f2fd, #f5f9ff);
+            border-bottom: 1px solid #90caf9;
+            display: none;
+            max-height: 180px;
+            overflow-y: auto;
+            position: relative;
+        }
+
+        .suggested-questions.active {
+            display: block;
+        }
+
+        .suggested-questions-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .suggested-questions h3 {
+            font-size: 14px;
+            color: #1565c0;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .dismiss-questions {
+            background: transparent;
+            border: none;
+            color: #1565c0;
+            font-size: 20px;
+            cursor: pointer;
+            padding: 0;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: all 0.3s;
+        }
+
+        .dismiss-questions:hover {
+            background: rgba(21, 101, 192, 0.1);
+            transform: rotate(90deg);
+        }
+
+        .question-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .question-chip {
+            padding: 8px 14px;
+            background: white;
+            color: #1565c0;
+            border: 1px solid #90caf9;
+            border-radius: 20px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .question-chip:hover {
+            background: #1565c0;
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(21, 101, 192, 0.3);
+        }
+
+        .question-chip:active {
+            transform: translateY(0);
+        }
+
+        /* Scrollbar for suggested questions */
+        .suggested-questions::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .suggested-questions::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 3px;
+        }
+
+        .suggested-questions::-webkit-scrollbar-thumb {
+            background: #90caf9;
+            border-radius: 3px;
+        }
+
+        .suggested-questions::-webkit-scrollbar-thumb:hover {
+            background: #64b5f6;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            background: #fafafa;
+            position: relative;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message.user {
+            justify-content: flex-end;
+        }
+
+        .message.bot {
+            justify-content: flex-start;
+        }
+
+        .message-content {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            font-size: 15px;
+            line-height: 1.6;
+            word-wrap: break-word;
+        }
+
+        .message.user .message-content {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.bot .message-content {
+            background: white;
+            color: #333;
+            border: 1px solid #e0e0e0;
+            border-bottom-left-radius: 4px;
+        }
+
+        /* Markdown styling for bot messages */
+        .message.bot .message-content h1,
+        .message.bot .message-content h2,
+        .message.bot .message-content h3 {
+            margin: 10px 0 8px 0;
+            font-weight: 600;
+        }
+
+        .message.bot .message-content h1 {
+            font-size: 18px;
+            color: #667eea;
+        }
+
+        .message.bot .message-content h2 {
+            font-size: 16px;
+            color: #764ba2;
+        }
+
+        .message.bot .message-content h3 {
+            font-size: 15px;
+            color: #555;
+        }
+
+        .message.bot .message-content p {
+            margin: 8px 0;
+        }
+
+        .message.bot .message-content ul,
+        .message.bot .message-content ol {
+            margin: 8px 0;
+            padding-left: 20px;
+        }
+
+        .message.bot .message-content li {
+            margin: 4px 0;
+        }
+
+        .message.bot .message-content strong {
+            font-weight: 600;
+            color: #667eea;
+        }
+
+        .message.bot .message-content em {
+            font-style: italic;
+            color: #555;
+        }
+
+        .message.bot .message-content code {
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+
+        .message.bot .message-content pre {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 8px 0;
+        }
+
+        .message.bot .message-content pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .message.bot .message-content blockquote {
+            border-left: 3px solid #667eea;
+            padding-left: 12px;
+            margin: 8px 0;
+            color: #666;
+            font-style: italic;
+        }
+
+        .message.bot .message-content a {
+            color: #667eea;
+            text-decoration: underline;
+        }
+
+        .message.bot .message-content a:hover {
+            color: #764ba2;
+        }
+
+        .message.bot .message-content hr {
+            border: none;
+            border-top: 1px solid #e0e0e0;
+            margin: 12px 0;
+        }
+
+        .message.bot .message-content table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 8px 0;
+        }
+
+        .message.bot .message-content th,
+        .message.bot .message-content td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+
+        .message.bot .message-content th {
+            background: #f5f5f5;
+            font-weight: 600;
+        }
+
+        .message-meta {
+            font-size: 11px;
+            margin-top: 5px;
+            opacity: 0.7;
+        }
+
+        .message.user .message-meta {
+            text-align: right;
+            color: white;
+        }
+
+        .message.bot .message-meta {
+            color: #666;
+        }
+
+        .typing-indicator {
+            display: none;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 12px;
+            max-width: 70%;
+        }
+
+        .typing-indicator.active {
+            display: flex;
+        }
+
+        .typing-dots {
+            display: flex;
+            gap: 4px;
+        }
+
+        .typing-dots span {
+            width: 8px;
+            height: 8px;
+            background: #667eea;
+            border-radius: 50%;
+            animation: bounce 1.4s infinite;
+        }
+
+        .typing-dots span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-dots span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes bounce {
+            0%, 60%, 100% {
+                transform: translateY(0);
+            }
+            30% {
+                transform: translateY(-10px);
+            }
+        }
+
+        .chat-input-section {
+            padding: 20px;
+            background: white;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .input-wrapper {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        #messageInput {
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid #ddd;
+            border-radius: 24px;
+            font-size: 15px;
+            transition: border-color 0.3s;
+        }
+
+        #messageInput:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        #sendBtn {
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 24px;
+            cursor: pointer;
+            font-size: 15px;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        #sendBtn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        #sendBtn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        #resetBtn {
+            padding: 12px 24px;
+            background: #f44336;
+            color: white;
+            border: none;
+            border-radius: 24px;
+            cursor: pointer;
+            font-size: 15px;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+
+        #resetBtn:hover {
+            background: #d32f2f;
+        }
+
+        .error-message {
+            background: #ffebee;
+            color: #c62828;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 10px 20px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .error-message.active {
+            display: block;
+        }
+
+        .success-message {
+            background: #e8f5e9;
+            color: #2e7d32;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 10px 20px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .success-message.active {
+            display: block;
+        }
+
+        /* Scrollbar styling */
+        .chat-messages::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .chat-messages::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+
+        .chat-messages::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 4px;
+        }
+
+        .chat-messages::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+
+        /* Mobile responsive */
+        @media (max-width: 768px) {
+            .chat-container {
+                height: 100vh;
+                max-width: 100%;
+                border-radius: 0;
+            }
+
+            .message-content {
+                max-width: 85%;
+            }
+
+            .url-input-wrapper {
+                flex-direction: column;
+            }
+
+            #clearUrl, #applyUrl {
+                width: 100%;
+            }
+
+            .mode-toggle-section {
+                flex-direction: column;
+                gap: 10px;
+                align-items: flex-start;
+            }
+
+            .question-chip {
+                font-size: 12px;
+                padding: 6px 12px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <!-- Loading Overlay -->
+        <div class="loading-overlay" id="loadingOverlay">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">Initializing AI Assistant...</div>
+            <div class="loading-subtext" id="loadingSubtext">Setting up your session</div>
+        </div>
+
+        <div class="chat-header">
+            <h1>🤖 Export Genius AI</h1>
+            <p>Your intelligent trade data assistant</p>
+            <div class="session-info">
+                Session ID: <span id="sessionId">Loading...</span>
+            </div>
+        </div>
+
+        <!-- Mode Toggle Section -->
+        <div class="mode-toggle-section">
+            <div class="mode-label">
+                <span id="modeText">General Chat Mode</span>
+            </div>
+            <label class="toggle-switch">
+                <input type="checkbox" id="modeToggle">
+                <span class="slider"></span>
+            </label>
+            <div class="mode-indicator" id="modeIndicator">
+                💬 General
+            </div>
+        </div>
+
+        <!-- URL Input Section (shown when Company Mode is ON) -->
+        <div class="url-input-section" id="urlInputSection">
+            <label for="dynamicUrl">
+                🔗 Enter Company URL (Export Genius company profile):
+            </label>
+            <div class="url-input-wrapper">
+                <input 
+                    type="text" 
+                    id="dynamicUrl" 
+                    placeholder="https://www.exportgenius.in/company/..."
+                >
+                <button id="applyUrl">Apply URL</button>
+                <button id="clearUrl">Clear</button>
+            </div>
+        </div>
+
+        <!-- Suggested Questions -->
+        <div class="suggested-questions" id="suggestedQuestions">
+            <div class="suggested-questions-header">
+                <h3>💡 Suggested Questions:</h3>
+                <button class="dismiss-questions" id="dismissQuestions" title="Hide suggestions">×</button>
+            </div>
+            <div class="question-chips" id="questionChips">
+                <!-- Questions will be populated dynamically -->
+            </div>
+        </div>
+
+        <div class="error-message" id="errorMessage"></div>
+        <div class="success-message" id="successMessage"></div>
+
+        <div class="chat-messages" id="chatMessages">
+            <div class="message bot">
+                <div class="message-content">
+                    👋 Hello! I'm Export Genius AI. I can help you in two ways:
+                    <br><br>
+                    <strong>💬 General Mode:</strong> Ask about Export Genius features, trade data, or general questions
+                    <br><br>
+                    <strong>🏢 Company Mode:</strong> Get detailed insights about specific companies from Export Genius database
+                    <br><br>
+                    Use the toggle above to switch modes!
+                    <div class="message-meta">Ready to help</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="typing-indicator" id="typingIndicator">
+            <div class="typing-dots">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+            <span>AI is thinking...</span>
+        </div>
+
+        <div class="chat-input-section">
+            <div class="input-wrapper">
+                <input 
+                    type="text" 
+                    id="messageInput" 
+                    placeholder="Type your message here..."
+                    autocomplete="off"
+                >
+                <button id="sendBtn">Send</button>
+                <button id="resetBtn">Reset</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ============================================================================
+        // CONFIGURATION
+        // ============================================================================
+
+        // Auto-detect environment: use localhost for local development, production URL otherwise
+        const API_BASE_URL = 
+        // window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+            // ? 
+            'http://localhost:8000/api'  // Local development
+            // : 'https://chatbot.exportgenius.in/api';  // Production
+
+        console.log('🌐 Environment:', window.location.hostname);
+        console.log('📍 API Base URL:', API_BASE_URL);
+        
+        // ============================================================================
+        // STATE MANAGEMENT
+        // ============================================================================
+        
+        let currentMode = 'general'; // 'general' or 'company'
+        let currentDynamicUrl = null;
+        let suggestedQuestions = [];
+        
+        // ============================================================================
+        // SESSION MANAGEMENT
+        // ============================================================================
+        
+        function getOrCreateSessionId() {
+            let sessionId = localStorage.getItem('chatbot_session_id');
+            
+            if (!sessionId) {
+                // Generate unique session ID
+                sessionId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+                localStorage.setItem('chatbot_session_id', sessionId);
+            }
+            
+            return sessionId;
+        }
+        
+        // Initialize session
+        const SESSION_ID = getOrCreateSessionId();
+        document.getElementById('sessionId').textContent = SESSION_ID;
+        
+        // ============================================================================
+        // DOM ELEMENTS
+        // ============================================================================
+        
+        const chatMessages = document.getElementById('chatMessages');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const resetBtn = document.getElementById('resetBtn');
+        const dynamicUrl = document.getElementById('dynamicUrl');
+        const applyUrlBtn = document.getElementById('applyUrl');
+        const clearUrlBtn = document.getElementById('clearUrl');
+        const typingIndicator = document.getElementById('typingIndicator');
+        const errorMessage = document.getElementById('errorMessage');
+        const successMessage = document.getElementById('successMessage');
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        const loadingSubtext = document.getElementById('loadingSubtext');
+        const modeToggle = document.getElementById('modeToggle');
+        const urlInputSection = document.getElementById('urlInputSection');
+        const modeText = document.getElementById('modeText');
+        const modeIndicator = document.getElementById('modeIndicator');
+        const suggestedQuestionsDiv = document.getElementById('suggestedQuestions');
+        const questionChips = document.getElementById('questionChips');
+        const dismissQuestionsBtn = document.getElementById('dismissQuestions');
+        
+        // ============================================================================
+        // UTILITY FUNCTIONS
+        // ============================================================================
+        
+        function scrollToBottom() {
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorMessage.classList.add('active');
+            
+            setTimeout(() => {
+                errorMessage.classList.remove('active');
+            }, 5000);
+        }
+        
+        function showSuccess(message) {
+            successMessage.textContent = message;
+            successMessage.classList.add('active');
+            
+            setTimeout(() => {
+                successMessage.classList.remove('active');
+            }, 3000);
+        }
+        
+        function showLoading(text = 'Processing...', subtext = '') {
+            loadingOverlay.classList.add('active');
+            document.querySelector('.loading-text').textContent = text;
+            loadingSubtext.textContent = subtext;
+        }
+        
+        function hideLoading() {
+            loadingOverlay.classList.remove('active');
+        }
+        
+        function getCurrentTime() {
+            const now = new Date();
+            return now.toLocaleTimeString('en-US', { 
+                hour: '2-digit', 
+                minute: '2-digit' 
+            });
+        }
+        
+        function addMessage(content, isUser = false) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isUser ? 'user' : 'bot'}`;
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            
+            let formattedContent;
+            
+            if (isUser) {
+                // User messages: simple line break conversion
+                formattedContent = content.replace(/\n/g, '<br>');
+            } else {
+                // Bot messages: render markdown
+                try {
+                    // Configure marked options
+                    marked.setOptions({
+                        breaks: true,  // Convert \n to <br>
+                        gfm: true,     // GitHub Flavored Markdown
+                        headerIds: false,
+                        mangle: false
+                    });
+                    
+                    formattedContent = marked.parse(content);
+                } catch (error) {
+                    console.error('Markdown parsing error:', error);
+                    // Fallback to simple line break conversion
+                    formattedContent = content.replace(/\n/g, '<br>');
+                }
+            }
+            
+            contentDiv.innerHTML = `
+                ${formattedContent}
+                <div class="message-meta">${getCurrentTime()}</div>
+            `;
+            
+            messageDiv.appendChild(contentDiv);
+            chatMessages.appendChild(messageDiv);
+            scrollToBottom();
+        }
+        
+        function showTypingIndicator() {
+            typingIndicator.classList.add('active');
+            scrollToBottom();
+        }
+        
+        function hideTypingIndicator() {
+            typingIndicator.classList.remove('active');
+        }
+        
+        function setLoading(isLoading) {
+            sendBtn.disabled = isLoading;
+            messageInput.disabled = isLoading;
+            
+            if (isLoading) {
+                sendBtn.textContent = 'Sending...';
+                showTypingIndicator();
+            } else {
+                sendBtn.textContent = 'Send';
+                hideTypingIndicator();
+            }
+        }
+        
+        function updateModeUI() {
+            if (currentMode === 'company') {
+                urlInputSection.classList.add('active');
+                modeText.textContent = 'Company-Specific Chat Mode';
+                modeIndicator.textContent = '🏢 Company';
+                modeIndicator.style.color = '#ff9800';
+            } else {
+                urlInputSection.classList.remove('active');
+                modeText.textContent = 'General Chat Mode';
+                modeIndicator.textContent = '💬 General';
+                modeIndicator.style.color = '#667eea';
+            }
+        }
+        
+        function displaySuggestedQuestions(questions) {
+            if (!questions || questions.length === 0) {
+                suggestedQuestionsDiv.classList.remove('active');
+                return;
+            }
+            
+            suggestedQuestions = questions;
+            questionChips.innerHTML = '';
+            
+            questions.forEach(question => {
+                const chip = document.createElement('div');
+                chip.className = 'question-chip';
+                chip.textContent = question;
+                chip.onclick = () => {
+                    messageInput.value = question;
+                    messageInput.focus();
+                    // Auto-dismiss questions after clicking
+                    suggestedQuestionsDiv.classList.remove('active');
+                    sendMessage();
+                };
+                questionChips.appendChild(chip);
+            });
+            
+            suggestedQuestionsDiv.classList.add('active');
+        }
+        
+        function dismissSuggestedQuestions() {
+            suggestedQuestionsDiv.classList.remove('active');
+        }
+        
+        // ============================================================================
+        // API CALLS
+        // ============================================================================
+        
+        async function initSession(dynamicUrl = null) {
+            try {
+                showLoading(
+                    'Initializing AI Assistant...', 
+                    dynamicUrl ? 'Fetching company data and generating questions...' : 'Generating suggested questions...'
+                );
+                
+                const payload = {
+                    session_id: SESSION_ID
+                };
+                
+                if (dynamicUrl) {
+                    payload.dynamic_url = dynamicUrl;
+                }
+                
+                const response = await fetch(`${API_BASE_URL}/init`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || 'Init request failed');
+                }
+                
+                const data = await response.json();
+                
+                console.log('Init response:', data);
+                
+                // Display suggested questions
+                displaySuggestedQuestions(data.suggested_questions);
+                
+                // Show success message
+                if (data.status === 'success') {
+                    if (data.dynamic_url_processed) {
+                        showSuccess(`✅ Company data loaded! (${data.processing_time.toFixed(2)}s)`);
+                    } else {
+                        showSuccess(`✅ Session initialized! (${data.processing_time.toFixed(2)}s)`);
+                    }
+                } else if (data.error) {
+                    showError(`⚠️ ${data.error}`);
+                }
+                
+                return data;
+                
+            } catch (error) {
+                console.error('Init error:', error);
+                showError(`Init failed: ${error.message}`);
+                return null;
+            } finally {
+                hideLoading();
+            }
+        }
+        
+        async function sendMessage() {
+            const message = messageInput.value.trim();
+            
+            if (!message) {
+                showError('Please enter a message');
+                return;
+            }
+            
+            // Validate company mode
+            if (currentMode === 'company' && !currentDynamicUrl) {
+                showError('Please apply a company URL first or switch to General mode');
+                return;
+            }
+            
+            // Add user message to chat
+            addMessage(message, true);
+            messageInput.value = '';
+            
+            // Set loading state
+            setLoading(true);
+            
+            try {
+                // Prepare request payload
+                const payload = {
+                    message: message,
+                    session_id: SESSION_ID,
+                    ip_address: await getClientIP()
+                };
+                
+                // Add dynamic URL if in company mode
+                if (currentMode === 'company' && currentDynamicUrl) {
+                    payload.dynamic_url = currentDynamicUrl;
+                }
+                
+                // Make API call
+                const response = await fetch(`${API_BASE_URL}/chat`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || 'API request failed');
+                }
+                
+                const data = await response.json();
+                
+                // Add bot response to chat
+                addMessage(data.response, false);
+                
+                // Log processing time and sources
+                console.log('Processing time:', data.processing_time, 'seconds');
+                console.log('Sources used:', data.sources_used);
+                
+            } catch (error) {
+                console.error('Error:', error);
+                showError(`Error: ${error.message}`);
+                addMessage('❌ Sorry, I encountered an error. Please try again.', false);
+            } finally {
+                setLoading(false);
+            }
+        }
+        
+        async function applyDynamicUrl() {
+            const url = dynamicUrl.value.trim();
+            
+            if (!url) {
+                showError('Please enter a valid URL');
+                return;
+            }
+            
+            // Validate URL format
+            if (!url.includes('exportgenius.in/company/')) {
+                showError('Please enter a valid Export Genius company URL');
+                return;
+            }
+            
+            // Set current dynamic URL
+            currentDynamicUrl = url;
+            
+            // Clear chat history
+            chatMessages.innerHTML = '';
+            
+            // Initialize session with URL
+            await initSession(url);
+            
+            // Disable apply button and change text
+            applyUrlBtn.disabled = true;
+            applyUrlBtn.textContent = '✓ Applied';
+            
+            // Add welcome message
+            addMessage(`🏢 Company mode activated! I'm now ready to answer questions about this company. Use the suggested questions below or ask your own.`, false);
+        }
+        
+        async function clearDynamicUrl() {
+            dynamicUrl.value = '';
+            currentDynamicUrl = null;
+            
+            // Reset apply button
+            applyUrlBtn.disabled = false;
+            applyUrlBtn.textContent = 'Apply URL';
+            
+            // Clear suggested questions
+            displaySuggestedQuestions([]);
+            
+            showSuccess('Company URL cleared. You can apply a new one.');
+        }
+        
+        async function resetConversation() {
+            if (!confirm('Are you sure you want to reset the conversation?')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/reset`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        session_id: SESSION_ID
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to reset conversation');
+                }
+                
+                // Clear chat messages
+                chatMessages.innerHTML = '';
+                
+                // Reset mode to general
+                currentMode = 'general';
+                modeToggle.checked = false;
+                updateModeUI();
+                
+                // Clear URL
+                currentDynamicUrl = null;
+                dynamicUrl.value = '';
+                applyUrlBtn.disabled = false;
+                applyUrlBtn.textContent = 'Apply URL';
+                
+                // Clear suggested questions
+                displaySuggestedQuestions([]);
+                
+                // Reinitialize session
+                await initSession();
+                
+                // Add welcome message
+                addMessage('👋 Conversation reset! How can I help you?', false);
+                
+                console.log('Conversation reset successfully');
+                
+            } catch (error) {
+                console.error('Error:', error);
+                showError('Failed to reset conversation');
+            }
+        }
+        
+        async function getClientIP() {
+            try {
+                const response = await fetch('https://api.ipify.org?format=json');
+                const data = await response.json();
+                return data.ip;
+            } catch (error) {
+                console.warn('Could not fetch IP address:', error);
+                return null;
+            }
+        }
+        
+        // ============================================================================
+        // EVENT LISTENERS
+        // ============================================================================
+        
+        sendBtn.addEventListener('click', sendMessage);
+        
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+        
+        resetBtn.addEventListener('click', resetConversation);
+        
+        applyUrlBtn.addEventListener('click', applyDynamicUrl);
+        
+        clearUrlBtn.addEventListener('click', clearDynamicUrl);
+        
+        modeToggle.addEventListener('change', async (e) => {
+            if (e.target.checked) {
+                // Switch to company mode
+                currentMode = 'company';
+                updateModeUI();
+                addMessage('🏢 Switched to Company Mode. Please enter a company URL and click "Apply URL" to get started.', false);
+            } else {
+                // Switch to general mode
+                currentMode = 'general';
+                currentDynamicUrl = null;
+                dynamicUrl.value = '';
+                applyUrlBtn.disabled = false;
+                applyUrlBtn.textContent = 'Apply URL';
+                updateModeUI();
+                
+                // Reinitialize with general mode
+                await initSession();
+                
+                addMessage('💬 Switched to General Mode. Ask me anything about Export Genius!', false);
+            }
+        });
+        
+        dismissQuestionsBtn.addEventListener('click', dismissSuggestedQuestions);
+        
+        // Auto-focus on message input
+        messageInput.focus();
+        
+        // ============================================================================
+        // INITIALIZATION
+        // ============================================================================
+        
+        async function initializeApp() {
+            console.log('🚀 Initializing Chatbot UI');
+            console.log('Session ID:', SESSION_ID);
+            console.log('API Base URL:', API_BASE_URL);
+            
+            // Check API health
+            try {
+                const response = await fetch(`${API_BASE_URL}/health`);
+                
+                if (!response.ok) {
+                    throw new Error('API health check failed');
+                }
+                
+                const data = await response.json();
+                console.log('API Health:', data);
+                
+                if (data.status !== 'healthy') {
+                    showError('⚠️ API is not fully healthy. Some features may not work.');
+                }
+                
+            } catch (error) {
+                console.error('Health check failed:', error);
+                showError('⚠️ Cannot connect to chatbot API. Please check if the server is running.');
+                hideLoading();
+                return;
+            }
+            
+            // Initialize session (call /init endpoint)
+            await initSession();
+            
+            console.log('✅ App initialized successfully');
+        }
+        
+        // Run initialization
+        initializeApp();
+    </script>
+</body>
+</html>
