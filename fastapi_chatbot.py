@@ -1227,7 +1227,352 @@ class ChatbotManager:
             memory = MemorySaver()  # In-memory checkpointing (FAST!)
             print("[PERF] Using MemorySaver (in-memory) for conversation history - responses will be 15-20s faster than Redis")
             return workflow.compile(checkpointer=memory)
+        
+        # ...existing code...
+    async def is_query_related_via_llm(self, message: str, dynamic_url: str, dynamic_content: str, timeout: float = 8.0) -> tuple[bool, float]:
+        """
+        Quick LLM classifier: returns (related, score 0-1).
+        Falls back to token/URL param heuristic on failure.
+        """
+        import json
+        # Build concise prompt (keep content excerpt small)
+        excerpt = (dynamic_content or "")[:1200].replace("\n", " ")
+        prompt = (
+            "You are a strict classifier. Answer only JSON with keys: related (true/false) "
+            "and score (0.0-1.0). Determine if the user query is about the given URL/page content.\n\n"
+            f"Query: {message}\n\nURL: {dynamic_url}\n\nPage excerpt: {excerpt}\n\n"
+            "Return only valid JSON, e.g. {\"related\": true, \"score\": 0.92}."
+        )
+
+        try:
+            # Use existing app.invoke but keep it lightweight and timed
+            result = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self.app.invoke({"messages": [HumanMessage(content=prompt)], "use_cache": False}, {"configurable": {}}),
+                ),
+                timeout=timeout,
+            )
+            text = result.get("messages", [])[-1].content if result.get("messages") else ""
+            parsed = json.loads(text.strip())
+            related = bool(parsed.get("related", False))
+            score = float(parsed.get("score", 0.0))
+            return related, max(0.0, min(1.0, score))
+        except Exception:
+            # Fallback heuristic: token overlap + URL param match
+            try:
+                from urllib.parse import urlparse, parse_qs
+                qparams = parse_qs(urlparse(dynamic_url or "").query) if dynamic_url else {}
+                tokens = set(w for w in (message or "").lower().split() if len(w) > 2)
+                param_tokens = set()
+                for v in qparams.values():
+                    for vv in v:
+                        param_tokens.update(x for x in vv.lower().split() if len(x) > 2)
+                overlap = len(tokens & param_tokens)
+                content_overlap = sum(1 for t in tokens if t in (dynamic_content or "").lower())
+                score = min(1.0, (overlap * 0.6 + content_overlap * 0.2) / max(1, len(tokens)))
+                related = (overlap >= 1) or (content_overlap >= 2)
+                return related, float(score)
+            except Exception:
+                return False, 0.0
+
+    @staticmethod
+    def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+        """Best-effort JSON extraction: parse full text or first {...} block."""
+        if not text:
+            return None
+        text = text.strip()
+
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+
+        try:
+            return json.loads(text[start : end + 1])
+        except Exception:
+            return None
+
+    def _get_intent_classifier_llm(self) -> ChatOllama:
+        """
+        Lazily create and reuse a deterministic LLM instance for classification.
+        Avoids reconstructing clients on every call.
+        """
+        cached = getattr(self, "_intent_llm", None)
+        if cached is not None:
+            return cached
+
+        llm_kwargs = {
+            "model": Config.LLM_MODEL,
+            "temperature": 0.0,
+            "timeout": 8.0,
+        }
+
+        if Config.OLLAMA_API_KEY:
+            cloud_client = ollama.Client(
+                host=Config.OLLAMA_BASE_URL,
+                headers={"Authorization": f"Bearer {Config.OLLAMA_API_KEY}"},
+            )
+            llm_kwargs["client"] = cloud_client
+        else:
+            llm_kwargs["base_url"] = Config.OLLAMA_BASE_URL
+
+        self._intent_llm = ChatOllama(**llm_kwargs)
+        return self._intent_llm
+
+    async def _detect_intent_and_entities(self, query: str) -> Dict[str, Any]:
+        """
+        LLM-based intent + entity extractor.
+        Returns dict: {intent, confidence, params}.
+        """
+        system = """You are an intent-to-URL generator for a trade data application.
+
+You must output ONLY valid JSON.
+No explanations. No markdown. No extra text.
+
+Your job:
+- Understand the user query
+- Decide the correct intent
+- Generate the EXACT final URL based on rules below
+
+────────────────────────
+INTENTS (ONLY TWO)
+────────────────────────
+
+Choose exactly ONE intent:
+
+1. search_trade_data
+   → User wants trade-related records such as:
+     - Trade data (import/export)
+     - Importers
+     - Exporters
+     - Suppliers
+     - Buyers
+   → Output a /search-data/... URL
+
+2. search_country_data
+   → User wants high-level country overview data such as:
+     - What a country exports or imports
+     - Top commodities
+     - HS chapters
+     - Trade partners
+     - Ports
+     - Exporters (summary)
+     - Shipment overview (summary only)
+   → Output a /country/... URL
+
+If unclear, set intent = "unknown" and url = "".
+
+────────────────────────
+GLOBAL RULES
+────────────────────────
+
+- Output must be valid JSON only
+- confidence must be between 0 and 1
+- url must be a complete URL or empty string ""
+- Do NOT invent missing data
+- Country names must be lowercase and URL-safe
+- product must be URL-safe (lowercase, spaces replaced with %20)
+- hs_code must be numeric only
+- direction decides mirror_import vs mirror_export
+- Default language path: /en/
+
+────────────────────────
+INTENT: search_trade_data
+────────────────────────
+
+Base URL:
+https://www.marketinsidedata.com/en/search-data/
+
+Entity → Endpoint mapping:
+- trade     → trade
+- importer  → importer
+- exporter  → exporter
+- supplier  → suppliers
+- buyer     → buyers
+
+Direction → type mapping:
+- import → mirror_import
+- export → mirror_export
+
+URL rules:
+- country is REQUIRED
+- Either product OR hs_code can be present
+- Do NOT include both unless user explicitly asks
+- If direction is missing, do NOT generate URL (url = "")
+
+URL formats:
+
+Trade:
+https://www.marketinsidedata.com/en/search-data/trade?type={mirror_import|mirror_export}&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/trade?type={mirror_import|mirror_export}&country={country}&hs_code={hs_code}
+
+Importer:
+https://www.marketinsidedata.com/en/search-data/importer?type=mirror_import&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/importer?type=mirror_import&country={country}&hs_code={hs_code}
+
+Exporter:
+https://www.marketinsidedata.com/en/search-data/exporter?type=mirror_export&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/exporter?type=mirror_export&country={country}&hs_code={hs_code}
+
+Supplier:
+https://www.marketinsidedata.com/en/search-data/suppliers?type=mirror_import&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/suppliers?type=mirror_import&country={country}&hs_code={hs_code}
+
+Buyer:
+https://www.marketinsidedata.com/en/search-data/buyers?type=mirror_export&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/buyers?type=mirror_export&country={country}&hs_code={hs_code}
+
+────────────────────────
+INTENT: search_country_data
+────────────────────────
+
+Base URL:
+https://www.marketinsidedata.com/en/country/
+
+Rules:
+- country is REQUIRED
+- No product
+- No hs_code
+- direction decides imports or exports
+
+URL formats:
+https://www.marketinsidedata.com/en/country/{country}/imports
+https://www.marketinsidedata.com/en/country/{country}/exports
+
+────────────────────────
+FINAL OUTPUT FORMAT
+────────────────────────
+
+{
+  "intent": "",
+  "confidence": 0.0,
+  "url": ""
+}
+
+────────────────────────
+IMPORTANT
+────────────────────────
+
+- Output JSON only
+- Do NOT add params
+- Do NOT add explanations
+- If required fields are missing, return url = ""
+        """
+        parsed: Optional[Dict[str, Any]] = None
+        try:
+            llm = self._get_intent_classifier_llm()
+            resp = await asyncio.to_thread(
+                llm.invoke,
+                [SystemMessage(content=system), HumanMessage(content=f"User query: {query}")],
+            )
+            parsed = self._extract_json_object((getattr(resp, "content", "") or "").strip())
+        except Exception:
+            parsed = None
+
+        if not isinstance(parsed, dict):
+            return {"intent": "unknown", "confidence": 0.0, "url": {}}
+
+        intent = parsed.get("intent", "unknown")
+        if intent not in ("search_country_data", "search_trade_data", "unknown"):
+            intent = "unknown"
+
+        try:
+            confidence = float(parsed.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+
+        url = parsed.get("url", "")
+        if not isinstance(url, str):
+            url = ""
+
+        return {"intent": intent, "confidence": confidence, "url": url}
+
+    async def handle_dynamic_api_call(
+        self,
+        message: str,
+        session_id: str,
+        extra_data: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Classify message intent + entities and (optionally) call external API.
+        Returns a compact JSON string for downstream handling.
+        """
+        # Prefer explicit extra_data, else session meta
+        # dynamic_url = ""
+        # if extra_data and isinstance(extra_data, dict):
+        #     dynamic_url = (extra_data.get("dynamic_url") or "").strip()
+
+        # if not dynamic_url:
+        #     try:
+        #         session_meta = self.redis.get_session_meta(session_id) if hasattr(self.redis, "get_session_meta") else {}
+        #     except Exception:
+        #         session_meta = {}
+        #     dynamic_url = (session_meta.get("dynamic_url") or "").strip()
+
+        # 1) Detect intent and entities
+        intent_result = await self._detect_intent_and_entities(message)
+        intent = intent_result["intent"]
+        confidence = intent_result["confidence"]
+        url = intent_result["url"]
+
+        print(f"  [INTENT] Detected intent={intent} confidence={confidence:.2f} url={url}")
+
+        payload: Dict[str, Any] = {
+            "intent": intent,
+            "confidence": confidence,
+            "url": url,
+        }
+
+        # 2) Optional API augmentation
+        #     if API_CLIENT_AVAILABLE and dynamic_url and intent in (
+        #     "search_data_product",
+        #     "search_data_importers",
+        #     "data_availability",
+        # ):
+        if API_CLIENT_AVAILABLE and intent in (
+            "search_country_data",
+            "search_trade_data",
+            "unknown",
+        ):
+            try:
+                # fetched = await asyncio.to_thread(self.dynamic_content_manager.fetch_content, url, session_id)
+
+                # if isinstance(fetched, str):
+                #     summary = fetched[:200]
+                # else:
+                #     try:
+                #         summary = json.dumps(fetched)[:200]
+                #     except Exception:
+                #         summary = str(fetched)[:200]
+
+                # payload.update(
+                #     {
+                #         "source": "export_genius_api",
+                #         "dynamic_url": url,
+                #         "summary": summary,
+                #     }
+                # )
+
+                fetched = await self.dynamic_content_manager.fetch_content(url, session_id)
+                print(f"  [API] Fetched data from external API: {fetched} chars")
+                # print(f"  [API] Fetched data from external API: {summary} chars")
+                return fetched
+
+
+            except Exception as e:
+                print(f"  [API] External API call failed: {e}")
+                payload.update({"source": "intent_only", "dynamic_url": url})
+
+        # return json.dumps(payload)
     
+        
     async def chat(self, message: str, session_id: str, dynamic_url: Optional[str] = None) -> tuple[str, float, List[str]]:
         """
         Process chat message with Redis-backed embeddings
@@ -1247,38 +1592,83 @@ class ChatbotManager:
 
         print(f"  [DEBUG] dynamic_url parameter: {dynamic_url}")
 
-        if dynamic_url:
-            print(f"  [DEBUG] [OK] dynamic_url provided in chat()")
-            print(f"  [DEBUG] Looking up cached data for URL: {dynamic_url[:100] if len(dynamic_url) > 100 else dynamic_url}...")
-            # Check if embeddings already exist in Redis
-            cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(dynamic_url, session_id)
+        # if dynamic_url:
+        print(f"  [DEBUG] [OK] dynamic_url provided in chat()")
+        # print(f"  [DEBUG] Looking up cached data for URL: {dynamic_url[:100] if len(dynamic_url) > 100 else dynamic_url}...")
 
-            if cached_data:
-                # Extract embeddings, chunks, and full content from cache
-                embeddings, chunks, full_content = cached_data
+        # make a classify query function which will return dynamic or static based on the 
+
+        # Check if embeddings already exist in Redis
+        cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(dynamic_url, session_id)
+
+        if cached_data:
+            # Extract embeddings, chunks, and full content from cache
+            embeddings, chunks, full_content = cached_data
+            # dynamic_content = full_content
+            related, score = await self.is_query_related_via_llm(message, dynamic_url or "", full_content)
+            if related and score >= 0.5:
                 dynamic_content = full_content
-
-                print(f"  [DEBUG] [OK] CACHE HIT - Found cached data: {len(dynamic_content)} chars")
-                print(f"  [FAST] Using cached embeddings from Redis")
-                print(f"  [CACHE HIT] Content loaded: {len(dynamic_content)} chars")
                 sources_used.append("Dynamic Content (Redis)")
             else:
-                print(f"  [DEBUG] [CACHE MISS] - No cached data found, fetching...")
-                # Fetch content and generate embeddings
-                dynamic_content = await self.dynamic_content_manager.fetch_content(dynamic_url, session_id)
+                api_data = await self.handle_dynamic_api_call(message, session_id)
+                dynamic_content = api_data
+                sources_used.append("Dynamic Content")
+                print(f"  [DEBUG] LLM determined cached content is NOT related, fetched API data: {api_data}")
 
-                if dynamic_content:
-                    print(f"  [DEBUG] [OK] Fetched {len(dynamic_content)} chars from URL")
-                    sources_used.append("Dynamic Content")
 
-                    # Generate and store embeddings in Redis
-                    await self.dynamic_content_manager.generate_and_store_embeddings(
-                        content=dynamic_content,
-                        url=dynamic_url,
-                        session_id=session_id
-                    )
+
+
+
+            print(f"  [DEBUG] [OK] CACHE HIT - Found cached data: {len(dynamic_content)} chars")
+            print(f"  [FAST] Using cached embeddings from Redis")
+            print(f"  [CACHE HIT] Content loaded: {len(dynamic_content)} chars")
+            sources_used.append("Dynamic Content (Redis)")
         else:
-            print(f"  [DEBUG] [WARN] dynamic_url is None - will use KB only")
+            print(f"  [DEBUG] [CACHE MISS] - No cached data found, fetching...")
+            # Fetch content and generate embeddings
+            fetched = await self.dynamic_content_manager.fetch_content(dynamic_url, session_id)
+            if fetched:
+                related, score = await self.is_query_related_via_llm(message, dynamic_url or "", fetched)
+                if related and score >= 0.5:
+                    dynamic_content = fetched
+                    sources_used.append("Dynamic Content")
+                else:
+                    api_data = await self.handle_dynamic_api_call(message, session_id)
+                    dynamic_content = api_data
+                    sources_used.append("Dynamic Content")
+                    print(f"  [DEBUG] LLM determined fetched content is NOT related, fetched API data: {api_data}")
+                      # Generate and store embeddings in Redis
+                    # await self.dynamic_content_manager.generate_and_store_embeddings(
+                    #     content=dynamic_content,
+                    #     url=dynamic_url,
+                    #     session_id=session_id
+                    # )
+                # else:
+                    # call api to get the data
+
+
+
+
+
+
+
+                print(f"  [DEBUG] Fetched content -> LLM relevance: {related} (score={score:.2f})")
+            else:
+                dynamic_content = ""
+
+
+            # if dynamic_content:
+            #     print(f"  [DEBUG] [OK] Fetched {len(dynamic_content)} chars from URL")
+            #     sources_used.append("Dynamic Content")
+
+                # Generate and store embeddings in Redis
+                # await self.dynamic_content_manager.generate_and_store_embeddings(
+                #     content=dynamic_content,
+                #     url=dynamic_url,
+                #     session_id=session_id
+                # )
+        # else:
+        #     print(f"  [DEBUG] [WARN] dynamic_url is None - will use KB only")
 
         # Set session-specific dynamic content for tool access
         global session_dynamic_content
@@ -1301,7 +1691,8 @@ class ChatbotManager:
 
         try:
             # CRITICAL FIX: Call invoke() in thread pool with timeout
-            # Use run_in_executor for better cancellation than asyncio.to_thread
+            # Use run_in_executor for better cancellation than asyncio.to_thread\
+            # this will invoke the workflow to get the data from the kb
             result = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(
                     None,  # Use default thread pool executor
@@ -1385,6 +1776,9 @@ class ChatbotManager:
         }
 
         return response, processing_time, sources_used
+
+    # async def chat1(self,message:str, session_id:str,dynamic_url:Optional[str]=None) ->tuple[str,float,List[str]]:        
+    #     return await self.chat(message,session_id,dynamic_url)
 
     async def generate_questions(self, content: str, company_name: Optional[str] = None) -> List[str]:
         """
@@ -1995,8 +2389,8 @@ async def health_check():
         redis_connected=True,
         ollama_status="not_checked",
         kb_loaded=kb_loaded,
-        redis_connected=redis_connected,
-        active_sessions=active_sessions,
+        # redis_connected=redis_connected,
+        # active_sessions=active_sessions,
         uptime_seconds=uptime
     )
 
@@ -2047,11 +2441,11 @@ print("[DEBUG] Router included successfully!")
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     print("\n[START] Starting FastAPI server...")
     print("[KB] API docs will be available at: http://localhost:8000/docs")
     print()
-    
+
     uvicorn.run(
         "fastapi_chatbot:app",
         host="0.0.0.0",
