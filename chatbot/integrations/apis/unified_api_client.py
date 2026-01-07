@@ -41,6 +41,8 @@ class PageType(Enum):
     """Page type enumeration"""
     COMPANY = "company"
     COUNTRY = "country"
+    COUNTRY_TO_COUNTRY = "country_to_country"
+    HS_CODE = "hs_code"
     SEARCH_DATA = "search_data"
     UNKNOWN = "unknown"
 
@@ -365,6 +367,25 @@ class UnifiedAPIClient:
         "country_buyer_supplier": "/country-buyer-supplier",
         "country_monthly": "/country-monthly",
 
+        # Country-to-Country endpoints
+        "c2c_stats": "/country-to-country-stats",
+        "c2c_chapters": "/country-to-country-chapters",
+        "c2c_companies": "/country-to-country-importers-exporters",
+        "c2c_shipments": "/country-to-country-shipments",
+        "c2c_ports": "/country-to-country-ports",
+        "c2c_monthly": "/country-to-country-monthly-trends",
+        "c2c_countries_list": "/detailed-countries-list",
+        "c2c_origin_dest_list": "/origin-destination-country-list",
+
+        # HS Code hierarchy endpoints
+        "hs_chapter_details": "/chapter-details",
+        "hs_heading_details": "/heading-details",
+        "hs_subheading_details": "/sub-heading-details",
+        "hs_code_details": "/hs-code-details",
+        "hs_heading_list": "/heading-lists",
+        "hs_subheading_list": "/sub-heading-lists",
+        "hs_code_list": "/hs-code-lists",
+
         # Search data endpoints
         "search_product": "/search-data-product",
         "search_importers": "/search-data-importers",
@@ -413,6 +434,10 @@ class UnifiedAPIClient:
 
         if "/company/" in path or "/company-data/" in path:
             return PageType.COMPANY
+        elif "/cntry/" in path:
+            return PageType.COUNTRY_TO_COUNTRY
+        elif "/chapter/" in path:
+            return PageType.HS_CODE
         elif "/country/" in path or "/country-data/" in path:
             return PageType.COUNTRY
         elif "/search-data/" in path:
@@ -637,6 +662,202 @@ class UnifiedAPIClient:
             "fetched_at": datetime.now().isoformat(),
             **result_map
         }
+
+    async def fetch_country_to_country_data(
+        self,
+        url: str,
+        platform: Platform
+    ) -> Dict[str, Any]:
+        """
+        Fetch country-to-country bilateral trade data (6 endpoints in parallel)
+
+        Args:
+            url: Country-to-country URL (e.g., /en/cntry/Belgium-export-France)
+            platform: Platform enum
+
+        Returns:
+            Combined data from all endpoints
+        """
+        # Parse URL to extract countries and direction
+        params = self._parse_c2c_url(url)
+
+        if "error" in params:
+            return params
+
+        origin_country = params["origin_country"]
+        destination_country = params["destination_country"]
+        data_type = params["data_type"]
+
+        logger.info(
+            f"Fetching {data_type} data: {origin_country} → {destination_country} "
+            f"from {platform.value}"
+        )
+
+        client = self._get_client(platform)
+
+        # Build request body (conditional field assignment based on data_type)
+        base_payload = {
+            "data_type": data_type,
+            "country_name": origin_country,
+        }
+
+        # Add origin_country for import, destination_country for export
+        if data_type == "import":
+            base_payload["origin_country"] = destination_country
+        else:  # export
+            base_payload["destination_country"] = destination_country
+
+        # All 6 endpoints in parallel
+        parallel_endpoints = [
+            (self.ENDPOINTS["c2c_stats"], base_payload),
+            (self.ENDPOINTS["c2c_chapters"], base_payload),
+            (self.ENDPOINTS["c2c_companies"], base_payload),
+            (self.ENDPOINTS["c2c_shipments"], base_payload),
+            (self.ENDPOINTS["c2c_ports"], base_payload),
+            (self.ENDPOINTS["c2c_monthly"], base_payload),
+        ]
+
+        logger.info("  📡 Fetching 6 endpoints in parallel...")
+        start = time.time()
+        results = await client.call_endpoints_parallel(parallel_endpoints)
+        elapsed = time.time() - start
+
+        successes = sum(1 for r in results if r.success)
+        logger.info(
+            f"  ✓ Completed: {successes}/6 successful in {elapsed:.2f}s"
+        )
+
+        # Combine all data
+        return {
+            "origin_country": origin_country,
+            "destination_country": destination_country,
+            "data_type": data_type,
+            "platform": platform.value,
+            "fetched_at": datetime.now().isoformat(),
+            "stats": results[0].data if results[0].success else {"error": results[0].error},
+            "chapters": results[1].data if results[1].success else {"error": results[1].error},
+            "companies": results[2].data if results[2].success else {"error": results[2].error},
+            "shipments": results[3].data if results[3].success else {"error": results[3].error},
+            "ports": results[4].data if results[4].success else {"error": results[4].error},
+            "monthly_trends": results[5].data if results[5].success else {"error": results[5].error},
+        }
+
+    async def fetch_hs_code_data(
+        self,
+        url: str,
+        platform: Platform
+    ) -> Dict[str, Any]:
+        """
+        Fetch HS code hierarchy data (automatic endpoint selection based on code length)
+
+        Args:
+            url: HS code chapter URL (e.g., /en/chapter/botswana-import-hs-code-27)
+            platform: Platform enum
+
+        Returns:
+            Combined data from all relevant endpoints
+        """
+        # Parse URL to extract country, direction, and HS code
+        params = self._parse_hs_code_url(url)
+
+        if "error" in params:
+            return params
+
+        country_name = params["country_name"]
+        data_type = params["data_type"]
+        hs_code = params["hs_code"]
+        hierarchy_level = params["hierarchy_level"]
+
+        logger.info(
+            f"Fetching HS code data: {country_name} {data_type} - "
+            f"Code {hs_code} ({hierarchy_level}) from {platform.value}"
+        )
+
+        client = self._get_client(platform)
+
+        # Convert country name to ISO code for Marketinside API
+        # The API requires 2-letter ISO codes (e.g., "AR" not "argentina")
+        country_code_iso = self.COUNTRY_NAME_TO_ISO.get(
+            country_name.lower().replace(" ", "-"),
+            country_name.upper()  # Fallback: use uppercase if not in mapping
+        )
+
+        logger.info(f"  📍 Country mapping: '{country_name}' → '{country_code_iso}'")
+
+        # Build request body - field name varies by hierarchy level
+        # Chapter uses "chapter", Heading uses "heading", Subheading uses "sub_heading", HS Code uses "hs_code"
+        base_payload = {
+            "data_type": "custom_data",
+            "direction": data_type,
+            "country_code": country_code_iso,  # Use ISO code, not full name
+        }
+
+        # Determine which endpoints to call and add the correct field name
+        # Chapter (2 digits): chapter-details + heading-list
+        # Heading (4 digits): heading-details + sub-heading-list
+        # Subheading (6 digits): sub-heading-details + hs-code-list
+        # HS Code (8+ digits): hs-code-details only
+
+        parallel_endpoints = []
+
+        if hierarchy_level == "chapter":
+            payload = {**base_payload, "chapter": hs_code}
+            parallel_endpoints = [
+                (self.ENDPOINTS["hs_chapter_details"], payload),
+                (self.ENDPOINTS["hs_heading_list"], payload),
+            ]
+        elif hierarchy_level == "heading":
+            payload = {**base_payload, "heading": hs_code}
+            parallel_endpoints = [
+                (self.ENDPOINTS["hs_heading_details"], payload),
+                (self.ENDPOINTS["hs_subheading_list"], payload),
+            ]
+        elif hierarchy_level == "subheading":
+            payload = {**base_payload, "sub_heading": hs_code}
+            parallel_endpoints = [
+                (self.ENDPOINTS["hs_subheading_details"], payload),
+                (self.ENDPOINTS["hs_code_list"], payload),
+            ]
+        elif hierarchy_level == "hs_code":
+            payload = {**base_payload, "hs_code": hs_code}
+            parallel_endpoints = [
+                (self.ENDPOINTS["hs_code_details"], payload),
+            ]
+
+        logger.info(f"  📡 Fetching {len(parallel_endpoints)} endpoint(s) in parallel...")
+        start = time.time()
+        results = await client.call_endpoints_parallel(parallel_endpoints)
+        elapsed = time.time() - start
+
+        successes = sum(1 for r in results if r.success)
+        logger.info(
+            f"  ✓ Completed: {successes}/{len(parallel_endpoints)} successful in {elapsed:.2f}s"
+        )
+
+        # Build response based on hierarchy level
+        response = {
+            "country_name": country_name,
+            "data_type": data_type,
+            "hs_code": hs_code,
+            "hierarchy_level": hierarchy_level,
+            "platform": platform.value,
+            "fetched_at": datetime.now().isoformat(),
+        }
+
+        # Add data based on hierarchy level
+        if hierarchy_level == "chapter":
+            response["chapter_details"] = results[0].data if results[0].success else {"error": results[0].error}
+            response["heading_list"] = results[1].data if results[1].success else {"error": results[1].error}
+        elif hierarchy_level == "heading":
+            response["heading_details"] = results[0].data if results[0].success else {"error": results[0].error}
+            response["subheading_list"] = results[1].data if results[1].success else {"error": results[1].error}
+        elif hierarchy_level == "subheading":
+            response["subheading_details"] = results[0].data if results[0].success else {"error": results[0].error}
+            response["hs_code_list"] = results[1].data if results[1].success else {"error": results[1].error}
+        elif hierarchy_level == "hs_code":
+            response["hs_code_details"] = results[0].data if results[0].success else {"error": results[0].error}
+
+        return response
 
     # ========================================================================
     # HELPER METHODS
@@ -945,6 +1166,171 @@ class UnifiedAPIClient:
 
         return endpoints
 
+    @staticmethod
+    def _parse_c2c_url(url: str) -> Dict[str, Any]:
+        """
+        Parse country-to-country URL to extract countries and direction
+
+        URL Pattern: /[language]/cntry/[origin]-[direction]-[destination]
+        Examples:
+            - /en/cntry/Belgium-export-France
+            - /en/cntry/United%20States-import-India
+
+        Args:
+            url: Country-to-country URL
+
+        Returns:
+            Dict with origin_country, destination_country, and data_type
+        """
+        import re
+        from urllib.parse import unquote
+
+        # Extract the last segment from path
+        parsed = urlparse(url)
+        path_segments = [p for p in parsed.path.split('/') if p]
+
+        if not path_segments:
+            return {"error": "Could not parse URL path"}
+
+        last_segment = path_segments[-1]
+
+        # Split by hyphen: [origin]-[direction]-[destination]
+        parts = last_segment.split('-')
+
+        if len(parts) < 3:
+            return {"error": f"Invalid URL format: expected [origin]-[direction]-[destination], got {last_segment}"}
+
+        # Handle cases where country names have hyphens (e.g., "united-states-import-india")
+        # Find the direction keyword (import or export)
+        direction_index = -1
+        direction = None
+
+        for i, part in enumerate(parts):
+            if part.lower() in ['import', 'export']:
+                direction_index = i
+                direction = part.lower()
+                break
+
+        if direction_index == -1:
+            return {"error": f"Could not find 'import' or 'export' in URL: {last_segment}"}
+
+        # Everything before direction is origin country
+        origin_parts = parts[:direction_index]
+        # Everything after direction is destination country
+        destination_parts = parts[direction_index + 1:]
+
+        if not origin_parts or not destination_parts:
+            return {"error": f"Missing origin or destination country in URL: {last_segment}"}
+
+        # Join parts with hyphens and decode URL encoding
+        origin_country = unquote('-'.join(origin_parts))
+        destination_country = unquote('-'.join(destination_parts))
+
+        # Keep country names lowercase and replace hyphens with spaces
+        # API expects lowercase country names (e.g., "south africa", "argentina")
+        origin_country = origin_country.replace('-', ' ').lower()
+        destination_country = destination_country.replace('-', ' ').lower()
+
+        return {
+            "origin_country": origin_country,
+            "destination_country": destination_country,
+            "data_type": direction
+        }
+
+    @staticmethod
+    def _parse_hs_code_url(url: str) -> Dict[str, Any]:
+        """
+        Parse HS code URL to extract country, direction, and HS code
+
+        URL Pattern: /[language]/chapter/[country]-[direction]-hs-code-[code]
+        Examples:
+            - /en/chapter/botswana-import-hs-code-27 (Chapter - 2 digits)
+            - /en/chapter/botswana-import-hs-code-2710 (Heading - 4 digits)
+            - /en/chapter/botswana-import-hs-code-271012 (Subheading - 6 digits)
+            - /en/chapter/botswana-import-hs-code-27101230 (HS Code - 8+ digits)
+
+        Args:
+            url: HS code chapter URL
+
+        Returns:
+            Dict with country_name, data_type, hs_code, and hierarchy_level
+        """
+        from urllib.parse import unquote
+
+        # Extract the last segment from path
+        parsed = urlparse(url)
+        path_segments = [p for p in parsed.path.split('/') if p]
+
+        if not path_segments:
+            return {"error": "Could not parse URL path"}
+
+        last_segment = path_segments[-1]
+
+        # Split by hyphen: [country]-[direction]-hs-code-[code]
+        parts = last_segment.split('-')
+
+        if len(parts) < 4:
+            return {"error": f"Invalid URL format: expected [country]-[direction]-hs-code-[code], got {last_segment}"}
+
+        # Find "hs" and "code" keywords
+        hs_index = -1
+        for i, part in enumerate(parts):
+            if part.lower() == 'hs' and i + 1 < len(parts) and parts[i + 1].lower() == 'code':
+                hs_index = i
+                break
+
+        if hs_index == -1:
+            return {"error": f"Could not find 'hs-code' in URL: {last_segment}"}
+
+        # Find direction keyword before "hs-code"
+        direction_index = -1
+        direction = None
+
+        for i in range(hs_index):
+            if parts[i].lower() in ['import', 'export']:
+                direction_index = i
+                direction = parts[i].lower()
+                break
+
+        if direction_index == -1:
+            return {"error": f"Could not find 'import' or 'export' in URL: {last_segment}"}
+
+        # Everything before direction is country name
+        country_parts = parts[:direction_index]
+
+        # Everything after "code" is the HS code
+        code_parts = parts[hs_index + 2:]  # Skip "hs" and "code"
+
+        if not country_parts or not code_parts:
+            return {"error": f"Missing country or HS code in URL: {last_segment}"}
+
+        # Join parts and decode URL encoding
+        country_name = unquote('-'.join(country_parts))
+        hs_code = ''.join(code_parts)  # Join without separator for HS code
+
+        # Keep country name lowercase (API expects lowercase)
+        country_name = country_name.replace('-', ' ').lower()
+
+        # Determine hierarchy level based on code length
+        code_length = len(hs_code)
+        if code_length == 2:
+            hierarchy_level = "chapter"
+        elif code_length == 4:
+            hierarchy_level = "heading"
+        elif code_length == 6:
+            hierarchy_level = "subheading"
+        elif code_length >= 8:
+            hierarchy_level = "hs_code"
+        else:
+            return {"error": f"Invalid HS code length: {code_length} (expected 2, 4, 6, or 8+ digits)"}
+
+        return {
+            "country_name": country_name,
+            "data_type": direction,
+            "hs_code": hs_code,
+            "hierarchy_level": hierarchy_level
+        }
+
 
 # ============================================================================
 # MAIN ENTRY POINT
@@ -980,6 +1366,10 @@ async def fetch_content_from_url(url: str) -> Tuple[Dict[str, Any], Platform, Pa
             data = await client.fetch_company_data(url, platform)
         elif page_type == PageType.COUNTRY:
             data = await client.fetch_country_data(url, platform)
+        elif page_type == PageType.COUNTRY_TO_COUNTRY:
+            data = await client.fetch_country_to_country_data(url, platform)
+        elif page_type == PageType.HS_CODE:
+            data = await client.fetch_hs_code_data(url, platform)
         elif page_type == PageType.SEARCH_DATA:
             data = await client.fetch_search_data(url, platform)
         else:

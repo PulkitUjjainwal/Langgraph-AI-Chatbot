@@ -52,6 +52,10 @@ async def fetch_and_format_content(url: str) -> Tuple[str, Platform, PageType]:
             formatted_text = UnifiedFormatter.format_company_data(data)
         elif page_type == PageType.COUNTRY:
             formatted_text = UnifiedFormatter.format_country_data(data)
+        elif page_type == PageType.COUNTRY_TO_COUNTRY:
+            formatted_text = UnifiedFormatter.format_country_to_country_data(data)
+        elif page_type == PageType.HS_CODE:
+            formatted_text = UnifiedFormatter.format_hs_code_data(data)
         elif page_type == PageType.SEARCH_DATA:
             formatted_text = UnifiedFormatter.format_search_data(data)
         else:
@@ -84,6 +88,18 @@ async def is_search_data_url(url: str) -> bool:
     """Check if URL is a search data page"""
     page_type = UnifiedAPIClient.detect_page_type(url)
     return page_type == PageType.SEARCH_DATA
+
+
+async def is_country_to_country_url(url: str) -> bool:
+    """Check if URL is a country-to-country bilateral trade page"""
+    page_type = UnifiedAPIClient.detect_page_type(url)
+    return page_type == PageType.COUNTRY_TO_COUNTRY
+
+
+async def is_hs_code_url(url: str) -> bool:
+    """Check if URL is an HS code chapter/hierarchy page"""
+    page_type = UnifiedAPIClient.detect_page_type(url)
+    return page_type == PageType.HS_CODE
 
 
 async def get_platform(url: str) -> Platform:
