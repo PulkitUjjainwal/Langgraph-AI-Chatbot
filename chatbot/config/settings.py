@@ -13,12 +13,14 @@ from pathlib import Path
 from typing import Optional
 from pydantic import Field
 
-# Try importing from pydantic_settings (Pydantic V2)
-# Fall back to pydantic if not available (Pydantic V1)
+# Pydantic v2 requires BaseSettings from the separate `pydantic-settings` package.
+# (Pydantic v1 had BaseSettings in `pydantic`, but this project pins pydantic v2.)
 try:
     from pydantic_settings import BaseSettings
-except ImportError:
-    from pydantic import BaseSettings
+except ImportError as exc:
+    raise ImportError(
+        "Missing dependency: pydantic-settings. Install it with 'pip install pydantic-settings'."
+    ) from exc
 
 # Try importing validator (Pydantic V1) or field_validator (Pydantic V2)
 try:
