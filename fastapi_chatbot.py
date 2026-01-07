@@ -136,7 +136,7 @@ class Config:
 
     # Ollama Configuration
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", None)
+    OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "006b1854cb5743d5a8a6e2baf09d163c.NQNQ-X28yY6S7WD0UtAp4_pb")
 
     # Redis Configuration
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -1991,7 +1991,8 @@ async def health_check():
 
     return HealthResponse(
         status="healthy" if kb_loaded else "starting",
-        version="3.0.0",
+        version="1.0.0",
+        redis_connected=True,
         ollama_status="not_checked",
         kb_loaded=kb_loaded,
         redis_connected=redis_connected,

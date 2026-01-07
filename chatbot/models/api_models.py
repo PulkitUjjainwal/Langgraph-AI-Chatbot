@@ -122,6 +122,8 @@ class HealthResponse(BaseModel):
     redis_connected: bool
     active_sessions: Optional[int] = Field(default=0, description="Number of active sessions")
     uptime_seconds: Optional[float] = Field(default=0.0, description="Server uptime in seconds")
+    version: str
+    redis_connected: bool
 
 
 class RedisStatsResponse(BaseModel):
