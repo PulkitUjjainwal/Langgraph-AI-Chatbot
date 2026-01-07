@@ -244,8 +244,8 @@ class DynamicContentManager:
     def _chunk_content(
         self,
         content: str,
-        chunk_size: int = 800,
-        overlap: int = 100
+        chunk_size: int = 400,  # Reduced from 800 to fit embedding model context
+        overlap: int = 50  # Reduced overlap proportionally
     ) -> List[Dict[str, Any]]:
         """
         Chunk content into smaller pieces for embedding
@@ -301,7 +301,9 @@ class DynamicContentManager:
         )
 
         # 1. Chunk content
-        chunks = self._chunk_content(content, chunk_size=800, overlap=100)
+        # Reduced chunk_size to 400 words to fit within embedding model context window
+        # 400 words ~= 2,000 chars, which fits in most embedding models (nomic-embed-text: 8192 tokens)
+        chunks = self._chunk_content(content, chunk_size=400, overlap=50)
 
         if not chunks:
             logger.warning("No chunks generated from content")
