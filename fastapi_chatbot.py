@@ -942,9 +942,9 @@ def create_chatbot_node():
 
         # SMART CONTEXT BUILDING
         print(f"\n  [STATS] CONTEXT MERGING DEBUG:")
-        print(f"     • KB Context Available: {len(kb_context)} chars")
-        print(f"     • Dynamic Content Available: {len(dynamic_content)} chars")
-        print(f"     • Merging Strategy: {query_type.upper()}")
+        print(f"     - KB Context Available: {len(kb_context)} chars")
+        print(f"     - Dynamic Content Available: {len(dynamic_content)} chars")
+        print(f"     - Merging Strategy: {query_type.upper()}")
 
         # CRITICAL FIX: If dynamic content is available, ALWAYS use it (regardless of query type)
         # The user has loaded company-specific data, so they want answers about that company
@@ -1715,7 +1715,7 @@ IMPORTANT
             )
 
             workflow_time = time.time() - workflow_start
-            print(f"[WORKFLOW] ✓ Completed in {workflow_time:.2f}s")
+            print(f"[WORKFLOW] [OK] Completed in {workflow_time:.2f}s")
 
             # Detailed performance breakdown
             print(f"[PERF] Workflow breakdown:")
@@ -1731,7 +1731,7 @@ IMPORTANT
 
         except asyncio.TimeoutError:
             workflow_time = time.time() - workflow_start
-            print(f"[WORKFLOW] ✗ TIMEOUT after {workflow_time:.1f}s")
+            print(f"[WORKFLOW] [FAILED] TIMEOUT after {workflow_time:.1f}s")
             print(f"[ERROR] Workflow exceeded 60s timeout")
             print(f"[DEBUG] Breakdown: chatbot finished around 33s, but workflow took {workflow_time:.1f}s total")
             print(f"[DEBUG] This suggests Redis checkpoint saving is taking 20-30+ seconds")
@@ -2164,7 +2164,11 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         import traceback
         error_details = traceback.format_exc()
         print(f"\n[ERROR] Chat endpoint failed:")
-        print(error_details)
+        try:
+            print(error_details)
+        except UnicodeEncodeError:
+            # Windows console encoding issue - print without special chars
+            print(error_details.encode('ascii', 'ignore').decode('ascii'))
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 
@@ -2241,25 +2245,30 @@ async def init_session(request: InitRequest):
             else:
                 # Cache MISS - fetch and cache
                 print(f"[INIT] Cache MISS - fetching and caching URL...")
-                content = await chatbot_manager.dynamic_content_manager.fetch_content(
-                    request.dynamic_url,
-                    request.session_id
-                )
-
-                if content:
-                    content_for_questions = content
-                    dynamic_url_processed = True
-
-                    # Generate and store embeddings (now 3-5x faster with parallel processing!)
-                    await chatbot_manager.dynamic_content_manager.generate_and_store_embeddings(
-                        content=content,
-                        url=request.dynamic_url,
-                        session_id=request.session_id
+                try:
+                    content = await chatbot_manager.dynamic_content_manager.fetch_content(
+                        request.dynamic_url,
+                        request.session_id
                     )
-                    print(f"[INIT] Content cached successfully ({len(content)} chars)")
-                else:
-                    error_message = "Failed to fetch dynamic URL content"
-                    print(f"[INIT] Warning: Could not fetch URL content")
+
+                    if content:
+                        content_for_questions = content
+                        dynamic_url_processed = True
+
+                        # Generate and store embeddings (now 3-5x faster with parallel processing!)
+                        await chatbot_manager.dynamic_content_manager.generate_and_store_embeddings(
+                            content=content,
+                            url=request.dynamic_url,
+                            session_id=request.session_id
+                        )
+                        print(f"[INIT] Content cached successfully ({len(content)} chars)")
+                    else:
+                        error_message = "Failed to fetch dynamic URL content"
+                        print(f"[INIT] Warning: Could not fetch URL content")
+                except Exception as e:
+                    error_message = f"Error fetching URL: {str(e)}"
+                    print(f"[INIT] Warning: Error fetching URL - {e}")
+                    print(f"[INIT] Will generate generic suggested questions")
 
             # Try to extract company name from URL for personalization
             try:
@@ -2293,7 +2302,9 @@ async def init_session(request: InitRequest):
         processing_time = time.time() - start_time
 
         # Prepare response
-        status = "success" if not error_message else "partial_success"
+        # Always return success if we have suggested questions
+        # Error message is informational only
+        status = "success"
         cache_status = {
             "cache_hit": cache_hit,
             "cached_at": datetime.now().isoformat() if dynamic_url_processed else None
@@ -2307,7 +2318,8 @@ async def init_session(request: InitRequest):
             cache_status=cache_status,
             processing_time=processing_time,
             dynamic_url_processed=dynamic_url_processed,
-            error=error_message
+            error=error_message,
+            session_id=request.session_id  # Include session_id in response
         )
 
     except Exception as e:
