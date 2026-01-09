@@ -1183,6 +1183,70 @@ class ChatbotManager:
         self.app = self._create_workflow()
         print("[OK] Chatbot Manager initialized (Redis-backed)")
 
+    async def get_country_data_type(self, country_name: str) -> str:
+        """Fetch country data_type from /detailed-mirror-countries-list API.
+        
+        Returns:
+            "detailed" if any detailed_* exists for the country, else "mirror"
+        """
+        import httpx
+
+        api_base = "https://api-dp.marketinsidedata.com/api/v1/users"
+        url = f"https://api-dp.marketinsidedata.com/api/v1/users/detailed-mirror-countries-list"
+
+        headers = {
+            "Content-Type": "application/json",
+            "Origin":"https://www.marketinsidedata.com",
+            "accept": "application/json",
+            "Authorization": f"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMwNzk0OWNiLWZmODItNGVkOS1hNzZhLWMxOGRmOThiZDZkYyIsImlhdCI6MTcwNDU0OTU4MH0.sMR6ZZ52KNkiXG8V-Y6JxjkscCOOEDY7DPEFc5nMU88",
+        }
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, json={}, headers=headers)
+            
+            if resp.status_code != 200:
+                print(f"  [WARN] Country list API returned {resp.status_code}")
+                return "mirror"
+            
+            data = resp.json()
+            countries = data.get("data", data) if isinstance(data, dict) else data
+            
+            if not isinstance(countries, list):
+                return "mirror"
+            
+            # Find matching country (case-insensitive)
+            country_lower = (country_name or "").lower().strip()
+            if not country_lower:
+                return "mirror"
+
+            # If caller provided ISO code, allow matching by code too.
+            country_upper = (country_name or "").strip().upper()
+            for country in countries:
+                if not isinstance(country, dict):
+                    continue
+                
+                c_name = (country.get("country_name") or "").strip().lower()
+                c_code = (country.get("country_code") or "").strip().upper()
+                if (
+                    c_name == country_lower
+                    or c_name.replace(" ", "-") == country_lower
+                    or (len(country_upper) == 2 and c_code == country_upper)
+                ):
+                    data_types = country.get("data_type", [])
+                    if isinstance(data_types, list):
+                        # Check if any detailed_* exists
+                        for dt in data_types:
+                            if str(dt).startswith("detailed_"):
+                                return "detailed"
+                    break
+            
+            return "mirror"
+            
+        except Exception as e:
+            print(f"  [ERROR] Failed to fetch country data_type: {e}")
+            return "mirror"
+
     def _create_workflow(self):
         """Create LangGraph workflow with guardrail node"""
         retrieval_node = create_retrieval_node(self.kb_retriever)
@@ -1229,52 +1293,179 @@ class ChatbotManager:
             return workflow.compile(checkpointer=memory)
         
         # ...existing code...
-    async def is_query_related_via_llm(self, message: str, dynamic_url: str, dynamic_content: str, timeout: float = 8.0) -> tuple[bool, float]:
+    async def is_query_related_via_llm(
+        self,
+        message: str,
+        dynamic_url: str,
+        dynamic_content: str,
+        timeout: float = 8.0,
+    ) -> tuple[bool, float, Optional[str]]:
+        """\
+        Quick LLM classifier+extractor.
+
+        Returns:
+            (related, score 0-1, country or None)
+
+        Country is returned ONLY if explicitly mentioned in the user query.
+        Falls back to a conservative heuristic on failure.
         """
-        Quick LLM classifier: returns (related, score 0-1).
-        Falls back to token/URL param heuristic on failure.
-        """
-        import json
+
+        def _normalize_space(s: str) -> str:
+            return " ".join((s or "").strip().split())
+
+        def _build_country_variant_map() -> Dict[str, str]:
+            """Build variant->canonical mapping using UnifiedAPIClient fallback list."""
+            variants: Dict[str, str] = {}
+            try:
+                from chatbot.integrations.apis.unified_api_client import UnifiedAPIClient
+                keys = list(getattr(UnifiedAPIClient, "COUNTRY_NAME_TO_ISO", {}).keys())
+            except Exception:
+                keys = []
+
+            def canonicalize(slug: str) -> str:
+                s = (slug or "").strip().lower()
+                special = {
+                    "usa": "United States",
+                    "united-states": "United States",
+                    "uk": "United Kingdom",
+                    "united-kingdom": "United Kingdom",
+                    "uae": "United Arab Emirates",
+                    "united-arab-emirates": "United Arab Emirates",
+                    "ivory-coast": "Ivory Coast",
+                    "south-korea": "South Korea",
+                    "north-macedonia": "North Macedonia",
+                    "czech-republic": "Czech Republic",
+                    "hong-kong": "Hong Kong",
+                    "new-zealand": "New Zealand",
+                    "sri-lanka": "Sri Lanka",
+                }
+                if s in special:
+                    return special[s]
+                return " ".join(part.capitalize() for part in s.replace("-", " ").split())
+
+            for k in keys:
+                if not isinstance(k, str) or not k:
+                    continue
+                canon = canonicalize(k)
+
+                # Common textual variants to match against user query
+                variants[k] = canon                       # hyphenated
+                variants[k.replace("-", " ")] = canon   # spaced
+
+            # Add extra alias variants for acronyms that users type
+            variants["u.s."] = "United States"
+            variants["u.s"] = "United States"
+            variants["us"] = "United States"
+            variants["u.k."] = "United Kingdom"
+            variants["u.k"] = "United Kingdom"
+
+            return {k.lower(): v for k, v in variants.items() if k}
+
+        def _extract_country_explicit(query: str) -> Optional[str]:
+            """Return a canonical country name only if explicitly present in query."""
+            import re
+
+            q = _normalize_space(query).lower()
+            if not q:
+                return None
+
+            variant_map = getattr(self, "_country_variant_map", None)
+            if not isinstance(variant_map, dict) or not variant_map:
+                variant_map = _build_country_variant_map()
+                self._country_variant_map = variant_map
+
+            # Prefer longest match to avoid partial collisions
+            candidates = sorted(variant_map.items(), key=lambda kv: len(kv[0]), reverse=True)
+            for variant, canonical in candidates:
+                v = variant.strip()
+                if not v:
+                    continue
+                # Word-boundary style match, but safe for multi-word variants.
+                pattern = r"(?<![a-z0-9])" + re.escape(v) + r"(?![a-z0-9])"
+                if re.search(pattern, q, flags=re.IGNORECASE):
+                    return canonical
+            return None
+
         # Build concise prompt (keep content excerpt small)
-        excerpt = (dynamic_content or "")[:1200].replace("\n", " ")
+        excerpt = _normalize_space((dynamic_content or "")[:1200].replace("\n", " "))
         prompt = (
-            "You are a strict classifier. Answer only JSON with keys: related (true/false) "
-            "and score (0.0-1.0). Determine if the user query is about the given URL/page content.\n\n"
-            f"Query: {message}\n\nURL: {dynamic_url}\n\nPage excerpt: {excerpt}\n\n"
-            "Return only valid JSON, e.g. {\"related\": true, \"score\": 0.92}."
+            "You are a strict classifier and extractor.\n\n"
+            "Tasks:\n"
+            "1. Determine whether the user query is related to the given URL/page content and check country is same as the country in url and the country in query text.\n"
+            "2. Extract the country name from the user query IF AND ONLY IF a real country is explicitly mentioned.\n\n"
+            "Rules:\n"
+            "- Return ONLY valid JSON.\n"
+            "- Do not explain.\n"
+            "- Do not infer a country unless it is explicitly present in the query text.\n"
+            "- If no country is found, return null.\n"
+            "- Country name must be properly capitalized (e.g., \"Afghanistan\", not \"afghanistan\").\n\n"
+            "Output JSON format:\n"
+            "{\n"
+            "  \"related\": true | false,\n"
+            "  \"score\": number between 0.0 and 1.0,\n"
+            "  \"country\": string | null\n"
+            "}\n\n"
+            f"Inputs:\nQuery: {message}\n\nURL: {dynamic_url}\n\nPage excerpt: {excerpt}"
         )
 
         try:
-            # Use existing app.invoke but keep it lightweight and timed
-            result = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self.app.invoke({"messages": [HumanMessage(content=prompt)], "use_cache": False}, {"configurable": {}}),
-                ),
+            llm = self._get_intent_classifier_llm()
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(llm.invoke, [HumanMessage(content=prompt)]),
                 timeout=timeout,
             )
-            text = result.get("messages", [])[-1].content if result.get("messages") else ""
-            parsed = json.loads(text.strip())
+
+            text = (getattr(resp, "content", "") or "").strip()
+            parsed = self._extract_json_object(text)
+            if not isinstance(parsed, dict):
+                raise ValueError("Classifier did not return JSON object")
+
             related = bool(parsed.get("related", False))
-            score = float(parsed.get("score", 0.0))
-            return related, max(0.0, min(1.0, score))
+            try:
+                score = float(parsed.get("score", 0.0))
+            except Exception:
+                score = 0.0
+            score = max(0.0, min(1.0, score))
+
+            country_val = parsed.get("country", None)
+            country: Optional[str]
+            if isinstance(country_val, str):
+                country = _normalize_space(country_val) or None
+            else:
+                country = None
+
+            # Enforce "explicitly present" rule (avoid LLM hallucinating a country).
+            explicit_country = _extract_country_explicit(message)
+            if country is not None:
+                # Accept only if the returned country aligns with an explicit mention.
+                if explicit_country is None:
+                    country = None
+                else:
+                    # If user explicitly mentioned a country, trust that canonical.
+                    country = explicit_country
+
+            return related, score, country
+
         except Exception:
             # Fallback heuristic: token overlap + URL param match
             try:
                 from urllib.parse import urlparse, parse_qs
+
                 qparams = parse_qs(urlparse(dynamic_url or "").query) if dynamic_url else {}
                 tokens = set(w for w in (message or "").lower().split() if len(w) > 2)
                 param_tokens = set()
                 for v in qparams.values():
                     for vv in v:
                         param_tokens.update(x for x in vv.lower().split() if len(x) > 2)
+
                 overlap = len(tokens & param_tokens)
                 content_overlap = sum(1 for t in tokens if t in (dynamic_content or "").lower())
                 score = min(1.0, (overlap * 0.6 + content_overlap * 0.2) / max(1, len(tokens)))
                 related = (overlap >= 1) or (content_overlap >= 2)
-                return related, float(score)
+                country = _extract_country_explicit(message)
+                return related, float(score), country
             except Exception:
-                return False, 0.0
+                return False, 0.0, None
 
     @staticmethod
     def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
@@ -1347,7 +1538,7 @@ INTENTS (ONLY TWO)
 Choose exactly ONE intent:
 
 1. search_trade_data
-   → User wants trade-related records such as:
+   → User wants trade-related records only when product, hscode ,importer or exporter with direction import, export is specified such as:
      - Trade data (import/export)
      - Importers
      - Exporters
@@ -1362,7 +1553,8 @@ Choose exactly ONE intent:
      - HS chapters
      - Trade partners
      - Ports
-     - Exporters (summary)
+     - Top Exporters (summary)
+     - Top Importers (summary)
      - Shipment overview (summary only)
    → Output a /country/... URL
 
@@ -1516,6 +1708,10 @@ IMPORTANT
         #         session_meta = {}
         #     dynamic_url = (session_meta.get("dynamic_url") or "").strip()
 
+        #0 now need to check whether do we  have mirror data or import data for the country in question
+
+        # direction = await 
+
         # 1) Detect intent and entities
         intent_result = await self._detect_intent_and_entities(message)
         intent = intent_result["intent"]
@@ -1542,36 +1738,13 @@ IMPORTANT
             "unknown",
         ):
             try:
-                # fetched = await asyncio.to_thread(self.dynamic_content_manager.fetch_content, url, session_id)
-
-                # if isinstance(fetched, str):
-                #     summary = fetched[:200]
-                # else:
-                #     try:
-                #         summary = json.dumps(fetched)[:200]
-                #     except Exception:
-                #         summary = str(fetched)[:200]
-
-                # payload.update(
-                #     {
-                #         "source": "export_genius_api",
-                #         "dynamic_url": url,
-                #         "summary": summary,
-                #     }
-                # )
-
                 fetched = await self.dynamic_content_manager.fetch_content(url, session_id)
                 print(f"  [API] Fetched data from external API: {fetched} chars")
-                # print(f"  [API] Fetched data from external API: {summary} chars")
                 return fetched
-
 
             except Exception as e:
                 print(f"  [API] External API call failed: {e}")
-                payload.update({"source": "intent_only", "dynamic_url": url})
-
-        # return json.dumps(payload)
-    
+                return ""    
         
     async def chat(self, message: str, session_id: str, dynamic_url: Optional[str] = None) -> tuple[str, float, List[str]]:
         """
@@ -1596,79 +1769,65 @@ IMPORTANT
         print(f"  [DEBUG] [OK] dynamic_url provided in chat()")
         # print(f"  [DEBUG] Looking up cached data for URL: {dynamic_url[:100] if len(dynamic_url) > 100 else dynamic_url}...")
 
-        # make a classify query function which will return dynamic or static based on the 
-
         # Check if embeddings already exist in Redis
         cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(dynamic_url, session_id)
+
+        dataType = ""
 
         if cached_data:
             # Extract embeddings, chunks, and full content from cache
             embeddings, chunks, full_content = cached_data
             # dynamic_content = full_content
-            related, score = await self.is_query_related_via_llm(message, dynamic_url or "", full_content)
+            related, score, detected_country = await self.is_query_related_via_llm(
+                message, dynamic_url or "", full_content
+            )
+            if detected_country:
+                dataType = await self.get_country_data_type(detected_country)
+                print(f"  [DATA TYPE] Country={detected_country} -> dataType={dataType}")
+
             if related and score >= 0.5:
                 dynamic_content = full_content
                 sources_used.append("Dynamic Content (Redis)")
             else:
-                api_data = await self.handle_dynamic_api_call(message, session_id)
+                api_data = await self.handle_dynamic_api_call(message, session_id,extra_data={"data_type": dataType})
                 dynamic_content = api_data
                 sources_used.append("Dynamic Content")
                 print(f"  [DEBUG] LLM determined cached content is NOT related, fetched API data: {api_data}")
 
-
-
-
-
             print(f"  [DEBUG] [OK] CACHE HIT - Found cached data: {len(dynamic_content)} chars")
             print(f"  [FAST] Using cached embeddings from Redis")
             print(f"  [CACHE HIT] Content loaded: {len(dynamic_content)} chars")
-            sources_used.append("Dynamic Content (Redis)")
+            # sources_used.append("Dynamic Content (Redis)")
         else:
             print(f"  [DEBUG] [CACHE MISS] - No cached data found, fetching...")
             # Fetch content and generate embeddings
             fetched = await self.dynamic_content_manager.fetch_content(dynamic_url, session_id)
+            related, score, detected_country = False, 0.0, None
             if fetched:
-                related, score = await self.is_query_related_via_llm(message, dynamic_url or "", fetched)
+                related, score, detected_country = await self.is_query_related_via_llm(
+                    message, dynamic_url or "", fetched
+                )
+
+                if detected_country:
+                    dataType = await self.get_country_data_type(detected_country)
+                    print(f"  [DATA TYPE] Country={detected_country} -> dataType={dataType}")
+
                 if related and score >= 0.5:
                     dynamic_content = fetched
                     sources_used.append("Dynamic Content")
                 else:
-                    api_data = await self.handle_dynamic_api_call(message, session_id)
+                    api_data = await self.handle_dynamic_api_call(
+                        message,
+                        session_id,
+                        extra_data={"data_type": dataType} if dataType else None,
+                    )
                     dynamic_content = api_data
                     sources_used.append("Dynamic Content")
                     print(f"  [DEBUG] LLM determined fetched content is NOT related, fetched API data: {api_data}")
-                      # Generate and store embeddings in Redis
-                    # await self.dynamic_content_manager.generate_and_store_embeddings(
-                    #     content=dynamic_content,
-                    #     url=dynamic_url,
-                    #     session_id=session_id
-                    # )
-                # else:
-                    # call api to get the data
-
-
-
-
-
-
 
                 print(f"  [DEBUG] Fetched content -> LLM relevance: {related} (score={score:.2f})")
             else:
                 dynamic_content = ""
-
-
-            # if dynamic_content:
-            #     print(f"  [DEBUG] [OK] Fetched {len(dynamic_content)} chars from URL")
-            #     sources_used.append("Dynamic Content")
-
-                # Generate and store embeddings in Redis
-                # await self.dynamic_content_manager.generate_and_store_embeddings(
-                #     content=dynamic_content,
-                #     url=dynamic_url,
-                #     session_id=session_id
-                # )
-        # else:
-        #     print(f"  [DEBUG] [WARN] dynamic_url is None - will use KB only")
 
         # Set session-specific dynamic content for tool access
         global session_dynamic_content
