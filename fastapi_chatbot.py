@@ -69,6 +69,7 @@ from chatbot.utils import (
     score_response_quality,
     PerformanceMonitor
 )
+from chatbot.utils.exceptions import DynamicContentError
 
 # Import production-grade retrieval components
 from chatbot.services.retrieval.kb_retriever import KnowledgeBaseRetriever as ModularKBRetriever
@@ -942,9 +943,9 @@ def create_chatbot_node():
 
         # SMART CONTEXT BUILDING
         print(f"\n  [STATS] CONTEXT MERGING DEBUG:")
-        print(f"     • KB Context Available: {len(kb_context)} chars")
-        print(f"     • Dynamic Content Available: {len(dynamic_content)} chars")
-        print(f"     • Merging Strategy: {query_type.upper()}")
+        print(f"     - KB Context Available: {len(kb_context)} chars")
+        print(f"     - Dynamic Content Available: {len(dynamic_content)} chars")
+        print(f"     - Merging Strategy: {query_type.upper()}")
 
         # CRITICAL FIX: If dynamic content is available, ALWAYS use it (regardless of query type)
         # The user has loaded company-specific data, so they want answers about that company
@@ -1257,8 +1258,10 @@ class ChatbotManager:
             parsed = json.loads(text.strip())
             related = bool(parsed.get("related", False))
             score = float(parsed.get("score", 0.0))
+            print(f"  [LLM CLASSIFIER] Related: {related}, Score: {score:.2f}")
             return related, max(0.0, min(1.0, score))
-        except Exception:
+        except Exception as e:
+            print(f"  [LLM CLASSIFIER] Exception: {str(e)[:100]}, using fallback heuristic")
             # Fallback heuristic: token overlap + URL param match
             try:
                 from urllib.parse import urlparse, parse_qs
@@ -1272,8 +1275,10 @@ class ChatbotManager:
                 content_overlap = sum(1 for t in tokens if t in (dynamic_content or "").lower())
                 score = min(1.0, (overlap * 0.6 + content_overlap * 0.2) / max(1, len(tokens)))
                 related = (overlap >= 1) or (content_overlap >= 2)
+                print(f"  [FALLBACK HEURISTIC] Tokens: {tokens}, Content overlap: {content_overlap}, Related: {related}, Score: {score:.2f}")
                 return related, float(score)
-            except Exception:
+            except Exception as e:
+                print(f"  [FALLBACK HEURISTIC] Exception: {str(e)[:100]}")
                 return False, 0.0
 
     @staticmethod
@@ -1363,6 +1368,7 @@ Choose exactly ONE intent:
      - Trade partners
      - Ports
      - Exporters (summary)
+     - Importers (summary)
      - Shipment overview (summary only)
    → Output a /country/... URL
 
@@ -1505,16 +1511,9 @@ IMPORTANT
         Returns a compact JSON string for downstream handling.
         """
         # Prefer explicit extra_data, else session meta
-        # dynamic_url = ""
-        # if extra_data and isinstance(extra_data, dict):
-        #     dynamic_url = (extra_data.get("dynamic_url") or "").strip()
-
-        # if not dynamic_url:
-        #     try:
-        #         session_meta = self.redis.get_session_meta(session_id) if hasattr(self.redis, "get_session_meta") else {}
-        #     except Exception:
-        #         session_meta = {}
-        #     dynamic_url = (session_meta.get("dynamic_url") or "").strip()
+        dynamic_url_from_extra = ""
+        if extra_data and isinstance(extra_data, dict):
+            dynamic_url_from_extra = (extra_data.get("dynamic_url") or "").strip()
 
         # 1) Detect intent and entities
         intent_result = await self._detect_intent_and_entities(message)
@@ -1522,7 +1521,12 @@ IMPORTANT
         confidence = intent_result["confidence"]
         url = intent_result["url"]
 
-        print(f"  [INTENT] Detected intent={intent} confidence={confidence:.2f} url={url}")
+        # Use dynamic_url from extra_data if intent detection didn't find a URL
+        if not url and dynamic_url_from_extra:
+            url = dynamic_url_from_extra
+            print(f"  [INTENT] Using provided dynamic_url: {url[:80]}...")
+
+        print(f"  [INTENT] Detected intent={intent} confidence={confidence:.2f} url={url[:80] if url else ''}")
 
         payload: Dict[str, Any] = {
             "intent": intent,
@@ -1561,16 +1565,22 @@ IMPORTANT
                 # )
 
                 fetched = await self.dynamic_content_manager.fetch_content(url, session_id)
-                print(f"  [API] Fetched data from external API: {fetched} chars")
+                print(f"  [API] Fetched data from external API: {len(fetched)} chars")
                 # print(f"  [API] Fetched data from external API: {summary} chars")
                 return fetched
 
-
-            except Exception as e:
-                print(f"  [API] External API call failed: {e}")
+            except DynamicContentError as e:
+                print(f"  [API] External API call failed (DynamicContentError): {e}")
+                print(f"  [API] Falling back to knowledge base")
                 payload.update({"source": "intent_only", "dynamic_url": url})
+                return ""  # Return empty string on failure
+            except Exception as e:
+                print(f"  [API] External API call failed (Exception): {e}")
+                print(f"  [API] Falling back to knowledge base")
+                payload.update({"source": "intent_only", "dynamic_url": url})
+                return ""  # Return empty string on failure
 
-        # return json.dumps(payload)
+        return ""  # Return empty string if no API call was made
     
         
     async def chat(self, message: str, session_id: str, dynamic_url: Optional[str] = None) -> tuple[str, float, List[str]]:
@@ -1592,28 +1602,40 @@ IMPORTANT
 
         print(f"  [DEBUG] dynamic_url parameter: {dynamic_url}")
 
-        # if dynamic_url:
-        print(f"  [DEBUG] [OK] dynamic_url provided in chat()")
-        # print(f"  [DEBUG] Looking up cached data for URL: {dynamic_url[:100] if len(dynamic_url) > 100 else dynamic_url}...")
+        if dynamic_url:
+            print(f"  [DEBUG] [OK] dynamic_url provided in chat() - VERSION 2.0 WITH EXCEPTION HANDLING")
+            print(f"  [DEBUG] Looking up cached data for URL: {dynamic_url[:100] if len(dynamic_url) > 100 else dynamic_url}...")
 
-        # make a classify query function which will return dynamic or static based on the 
+            # make a classify query function which will return dynamic or static based on the
 
-        # Check if embeddings already exist in Redis
-        cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(dynamic_url, session_id)
+            # Check if embeddings already exist in Redis
+            cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(dynamic_url, session_id)
+        else:
+            print(f"  [DEBUG] No dynamic_url provided, using knowledge base only")
+            cached_data = None
 
         if cached_data:
             # Extract embeddings, chunks, and full content from cache
             embeddings, chunks, full_content = cached_data
-            # dynamic_content = full_content
+
+            # Check if query is related to cached content
             related, score = await self.is_query_related_via_llm(message, dynamic_url or "", full_content)
+            print(f"  [DEBUG] Cached content relevance: {related} (score={score:.2f})")
+
             if related and score >= 0.5:
                 dynamic_content = full_content
                 sources_used.append("Dynamic Content (Redis)")
+                print(f"  [DEBUG] Using cached content: {len(full_content)} chars")
             else:
-                api_data = await self.handle_dynamic_api_call(message, session_id)
-                dynamic_content = api_data
-                sources_used.append("Dynamic Content")
-                print(f"  [DEBUG] LLM determined cached content is NOT related, fetched API data: {api_data}")
+                # Content not related, fetch fresh data for the explicit URL
+                try:
+                    api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"dynamic_url": dynamic_url})
+                    dynamic_content = api_data or ""
+                    sources_used.append("Dynamic Content")
+                    print(f"  [DEBUG] LLM determined cached content is NOT related, fetched API data: {len(api_data) if api_data else 0} chars")
+                except Exception as e:
+                    print(f"  [WARN] Failed to call API: {e}")
+                    dynamic_content = ""
 
 
 
@@ -1624,27 +1646,41 @@ IMPORTANT
             print(f"  [CACHE HIT] Content loaded: {len(dynamic_content)} chars")
             sources_used.append("Dynamic Content (Redis)")
         else:
-            print(f"  [DEBUG] [CACHE MISS] - No cached data found, fetching...")
-            # Fetch content and generate embeddings
-            fetched = await self.dynamic_content_manager.fetch_content(dynamic_url, session_id)
+            print(f"  [DEBUG] [CACHE MISS] - No cached data found")
+            # Fetch content and generate embeddings (only if dynamic_url exists)
+            if dynamic_url:
+                print(f"  [DEBUG] Fetching dynamic content from URL...")
+                try:
+                    fetched = await self.dynamic_content_manager.fetch_content(dynamic_url, session_id)
+                except DynamicContentError as e:
+                    print(f"  [WARN] Failed to fetch dynamic content (DynamicContentError): {e}")
+                    print(f"  [INFO] Falling back to knowledge base only")
+                    fetched = None
+                except Exception as e:
+                    print(f"  [WARN] Failed to fetch dynamic content (Exception): {e}")
+                    print(f"  [INFO] Falling back to knowledge base only")
+                    fetched = None
+            else:
+                fetched = None
             if fetched:
+                # Check if fetched content is related to the query
                 related, score = await self.is_query_related_via_llm(message, dynamic_url or "", fetched)
+                print(f"  [DEBUG] Fetched content relevance: {related} (score={score:.2f})")
+
                 if related and score >= 0.5:
                     dynamic_content = fetched
                     sources_used.append("Dynamic Content")
+                    print(f"  [DEBUG] Using fetched content: {len(fetched)} chars")
                 else:
-                    api_data = await self.handle_dynamic_api_call(message, session_id)
-                    dynamic_content = api_data
-                    sources_used.append("Dynamic Content")
-                    print(f"  [DEBUG] LLM determined fetched content is NOT related, fetched API data: {api_data}")
-                      # Generate and store embeddings in Redis
-                    # await self.dynamic_content_manager.generate_and_store_embeddings(
-                    #     content=dynamic_content,
-                    #     url=dynamic_url,
-                    #     session_id=session_id
-                    # )
-                # else:
-                    # call api to get the data
+                    # Content not related, try to get more relevant data
+                    try:
+                        api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"dynamic_url": dynamic_url})
+                        dynamic_content = api_data or ""
+                        sources_used.append("Dynamic Content")
+                        print(f"  [DEBUG] LLM determined fetched content is NOT related, fetched API data: {len(api_data) if api_data else 0} chars")
+                    except Exception as e:
+                        print(f"  [WARN] Failed to call API: {e}")
+                        dynamic_content = ""
 
 
 
@@ -1715,7 +1751,7 @@ IMPORTANT
             )
 
             workflow_time = time.time() - workflow_start
-            print(f"[WORKFLOW] ✓ Completed in {workflow_time:.2f}s")
+            print(f"[WORKFLOW] [OK] Completed in {workflow_time:.2f}s")
 
             # Detailed performance breakdown
             print(f"[PERF] Workflow breakdown:")
@@ -1731,7 +1767,7 @@ IMPORTANT
 
         except asyncio.TimeoutError:
             workflow_time = time.time() - workflow_start
-            print(f"[WORKFLOW] ✗ TIMEOUT after {workflow_time:.1f}s")
+            print(f"[WORKFLOW] [FAILED] TIMEOUT after {workflow_time:.1f}s")
             print(f"[ERROR] Workflow exceeded 60s timeout")
             print(f"[DEBUG] Breakdown: chatbot finished around 33s, but workflow took {workflow_time:.1f}s total")
             print(f"[DEBUG] This suggests Redis checkpoint saving is taking 20-30+ seconds")
@@ -2164,7 +2200,11 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         import traceback
         error_details = traceback.format_exc()
         print(f"\n[ERROR] Chat endpoint failed:")
-        print(error_details)
+        try:
+            print(error_details)
+        except UnicodeEncodeError:
+            # Windows console encoding issue - print without special chars
+            print(error_details.encode('ascii', 'ignore').decode('ascii'))
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 
@@ -2241,25 +2281,50 @@ async def init_session(request: InitRequest):
             else:
                 # Cache MISS - fetch and cache
                 print(f"[INIT] Cache MISS - fetching and caching URL...")
-                content = await chatbot_manager.dynamic_content_manager.fetch_content(
-                    request.dynamic_url,
-                    request.session_id
-                )
-
-                if content:
-                    content_for_questions = content
-                    dynamic_url_processed = True
-
-                    # Generate and store embeddings (now 3-5x faster with parallel processing!)
-                    await chatbot_manager.dynamic_content_manager.generate_and_store_embeddings(
-                        content=content,
-                        url=request.dynamic_url,
-                        session_id=request.session_id
+                try:
+                    content = await chatbot_manager.dynamic_content_manager.fetch_content(
+                        request.dynamic_url,
+                        request.session_id
                     )
-                    print(f"[INIT] Content cached successfully ({len(content)} chars)")
-                else:
-                    error_message = "Failed to fetch dynamic URL content"
-                    print(f"[INIT] Warning: Could not fetch URL content")
+
+                    if content:
+                        content_for_questions = content
+                        dynamic_url_processed = True
+
+                        # Generate and store embeddings (now 3-5x faster with parallel processing!)
+                        await chatbot_manager.dynamic_content_manager.generate_and_store_embeddings(
+                            content=content,
+                            url=request.dynamic_url,
+                            session_id=request.session_id
+                        )
+                        print(f"[INIT] Content cached successfully ({len(content)} chars)")
+                    else:
+                        error_message = "Failed to fetch dynamic URL content"
+                        print(f"[INIT] Warning: Could not fetch URL content")
+                except Exception as e:
+                    error_message = f"Error fetching URL: {str(e)}"
+                    print(f"[INIT] Warning: Error fetching URL - {e}")
+                    print(f"[INIT] Will generate generic suggested questions")
+
+            # For search data URLs, pre-fetch country data types for faster processing
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(request.dynamic_url)
+                if '/search-data/' in parsed.path.lower():
+                    # Import the unified client to detect platform and pre-cache country data types
+                    try:
+                        from chatbot.integrations.apis.unified_api_client import UnifiedAPIClient
+                        client = UnifiedAPIClient()
+                        platform = client.detect_platform(request.dynamic_url)
+
+                        # Pre-fetch and cache country data types for faster chat responses
+                        await client._get_country_data_types(platform)
+                        await client.close_all()
+                        print(f"[INIT] ✓ Pre-cached country data types for search data URL")
+                    except Exception as e:
+                        print(f"[INIT] Warning: Could not pre-cache country data types: {e}")
+            except:
+                pass
 
             # Try to extract company name from URL for personalization
             try:
@@ -2293,7 +2358,9 @@ async def init_session(request: InitRequest):
         processing_time = time.time() - start_time
 
         # Prepare response
-        status = "success" if not error_message else "partial_success"
+        # Always return success if we have suggested questions
+        # Error message is informational only
+        status = "success"
         cache_status = {
             "cache_hit": cache_hit,
             "cached_at": datetime.now().isoformat() if dynamic_url_processed else None
@@ -2307,7 +2374,8 @@ async def init_session(request: InitRequest):
             cache_status=cache_status,
             processing_time=processing_time,
             dynamic_url_processed=dynamic_url_processed,
-            error=error_message
+            error=error_message,
+            session_id=request.session_id  # Include session_id in response
         )
 
     except Exception as e:

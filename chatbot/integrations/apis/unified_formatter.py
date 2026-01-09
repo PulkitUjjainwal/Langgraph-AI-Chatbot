@@ -460,8 +460,32 @@ Date Range: {date_from} to {date_to}""")
                 sections.append(f"\nTop {len(products)} Shipment Records:")
                 for i, product in enumerate(products, 1):
                     sections.append(f"\n{i}. {product.get('product_description', 'N/A')[:150]}")
-                    sections.append(f"   Importer: {product.get('importer', 'N/A')}")
-                    sections.append(f"   Exporter: {product.get('exporter', 'N/A')}")
+
+                    # Check multiple field names for importer/buyer
+                    importer_name = product.get('importer') or product.get('buyer') or ''
+                    exporter_name = product.get('exporter') or product.get('supplier') or ''
+
+                    # Get addresses if available
+                    importer_addr = product.get('importer_address') or product.get('buyer_address') or ''
+                    exporter_addr = product.get('exporter_address') or product.get('supplier_address') or ''
+
+                    # Show importer/buyer with address if available
+                    if importer_name:
+                        if importer_addr and len(importer_addr) > 3:
+                            sections.append(f"   Importer/Buyer: {importer_name} ({importer_addr[:100]})")
+                        else:
+                            sections.append(f"   Importer/Buyer: {importer_name}")
+                    else:
+                        sections.append(f"   Importer/Buyer: [Locked/Anonymous]")
+
+                    # Show exporter/supplier with address if available
+                    if exporter_name:
+                        if exporter_addr and len(exporter_addr) > 3:
+                            sections.append(f"   Exporter/Supplier: {exporter_name} ({exporter_addr[:100]})")
+                        else:
+                            sections.append(f"   Exporter/Supplier: {exporter_name}")
+                    else:
+                        sections.append(f"   Exporter/Supplier: [Locked/Anonymous]")
 
                     value = product.get('total_value_usd', product.get('value_usd', 0))
                     if isinstance(value, str):
@@ -579,16 +603,70 @@ Date Range: {date_from} to {date_to}""")
         totals_imp = data.get("search_data_total_importers_suppliers", {})
         totals_exp = data.get("search_data_total_exporters_buyers", {})
 
-        if (totals_imp and "error" not in totals_imp) or (totals_exp and "error" not in totals_exp):
-            sections.append("\n=== TOTALS ===")
+        sections.append("\n=== TOTALS ===")
 
-            if totals_imp and "error" not in totals_imp:
-                sections.append(f"Total Importers: {totals_imp.get('totalImporters', 0):,}")
-                sections.append(f"Total Foreign Suppliers: {totals_imp.get('totalForeignSuppliers', 0):,}")
+        # Get importer count (from totals endpoint or count from importers list)
+        total_importers = 0
+        if totals_imp and "error" not in totals_imp:
+            total_importers = totals_imp.get('totalImporters', 0)
 
-            if totals_exp and "error" not in totals_exp:
-                sections.append(f"Total Exporters: {totals_exp.get('totalExporters', 0):,}")
-                sections.append(f"Total Foreign Buyers: {totals_exp.get('total_foreign_buyers', 0):,}")
+        # Fallback: count from importers data if available
+        if total_importers == 0 and importers_data and "error" not in importers_data:
+            importers_list = importers_data.get('importers', [])
+            if importers_list:
+                total_importers = len(importers_list)
+                # Check if there's a total_count field in the response
+                if 'total_count' in importers_data:
+                    total_importers = importers_data['total_count']
+
+        # Get supplier count
+        total_suppliers = 0
+        if totals_imp and "error" not in totals_imp:
+            total_suppliers = totals_imp.get('totalForeignSuppliers', 0)
+
+        # Fallback: count from suppliers data if available
+        if total_suppliers == 0 and suppliers_data and "error" not in suppliers_data:
+            suppliers_list = suppliers_data.get('suppliers', [])
+            if suppliers_list:
+                total_suppliers = len(suppliers_list)
+                if 'total_count' in suppliers_data:
+                    total_suppliers = suppliers_data['total_count']
+
+        # Get exporter count
+        total_exporters = 0
+        if totals_exp and "error" not in totals_exp:
+            total_exporters = totals_exp.get('totalExporters', 0)
+
+        # Fallback: count from exporters data
+        if total_exporters == 0 and exporters_data and "error" not in exporters_data:
+            exporters_list = exporters_data.get('exporters', [])
+            if exporters_list:
+                total_exporters = len(exporters_list)
+                if 'total_count' in exporters_data:
+                    total_exporters = exporters_data['total_count']
+
+        # Get buyer count
+        total_buyers = 0
+        if totals_exp and "error" not in totals_exp:
+            total_buyers = totals_exp.get('total_foreign_buyers', 0)
+
+        # Fallback: count from buyers data
+        if total_buyers == 0 and buyers_data and "error" not in buyers_data:
+            buyers_list = buyers_data.get('buyers', [])
+            if buyers_list:
+                total_buyers = len(buyers_list)
+                if 'total_count' in buyers_data:
+                    total_buyers = buyers_data['total_count']
+
+        # Show totals
+        if total_importers > 0:
+            sections.append(f"Total Importers: {total_importers:,}")
+        if total_suppliers > 0:
+            sections.append(f"Total Foreign Suppliers: {total_suppliers:,}")
+        if total_exporters > 0:
+            sections.append(f"Total Exporters: {total_exporters:,}")
+        if total_buyers > 0:
+            sections.append(f"Total Foreign Buyers: {total_buyers:,}")
 
         return "\n".join(sections)
 

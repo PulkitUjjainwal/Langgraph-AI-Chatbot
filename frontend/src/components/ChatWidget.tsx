@@ -27,18 +27,7 @@ function createSessionId(): string {
   ) {
     return (crypto as Crypto & { randomUUID: () => string }).randomUUID();
   }
-
-  // Fallback: not a perfect UUID, but unique enough for per-tab chat sessions.
   return `sid-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function safeStringify(value: unknown): string {
-  try {
-    if (typeof value === "string") return value;
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
 }
 
 export default function ChatWidget() {
@@ -46,6 +35,7 @@ export default function ChatWidget() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [suggestionsState, setSuggestionsState] = useState<SuggestionsState | null>(null);
+  const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([]);
 
   const [sessionId, setSessionId] = useState<string>(() => {
     if (typeof window === "undefined") return "";
@@ -54,18 +44,59 @@ export default function ChatWidget() {
 
   const [countryInput, setCountryInput] = useState("");
   const [productInput, setProductInput] = useState("");
+  const [currentUrl, setCurrentUrl] = useState("");
 
-  // Show initial welcome message the first time the chat is opened
+  // Get current page URL
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setCurrentUrl(window.location.href);
+    }
+  }, []);
+
+  // Monitor URL changes
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const handleUrlChange = () => {
+      const newUrl = window.location.href;
+      if (newUrl !== currentUrl) {
+        setCurrentUrl(newUrl);
+        console.log("URL changed to:", newUrl);
+      }
+    };
+
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+
+    history.pushState = function(...args) {
+      originalPushState.apply(history, args);
+      handleUrlChange();
+    };
+
+    history.replaceState = function(...args) {
+      originalReplaceState.apply(history, args);
+      handleUrlChange();
+    };
+
+    window.addEventListener('popstate', handleUrlChange);
+
+    return () => {
+      history.pushState = originalPushState;
+      history.replaceState = originalReplaceState;
+      window.removeEventListener('popstate', handleUrlChange);
+    };
+  }, [currentUrl]);
+
+  // Show initial welcome message on first open
   useEffect(() => {
     if (open && messages.length === 0) {
-      // Generate/persist a session_id at chat start
       if (!sessionId) {
         const newSessionId = createSessionId();
         setSessionId(newSessionId);
         try {
           window.localStorage.setItem(SESSION_STORAGE_KEY, newSessionId);
         } catch {
-          // ignore storage failures
+          // ignore
         }
       }
 
@@ -73,7 +104,7 @@ export default function ChatWidget() {
         {
           id: "welcome-1",
           role: "assistant",
-          text: "Hi! I’m your trade intelligence assistant. Ask me anything about markets, products or companies.",
+          text: "Hi! I'm your trade intelligence assistant. Ask me anything about markets, products or companies.",
         },
       ]);
     }
@@ -126,7 +157,6 @@ export default function ChatWidget() {
         .filter((x): x is string => Boolean(x));
     };
 
-    // Backend shape: suggestions: [{ field, type, options: [{label,value}...] }]
     const suggestionsArray = Array.isArray(suggestionsRaw) ? suggestionsRaw : [];
     const dataTypeSuggestion = suggestionsArray.find(
       (s) => s?.field === "data_type" && s?.type === "buttons"
@@ -165,88 +195,12 @@ export default function ChatWidget() {
     };
   }, [suggestionsState]);
 
-  // Get current page URL for dynamic content
-  const getCurrentPageUrl = (): string => {
-    try {
-      return window.location.href;
-    } catch {
-      return "";
-    }
-  };
-
-  const [currentUrl, setCurrentUrl] = useState(getCurrentPageUrl());
-
-  // Monitor URL changes (for SPAs)
-  useEffect(() => {
-    const handleUrlChange = () => {
-      const newUrl = getCurrentPageUrl();
-      if (newUrl !== currentUrl) {
-        setCurrentUrl(newUrl);
-        console.log("URL changed to:", newUrl);
-      }
-    };
-
-    // Listen for history changes (pushState, replaceState)
-    const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
-
-    history.pushState = function(...args) {
-      originalPushState.apply(history, args);
-      handleUrlChange();
-    };
-
-    history.replaceState = function(...args) {
-      originalReplaceState.apply(history, args);
-      handleUrlChange();
-    };
-
-    // Listen for popstate (back/forward buttons)
-    window.addEventListener('popstate', handleUrlChange);
-
-    return () => {
-      history.pushState = originalPushState;
-      history.replaceState = originalReplaceState;
-      window.removeEventListener('popstate', handleUrlChange);
-    };
-  }, [currentUrl]);
-
-  // Get API base URL from config or default
   const getApiBaseUrl = (): string => {
-    // Check for global config
     if (typeof window !== "undefined" && (window as any).CHATBOT_CONFIG) {
       return (window as any).CHATBOT_CONFIG.apiUrl || "http://localhost:8003";
     }
     return "http://localhost:8003";
   };
-
-  async function sendChatRequest(query: string, slotValues?: SlotValues) {
-    const sid = sessionId || createSessionId();
-    if (!sessionId) {
-      setSessionId(sid);
-      try {
-        window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
-      } catch {
-        // ignore storage failures
-      }
-    }
-
-    const extraData: any = {};
-    if (slotValues && Object.keys(slotValues).length > 0) extraData.slot_values = slotValues;
-
-    const apiBaseUrl = getApiBaseUrl();
-    const resp = await fetch(`${apiBaseUrl}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message: query,
-        session_id: sid,
-        dynamic_url: currentUrl, // Pass current page URL
-        ...extraData,
-      }),
-    });
-
-    return resp;
-  }
 
   // Initialize session with current URL
   async function initializeSession() {
@@ -256,7 +210,7 @@ export default function ChatWidget() {
       try {
         window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
       } catch {
-        // ignore storage failures
+        // ignore
       }
     }
 
@@ -275,9 +229,9 @@ export default function ChatWidget() {
         const data = await resp.json();
         console.log("Session initialized:", data);
 
-        // Optionally show suggested questions
+        // Store suggested questions
         if (data.suggested_questions && Array.isArray(data.suggested_questions)) {
-          // Store suggested questions if needed
+          setSuggestedQuestions(data.suggested_questions);
           console.log("Suggested questions:", data.suggested_questions);
         }
       }
@@ -288,19 +242,51 @@ export default function ChatWidget() {
 
   // Initialize session when chat opens
   useEffect(() => {
-    if (open && !sessionId) {
+    if (open && sessionId) {
       initializeSession();
     }
-  }, [open]);
+  }, [open, sessionId]);
+
+  async function sendChatRequest(query: string, slotValues?: SlotValues) {
+    const sid = sessionId || createSessionId();
+    if (!sessionId) {
+      setSessionId(sid);
+      try {
+        window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
+      } catch {
+        // ignore
+      }
+    }
+
+    const extraData: any = {};
+    if (slotValues && Object.keys(slotValues).length > 0) {
+      extraData.slot_values = slotValues;
+    }
+
+    const apiBaseUrl = getApiBaseUrl();
+    
+    // CRITICAL FIX: Always send dynamic_url in chat requests
+    const resp = await fetch(`${apiBaseUrl}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: query,
+        session_id: sid,
+        dynamic_url: currentUrl, // Always include current URL
+        ...extraData,
+      }),
+    });
+
+    return resp;
+  }
 
   async function handleSend(text: string, slotValues?: SlotValues) {
-    if (isSending) return; // prevent duplicate sends
+    if (isSending) return;
     setIsSending(true);
 
     const userId = `user-${Date.now()}`;
     const typingId = `typing-${Date.now() + 1}`;
 
-    // add user's message and a typing indicator
     setMessages((prev) => [
       ...prev,
       {
@@ -322,69 +308,42 @@ export default function ChatWidget() {
       const data: any = await resp.json();
       console.log("API response data:", data);
 
-      // Your backend may wrap the payload under api_response
+      // CRITICAL FIX: Use 'response' field instead of 'message'
+      // Backend sends ChatResponse with 'response' field
+      const assistantText: string = data.response || data.message || "I couldn't process that request.";
+
+      // Handle suggestions state if present
       const payload = data?.api_response ?? data;
-
-      const assistantText: string =
-        typeof payload?.message === "string"
-          ? payload.message
-          : typeof payload?.answer === "string"
-          ? payload.answer
-          : "";
-
       const collecting =
         payload?.status === "collecting" ||
-        data?.state?.status === "collecting" ||
         Boolean(payload?.suggestions) ||
-        Boolean(data?.suggestions) ||
-        (Array.isArray(payload?.missing_fields) && payload.missing_fields.length > 0) ||
-        (Array.isArray(data?.state?.missing_fields) && data.state.missing_fields.length > 0);
+        (Array.isArray(payload?.missing_fields) && payload.missing_fields.length > 0);
 
       setSuggestionsState(
         collecting
           ? {
-              status: payload?.status ?? data?.state?.status,
-              missing_fields: Array.isArray(payload?.missing_fields)
-                ? payload.missing_fields
-                : Array.isArray(data?.state?.missing_fields)
-                ? data.state.missing_fields
-                : [],
-              draft_payload: payload?.draft_payload ?? data?.state?.draft_payload,
-              suggestions: payload?.suggestions ?? data?.suggestions,
+              status: payload?.status,
+              missing_fields: Array.isArray(payload?.missing_fields) ? payload.missing_fields : [],
+              draft_payload: payload?.draft_payload,
+              suggestions: payload?.suggestions,
             }
           : null
       );
 
-      // replace typing message with actual assistant response
-      setMessages((prev) => {
-        const replaced = prev.map((m) =>
+      // Replace typing indicator with actual response
+      setMessages((prev) =>
+        prev.map((m) =>
           m.id === typingId
             ? {
                 id: `api-${Date.now()}`,
                 role: "assistant" as const,
-                text: data.message,
+                text: assistantText,
               }
             : m
-        );
-
-        // If final response includes data, render it as an additional message.
-        // const finalData = payload?.data ?? data?.data ?? payload?.api_response?.data;
-        // if (!collecting && finalData != null) {
-        //   const rendered = safeStringify(finalData);
-        //   const trimmed = rendered.length > 4000 ? `${rendered.slice(0, 4000)}\n…` : rendered;
-        //   return [
-        //     ...replaced,
-        //     {
-        //       id: `data-${Date.now()}`,
-        //       role: "assistant" as const,
-        //       text: trimmed,
-        //     },
-        //   ];
-        // }
-
-        return replaced;
-      });
+        )
+      );
     } catch (err) {
+      console.error("Chat error:", err);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === typingId
@@ -407,24 +366,59 @@ export default function ChatWidget() {
       <button
         onClick={() => setOpen(true)}
         className="fixed bottom-5 right-5 z-[2147483647]
-          rounded-full bg-chat-primary px-5 py-3
-          text-sm font-medium text-white shadow-lg"
+          flex items-center gap-2 rounded-full bg-gradient-to-r from-chat-accent to-chat-primary
+          px-6 py-3.5 text-sm font-semibold text-white shadow-xl
+          hover:shadow-2xl hover:scale-105 transition-all duration-200
+          ring-2 ring-white ring-offset-2"
       >
-        💬 Chat
+        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+        </svg>
+        Chat with AI
       </button>
 
       {/* Popup */}
       {open && (
-        <div className="fixed bottom-20 right-5 z-[2147483647]
-          flex h-[480px] w-[340px] flex-col
-          rounded-xl bg-chat-bg shadow-2xl"
+        <div className="fixed bottom-24 right-5 z-[2147483647]
+          flex h-[600px] w-[400px] flex-col
+          rounded-2xl bg-white shadow-2xl border border-chat-border overflow-hidden"
         >
           <ChatHeader onClose={() => setOpen(false)} />
+          
+          {/* Suggested Questions */}
+          {suggestedQuestions.length > 0 && messages.length <= 1 && (
+            <div className="border-b border-chat-border px-4 py-3 bg-gradient-to-b from-orange-50 to-white">
+              <div className="flex items-center gap-2 mb-2">
+                <svg className="h-4 w-4 text-chat-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                </svg>
+                <p className="text-xs text-chat-primary font-semibold">Suggested questions:</p>
+              </div>
+              <div className="space-y-2">
+                {suggestedQuestions.slice(0, 3).map((question, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => handleSend(question)}
+                    disabled={isSending}
+                    className="w-full text-left text-xs px-3 py-2.5 rounded-lg
+                      bg-white border border-gray-200 text-gray-700
+                      hover:bg-chat-accent-light hover:border-chat-accent hover:text-chat-primary
+                      transition-all duration-200 shadow-sm hover:shadow
+                      disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                  >
+                    {question}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <ChatMessages messages={messages} />
+          
           {isCollecting && (
-            <div className="border-t px-4 py-3">
+            <div className="border-t px-4 py-3 bg-gray-50">
               {missingFields.length > 0 && (
-                <div className="mb-2 text-xs text-chat-text">
+                <div className="mb-2 text-xs text-gray-600">
                   Needed: {missingFields.join(", ")}
                 </div>
               )}
@@ -436,7 +430,7 @@ export default function ChatWidget() {
                       key={opt.value}
                       disabled={isSending}
                       onClick={() => handleSend(opt.label, { data_type: opt.value })}
-                      className={`rounded-lg bg-chat-accent px-3 py-2 text-xs font-medium text-white hover:opacity-90 ${
+                      className={`rounded-lg bg-chat-primary px-3 py-2 text-xs font-medium text-white hover:bg-chat-primary-hover ${
                         isSending ? "opacity-70 cursor-not-allowed" : ""
                       }`}
                     >
@@ -464,7 +458,7 @@ export default function ChatWidget() {
                     placeholder="Select country..."
                     list="country-options"
                     disabled={isSending}
-                    className={`flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm text-chat-text focus:outline-none focus:ring-1 focus:ring-chat-primary ${
+                    className={`flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-chat-accent ${
                       isSending ? "opacity-60 cursor-not-allowed" : ""
                     }`}
                   />
@@ -481,7 +475,7 @@ export default function ChatWidget() {
                       setCountryInput("");
                       handleSend(v, { country: v });
                     }}
-                    className={`rounded-lg bg-chat-accent px-3 py-2 text-xs font-medium text-white hover:opacity-90 ${
+                    className={`rounded-lg bg-chat-primary px-3 py-2 text-xs font-medium text-white hover:bg-chat-primary-hover ${
                       isSending || !countryInput.trim() ? "opacity-70 cursor-not-allowed" : ""
                     }`}
                   >
@@ -507,7 +501,7 @@ export default function ChatWidget() {
                     }}
                     placeholder="Type product..."
                     disabled={isSending}
-                    className={`flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm text-chat-text focus:outline-none focus:ring-1 focus:ring-chat-primary ${
+                    className={`flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-chat-accent ${
                       isSending ? "opacity-60 cursor-not-allowed" : ""
                     }`}
                   />
@@ -519,7 +513,7 @@ export default function ChatWidget() {
                       setProductInput("");
                       handleSend(v, { product: v });
                     }}
-                    className={`rounded-lg bg-chat-accent px-3 py-2 text-xs font-medium text-white hover:opacity-90 ${
+                    className={`rounded-lg bg-chat-primary px-3 py-2 text-xs font-medium text-white hover:bg-chat-primary-hover ${
                       isSending || !productInput.trim() ? "opacity-70 cursor-not-allowed" : ""
                     }`}
                   >
@@ -529,6 +523,7 @@ export default function ChatWidget() {
               )}
             </div>
           )}
+          
           <ChatFooter onSend={handleSend} isSending={isSending} />
         </div>
       )}
