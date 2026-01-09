@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your Website with Chatbot</title>
+
+    <!-- Your website's existing head content goes here -->
+
+</head>
+<body>
+
+    <!-- YOUR WEBSITE CONTENT GOES HERE -->
+    <h1>Your Website</h1>
+    <p>Your regular website content...</p>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         CHATBOT WIDGET INTEGRATION
+         Copy this section to integrate the chatbot into your website
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Step 1: Configure the chatbot -->
+    <script>
+        // REQUIRED: Configure your API endpoint
+        window.CHATBOT_CONFIG = {
+            apiUrl: 'YOUR_API_URL_HERE'  // e.g., 'https://api.your-domain.com'
+        };
+    </script>
+
+    <!-- Step 2: Load the chatbot widget -->
+    <script type="module" src="YOUR_WIDGET_URL_HERE"></script>
+    <!-- Replace YOUR_WIDGET_URL_HERE with actual URL, e.g.:
+         https://your-cdn.com/chat-widget.js
+         OR
+         https://your-domain.com/assets/chat-widget.js
+    -->
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         END OF CHATBOT WIDGET INTEGRATION
+         ═══════════════════════════════════════════════════════════════════ -->
+
+</body>
+</html>

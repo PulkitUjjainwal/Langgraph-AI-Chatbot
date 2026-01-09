@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chatbot CSS Isolation Test</title>
+
+  <!-- Extreme host page styles to test isolation -->
+  <style>
+    /* These styles would normally break the chatbot */
+    * {
+      box-sizing: content-box !important;
+      margin: 20px !important;
+      padding: 20px !important;
+      border: 5px solid red !important;
+      background: yellow !important;
+      color: purple !important;
+      font-family: 'Comic Sans MS' !important;
+      font-size: 24px !important;
+    }
+
+    body {
+      background: linear-gradient(45deg, #ff0000, #00ff00, #0000ff) !important;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+
+    button {
+      background: pink !important;
+      border: 10px dashed green !important;
+      border-radius: 50px !important;
+      padding: 30px 50px !important;
+      font-size: 32px !important;
+      cursor: pointer;
+      transform: rotate(-5deg) !important;
+    }
+
+    input {
+      background: orange !important;
+      border: 5px dotted blue !important;
+      font-size: 28px !important;
+      color: red !important;
+    }
+
+    div {
+      border: 5px solid cyan !important;
+      background: magenta !important;
+      transform: rotate(2deg) !important;
+    }
+
+    /* Remove styles from chatbot container only */
+    #mi-chatbot-shadow-host,
+    #mi-chatbot-shadow-host * {
+      all: initial !important;
+      position: fixed !important;
+      z-index: 999999 !important;
+    }
+  </style>
+</head>
+<body>
+  <div style="max-width: 600px; text-align: center;">
+    <h1>🧪 CSS Isolation Test</h1>
+    <p>This page has EXTREME CSS styles that would normally break any embedded widget.</p>
+    <p><strong>If the chatbot looks normal (orange theme, clean design), Shadow DOM isolation is working! ✅</strong></p>
+
+    <div style="margin-top: 30px; padding: 20px; border: 3px solid white;">
+      <h2>Test Instructions:</h2>
+      <ol style="text-align: left;">
+        <li>Look at the floating chat button (bottom right)</li>
+        <li>It should be clean orange gradient (not affected by ugly page styles)</li>
+        <li>Click to open the chat widget</li>
+        <li>Widget should have professional design with orange theme</li>
+        <li>No yellow backgrounds, no purple text, no red borders</li>
+        <li>Inter font should be used (not Comic Sans)</li>
+      </ol>
+    </div>
+
+    <button onclick="alert('Host page button - this looks ugly on purpose!')">
+      Test Host Button (Ugly by design)
+    </button>
+
+    <input type="text" placeholder="Host page input (ugly)" />
+  </div>
+
+  <!-- Load the chatbot widget -->
+  <script>
+    // Configure chatbot
+    window.CHATBOT_CONFIG = {
+      apiUrl: 'http://localhost:8003'
+    };
+  </script>
+
+  <!-- Load from production build -->
+  <script type="module" src="../backend/assets/chat-widget.js"></script>
+
+  <!-- OR Load from dev server (uncomment to use):
+  <script type="module" src="http://localhost:5173/src/main.tsx"></script>
+  -->
+
+  <script>
+    // Debug info
+    setTimeout(() => {
+      const shadowHost = document.getElementById('mi-chatbot-shadow-host');
+      if (shadowHost && shadowHost.shadowRoot) {
+        console.log('✅ Shadow DOM detected!');
+        console.log('Shadow root:', shadowHost.shadowRoot);
+        console.log('Isolated styles:', shadowHost.shadowRoot.querySelectorAll('style').length);
+      } else {
+        console.log('❌ Shadow DOM not detected - check console for errors');
+      }
+    }, 2000);
+  </script>
+</body>
+</html>
