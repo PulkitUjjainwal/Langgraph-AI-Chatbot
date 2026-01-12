@@ -135,7 +135,10 @@ class BaseAPIClient:
         Returns:
             APIResponse object with success/failure info
         """
-        url = f"{self.config.api_base_url}{endpoint}"
+
+        
+        url = f"https://api-dp.marketinsidedata.com/api/v1/users/{endpoint}"
+        # url = f"{self.config.api_base_url}{endpoint}"
         start_time = time.time()
 
         try:
@@ -403,6 +406,8 @@ class UnifiedAPIClient:
         """Initialize unified client"""
         self._clients: Dict[Platform, BaseAPIClient] = {}
         self._country_mapping_loaded = False  # Track if we loaded from API
+        self._country_data_types_cache: Optional[Dict[str, List[str]]] = None  # Cache for country data types
+        self._cache_timestamp: Optional[float] = None  # Track when cache was last updated
 
     def _get_client(self, platform: Platform) -> BaseAPIClient:
         """Get or create client for platform"""
@@ -416,13 +421,66 @@ class UnifiedAPIClient:
         for client in self._clients.values():
             await client.close()
 
+    async def _get_country_data_types(self, platform: Platform) -> Dict[str, List[str]]:
+        """
+        Fetch and cache country data types from API
+
+        Returns:
+            Dict mapping country_code to list of available data_types
+            Example: {"AF": ["mirror_import", "mirror_export"], "AR": ["detailed_import", "detailed_export"]}
+        """
+        # Cache for 1 hour (3600 seconds)
+        CACHE_TTL = 3600
+
+        # Return cached data if still valid
+        if (self._country_data_types_cache is not None and
+            self._cache_timestamp is not None and
+            (time.time() - self._cache_timestamp) < CACHE_TTL):
+            return self._country_data_types_cache
+
+        try:
+            client = self._get_client(platform)
+            response = await client.call_endpoint(
+                "/detailed-mirror-countries-list",
+                {}  # Empty body for POST request
+            )
+
+            if response.success and isinstance(response.data, dict):
+                countries = response.data.get("countries", [])
+
+                # Build mapping: country_code -> data_types
+                mapping = {}
+                for country in countries:
+                    country_code = country.get("country_code", "").upper()
+                    country_name = country.get("country_name", "").lower().replace(" ", "-")
+                    data_types = country.get("data_type", [])
+
+                    if country_code:
+                        mapping[country_code] = data_types
+                    if country_name:
+                        mapping[country_name] = data_types
+
+                # Cache the result
+                self._country_data_types_cache = mapping
+                self._cache_timestamp = time.time()
+
+                logger.info(f"✓ Cached data types for {len(countries)} countries")
+                return mapping
+            else:
+                logger.warning(f"Failed to fetch country data types: {response.error}")
+                return {}
+
+        except Exception as e:
+            logger.error(f"Error fetching country data types: {e}")
+            return {}
+
     @staticmethod
     def detect_platform(url: str) -> Platform:
         """Detect platform from URL"""
         url_lower = url.lower()
         if "exportgenius" in url_lower:
             return Platform.EXPORT_GENIUS
-        elif "marketinside" in url_lower:
+        elif "marketinside" in url_lower or "localhost" in url_lower or "localhost:5173" in url_lower:
             return Platform.MARKETINSIDE
         return Platform.UNKNOWN
 
@@ -440,7 +498,7 @@ class UnifiedAPIClient:
             return PageType.HS_CODE
         elif "/country/" in path or "/country-data/" in path:
             return PageType.COUNTRY
-        elif "/search-data/" in path:
+        elif "/search-data/" in path:  # Removed trailing slash to match both /search-data and /search-data/
             return PageType.SEARCH_DATA
         return PageType.UNKNOWN
 
@@ -633,13 +691,13 @@ class UnifiedAPIClient:
 
         client = self._get_client(platform)
 
-        # Build request body
-        request_body = self._build_search_request(params)
+        # Build request body (with smart data_type selection based on country availability)
+        request_body = await self._build_search_request(params, platform)
 
         # Determine which endpoints to call
         endpoints_to_call = self._get_search_endpoints(params, request_body)
 
-        logger.info(f"  📡 Fetching {len(endpoints_to_call)} endpoints in parallel...")
+        logger.info(f"  📡 Fetching {(endpoints_to_call)} endpoints in parallel...")
         start = time.time()
         results = await client.call_endpoints_parallel(endpoints_to_call)
         elapsed = time.time() - start
@@ -1007,17 +1065,72 @@ class UnifiedAPIClient:
 
         return params
 
-    @staticmethod
-    def _build_search_request(params: Dict[str, Any]) -> Dict[str, Any]:
-        """Build search request body from URL parameters"""
+    async def _build_search_request(self, params: Dict[str, Any], platform: Platform) -> Dict[str, Any]:
+        """
+        Build search request body from URL parameters
+
+        Intelligently chooses data_type based on:
+        1. URL type parameter (import/export/mirror_import/mirror_export)
+        2. Available data types for the country
+        3. Preference: detailed > mirror
+        """
         from datetime import datetime, timedelta
 
-        # Convert type to data_type
+        # Get country's available data types
+        country = params.get('country', '').lower()
+        country_data_types_map = await self._get_country_data_types(platform)
+        available_types = country_data_types_map.get(country, [])
+
+        # Debug logging
+        logger.info(f"  [DATA TYPE SELECTION] Country: {country}")
+        logger.info(f"  [DATA TYPE SELECTION] Available types from API: {available_types}")
+
+        # Convert type to data_type with smart selection
         type_param = params.get('type', 'import').lower()
-        if 'mirror' in type_param:
-            data_type = f"{type_param}s"
+
+        # Determine desired direction (import or export)
+        is_import = 'import' in type_param
+        is_mirror_explicit = 'mirror' in type_param
+
+        logger.info(f"  [DATA TYPE SELECTION] URL type param: {type_param}")
+        logger.info(f"  [DATA TYPE SELECTION] is_import: {is_import}, is_mirror_explicit: {is_mirror_explicit}")
+
+        # Choose data_type based on availability
+        if is_import:
+            # User wants import data
+            if is_mirror_explicit:
+                # Explicitly requested mirror_import
+                data_type = "mirror_imports"
+                logger.info(f"  ✓ Using mirror_imports (explicitly requested in URL)")
+            elif "detailed_import" in available_types:
+                # Prefer detailed if available
+                data_type = "detailed_imports"
+                logger.info(f"  ✓ Using detailed_imports for {country} (available in country data types)")
+            elif "mirror_import" in available_types:
+                # Fallback to mirror
+                data_type = "mirror_imports"
+                logger.info(f"  ✓ Using mirror_imports for {country} (detailed not available)")
+            else:
+                # Default fallback
+                data_type = "detailed_imports"
+                logger.warning(f"  ⚠ No data types found for {country} (cache may be empty), defaulting to detailed_imports")
         else:
-            data_type = f"detailed_{type_param}s"
+            # User wants export data
+            if is_mirror_explicit:
+                # Explicitly requested mirror_export
+                data_type = "mirror_exports"
+            elif "detailed_export" in available_types:
+                # Prefer detailed if available
+                data_type = "detailed_exports"
+                logger.info(f"  ✓ Using detailed_exports for {country} (available)")
+            elif "mirror_export" in available_types:
+                # Fallback to mirror
+                data_type = "mirror_exports"
+                logger.info(f"  ✓ Using mirror_exports for {country} (detailed not available)")
+            else:
+                # Default fallback
+                data_type = "detailed_exports"
+                logger.warning(f"  ⚠ No data types found for {country}, defaulting to detailed_exports")
 
         # Determine list_type
         tab = params.get('tab', 'trade')
@@ -1037,6 +1150,9 @@ class UnifiedAPIClient:
         else:
             date_from = params['from']
             date_to = params['to']
+
+        # Final logging
+        logger.info(f"  [DATA TYPE SELECTION] ✓ FINAL CHOICE: {data_type}")
 
         # Build body with required fields
         body = {
@@ -1095,7 +1211,8 @@ class UnifiedAPIClient:
         # For import searches: Get companies importing the product
         if is_import_search:
             importers_body = request_body.copy()
-            importers_body['data_type'] = 'detailed_imports'  # Must be imports
+            # Use the smart data_type we already selected (respects country availability)
+            # Don't hardcode to detailed_imports - some countries only have mirror_imports
             endpoints.append((self.ENDPOINTS["search_importers"], importers_body))
 
         # ====================================================================
@@ -1123,45 +1240,37 @@ class UnifiedAPIClient:
             endpoints.append((self.ENDPOINTS["search_exporters"], exporters_body))
         elif is_export_search:
             exporters_body = request_body.copy()
-            exporters_body['data_type'] = 'detailed_exports'
+            # Use smart data_type (respects availability)
             endpoints.append((self.ENDPOINTS["search_exporters"], exporters_body))
 
         # ====================================================================
         # 4. Buyers Endpoint
         # ====================================================================
         # Buyers are companies buying (from exporter perspective)
-        buyers_body = request_body.copy()
-        buyers_body['data_type'] = 'detailed_exports'  # Buyers from export perspective
-        buyers_body['list_type'] = 'buyer_supplier'
-
-        # Remove origin_country if present (not valid for buyers endpoint)
-        buyers_body.pop('origin_country', None)
-
-        endpoints.append((self.ENDPOINTS["search_buyers"], buyers_body))
+        # Skip buyers endpoint for now as it may need different data_type logic
+        # buyers_body = request_body.copy()
+        # buyers_body['list_type'] = 'buyer_supplier'
+        # buyers_body.pop('origin_country', None)
+        # endpoints.append((self.ENDPOINTS["search_buyers"], buyers_body))
 
         # ====================================================================
-        # 5. Suppliers Endpoint
+        # 5. Suppliers Endpoint (IMPORT ONLY)
         # ====================================================================
-        # Suppliers are companies supplying (from import perspective)
-        suppliers_body = request_body.copy()
+        # Suppliers endpoint only works with import data types
         if is_import_search:
-            suppliers_body['data_type'] = 'detailed_imports'  # Suppliers from import perspective
-        else:
-            suppliers_body['data_type'] = 'detailed_exports'
-        suppliers_body['list_type'] = 'buyer_supplier'
-
-        endpoints.append((self.ENDPOINTS["search_suppliers"], suppliers_body))
+            suppliers_body = request_body.copy()
+            # Use smart data_type (respects availability)
+            suppliers_body['list_type'] = 'buyer_supplier'
+            endpoints.append((self.ENDPOINTS["search_suppliers"], suppliers_body))
 
         # ====================================================================
         # 6. Totals Endpoint
         # ====================================================================
+        totals_body = request_body.copy()
+        # Use smart data_type (respects availability)
         if is_import_search:
-            totals_body = request_body.copy()
-            totals_body['data_type'] = 'detailed_imports'
             endpoints.append((self.ENDPOINTS["search_total_imp_sup"], totals_body))
         else:
-            totals_body = request_body.copy()
-            totals_body['data_type'] = 'detailed_exports'
             endpoints.append((self.ENDPOINTS["search_total_exp_buy"], totals_body))
 
         return endpoints
@@ -1355,11 +1464,11 @@ async def fetch_content_from_url(url: str) -> Tuple[Dict[str, Any], Platform, Pa
         platform = UnifiedAPIClient.detect_platform(url)
         page_type = UnifiedAPIClient.detect_page_type(url)
 
-        if platform == Platform.UNKNOWN:
-            return {"error": "Unknown platform"}, platform, page_type
+        # if platform == Platform.UNKNOWN:
+        #     return {"error": "Unknown platform"}, platform, page_type
 
-        if page_type == PageType.UNKNOWN:
-            return {"error": "Unknown page type"}, platform, page_type
+        # if page_type == PageType.UNKNOWN:
+        #     return {"error": "Unknown page type"}, platform, page_type
 
         # Fetch data based on page type
         if page_type == PageType.COMPANY:
