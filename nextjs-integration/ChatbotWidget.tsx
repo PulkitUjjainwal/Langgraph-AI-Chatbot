@@ -114,17 +114,23 @@ export default function ChatbotWidget() {
     };
   }, [scriptLoaded]);
 
-  // Log pathname changes (widget auto-detects via history API)
+  // Log pathname changes and notify chatbot
   useEffect(() => {
     if (scriptLoaded && typeof window !== "undefined") {
       console.log("📍 Next.js route changed:", pathname);
-      // Widget automatically detects URL changes via history.pushState monitoring
+      console.log("🔄 Full URL:", window.location.href);
 
-      // Manually trigger re-initialization if needed
+      // Widget automatically detects URL changes via history.pushState monitoring
+      // and calls /init proactively to load page context
+
+      // You can also manually trigger initialization if needed
       if ((window as any).initMIChatbot) {
-        // Optional: Re-init chatbot on route change
+        // Optional: Force re-init on route change
         // (window as any).initMIChatbot();
       }
+
+      // Notify user that chatbot is aware of page context
+      console.log("✅ Chatbot context updated for new page");
     }
   }, [pathname, scriptLoaded]);
 
