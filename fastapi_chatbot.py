@@ -136,7 +136,7 @@ class Config:
     ENABLE_PERFORMANCE_LOGGING = True
 
     # Ollama Configuration
-    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "https://ollama.com/api")
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "006b1854cb5743d5a8a6e2baf09d163c.NQNQ-X28yY6S7WD0UtAp4_pb")
 
     # Redis Configuration
