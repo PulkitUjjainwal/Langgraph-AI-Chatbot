@@ -21,6 +21,45 @@ Usage:
     uvicorn fastapi_chatbot:app --host 0.0.0.0 --port 8000 --reload
 """
 
+def format_large_number(value, decimals=2):
+    """
+    Format large numbers into human-readable format with K, M, B suffixes
+
+    Args:
+        value: Number to format (can be int, float, or string)
+        decimals: Number of decimal places
+
+    Returns:
+        Formatted string (e.g., "1.5M", "3.2B", "450K")
+    """
+    try:
+        # Convert to float if string
+        if isinstance(value, str):
+            # Remove commas and dollar signs
+            value = value.replace(',', '').replace('$', '').strip()
+            value = float(value)
+
+        num = float(value)
+
+        # Negative numbers
+        sign = '-' if num < 0 else ''
+        num = abs(num)
+
+        # Billions
+        if num >= 1_000_000_000:
+            return f"{sign}{num / 1_000_000_000:.{decimals}f}B"
+        # Millions
+        elif num >= 1_000_000:
+            return f"{sign}{num / 1_000_000:.{decimals}f}M"
+        # Thousands
+        elif num >= 1_000:
+            return f"{sign}{num / 1_000:.{decimals}f}K"
+        # Less than 1000
+        else:
+            return f"{sign}{num:.{decimals}f}"
+    except (ValueError, TypeError):
+        return str(value)
+
 import json
 import time
 import uuid
@@ -1049,9 +1088,11 @@ CONVERSATIONAL RULES:
 [DO] Use conversational language ("you're", "let's", "I'll show you")
 [DO] Ask follow-up questions to understand their needs
 [DO] Provide specific, concrete information from context
-[DO] Keep responses concise (4-5 sentences)
+[DO] Keep responses concise (4-5 sentences for general queries, can be longer for specific data requests)
 [DO] Use simple dashes (-) for lists if needed
 [DO] Make it feel like a helpful conversation
+[DO] Format large numbers with K (thousand), M (million), B (billion) - e.g., "$1.5M" instead of "$1,500,000"
+[DO] Mention data date range when country or trade data is discussed - e.g., "For Argentina imports (Nov 2024 - Oct 2025)..."
 
 [DON'T] Use markdown (**, ###, __)
 [DON'T] Use emojis or special symbols
@@ -1059,8 +1100,14 @@ CONVERSATIONAL RULES:
 [DON'T] Be overly formal or robotic
 [DON'T] Say "I don't have information" - be resourceful
 [DON'T] Add excessive pleasantries or fluff
+[DON'T] Show full numbers like "$103,144,094,031.35" - use "$103.1B" instead
 
-Remember: You're having a natural business conversation, not reading a sales brochure. Be helpful, be concise, be human."""
+RESPONSE LENGTH GUIDELINES:
+- General questions (capabilities, services, general info): 4-5 lines maximum
+- Specific data requests (top importers, shipments, statistics): Provide full details with formatted numbers
+- If user asks vague question about a country (e.g., "tell me about Argentina"), keep it brief (4-5 lines) with key stats and ask what specifically they're looking for
+
+Remember: You're having a natural business conversation, not reading a sales brochure. Be helpful, be concise, be human. Use human-readable numbers (K, M, B) and mention date ranges for context."""
 
         system_message = SystemMessage(content=system_prompt)
 
