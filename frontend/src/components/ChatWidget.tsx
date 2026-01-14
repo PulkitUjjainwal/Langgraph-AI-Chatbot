@@ -45,6 +45,7 @@ export default function ChatWidget() {
   const [countryInput, setCountryInput] = useState("");
   const [productInput, setProductInput] = useState("");
   const [currentUrl, setCurrentUrl] = useState("");
+  const [isInitializing, setIsInitializing] = useState(false);
 
   // Get current page URL
   useEffect(() => {
@@ -53,15 +54,18 @@ export default function ChatWidget() {
     }
   }, []);
 
-  // Monitor URL changes
+  // Monitor URL changes and call /init immediately
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const handleUrlChange = () => {
+    const handleUrlChange = async () => {
       const newUrl = window.location.href;
       if (newUrl !== currentUrl) {
         setCurrentUrl(newUrl);
-        console.log("URL changed to:", newUrl);
+        console.log("🌐 URL changed to:", newUrl);
+
+        // Proactively call /init when URL changes (even if chatbot is closed)
+        await initializeSessionProactive(newUrl);
       }
     };
 
@@ -202,7 +206,7 @@ export default function ChatWidget() {
     return "http://localhost:8003";
   };
 
-  // Initialize session with current URL
+  // Initialize session with current URL (when chatbot opens)
   async function initializeSession() {
     const sid = sessionId || createSessionId();
     if (!sessionId) {
@@ -227,16 +231,61 @@ export default function ChatWidget() {
 
       if (resp.ok) {
         const data = await resp.json();
-        console.log("Session initialized:", data);
+        console.log("✅ Session initialized:", data);
 
         // Store suggested questions
         if (data.suggested_questions && Array.isArray(data.suggested_questions)) {
           setSuggestedQuestions(data.suggested_questions);
-          console.log("Suggested questions:", data.suggested_questions);
+          console.log("💡 Suggested questions:", data.suggested_questions);
         }
       }
     } catch (error) {
-      console.error("Failed to initialize session:", error);
+      console.error("❌ Failed to initialize session:", error);
+    }
+  }
+
+  // Proactive initialization when URL changes (even if chatbot is closed)
+  async function initializeSessionProactive(url: string) {
+    if (isInitializing) return; // Prevent duplicate calls
+
+    setIsInitializing(true);
+
+    const sid = sessionId || createSessionId();
+    if (!sessionId) {
+      setSessionId(sid);
+      try {
+        window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
+      } catch {
+        // ignore
+      }
+    }
+
+    try {
+      const apiBaseUrl = getApiBaseUrl();
+      const resp = await fetch(`${apiBaseUrl}/api/init`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sid,
+          dynamic_url: url,
+        }),
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        console.log("🔄 Proactive init for URL:", url);
+        console.log("✅ Context loaded:", data);
+
+        // Update suggested questions for new page
+        if (data.suggested_questions && Array.isArray(data.suggested_questions)) {
+          setSuggestedQuestions(data.suggested_questions);
+          console.log("💡 Updated suggested questions for new page:", data.suggested_questions);
+        }
+      }
+    } catch (error) {
+      console.error("❌ Failed to proactively initialize:", error);
+    } finally {
+      setIsInitializing(false);
     }
   }
 
@@ -363,25 +412,45 @@ export default function ChatWidget() {
   return (
     <>
       {/* Floating Button */}
-      <button
-        onClick={() => setOpen(true)}
-        className="fixed bottom-5 right-5 z-[2147483647]
-          flex items-center gap-2 rounded-full bg-gradient-to-r from-chat-accent to-chat-primary
-          px-6 py-3.5 text-sm font-semibold text-white shadow-xl
-          hover:shadow-2xl hover:scale-105 transition-all duration-200
-          ring-2 ring-white ring-offset-2"
-      >
-        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-        </svg>
-        Chat with AI
-      </button>
+      <div className="fixed bottom-5 right-5 z-[2147483647]">
+        <button
+          onClick={() => setOpen(true)}
+          className="relative flex items-center gap-2 rounded-full bg-gradient-to-r from-chat-accent to-chat-primary
+            px-6 py-3.5 text-sm font-semibold text-white shadow-xl
+            hover:shadow-2xl hover:scale-105 transition-all duration-200
+            ring-2 ring-white ring-offset-2"
+        >
+          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+          </svg>
+          <span>Chat with AI</span>
+
+          {/* Badge for new suggestions */}
+          {!open && suggestedQuestions.length > 0 && (
+            <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-green-500 text-xs font-bold text-white shadow-lg animate-pulse">
+              {suggestedQuestions.length}
+            </span>
+          )}
+
+          {/* Loading indicator */}
+          {isInitializing && (
+            <div className="absolute inset-0 flex items-center justify-center rounded-full bg-chat-primary bg-opacity-90">
+              <svg className="h-5 w-5 animate-spin text-white" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            </div>
+          )}
+        </button>
+      </div>
 
       {/* Popup */}
       {open && (
         <div className="fixed bottom-24 right-5 z-[2147483647]
           flex h-[600px] w-[400px] flex-col
-          rounded-2xl bg-white shadow-2xl border border-chat-border overflow-hidden"
+          rounded-2xl bg-white shadow-2xl border border-chat-border overflow-hidden
+          animate-in slide-in-from-bottom-4 duration-300"
+          style={{ animation: "scaleIn 0.3s ease-out forwards" }}
         >
           <ChatHeader onClose={() => setOpen(false)} />
           

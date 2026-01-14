@@ -21,6 +21,45 @@ Usage:
     uvicorn fastapi_chatbot:app --host 0.0.0.0 --port 8000 --reload
 """
 
+def format_large_number(value, decimals=2):
+    """
+    Format large numbers into human-readable format with K, M, B suffixes
+
+    Args:
+        value: Number to format (can be int, float, or string)
+        decimals: Number of decimal places
+
+    Returns:
+        Formatted string (e.g., "1.5M", "3.2B", "450K")
+    """
+    try:
+        # Convert to float if string
+        if isinstance(value, str):
+            # Remove commas and dollar signs
+            value = value.replace(',', '').replace('$', '').strip()
+            value = float(value)
+
+        num = float(value)
+
+        # Negative numbers
+        sign = '-' if num < 0 else ''
+        num = abs(num)
+
+        # Billions
+        if num >= 1_000_000_000:
+            return f"{sign}{num / 1_000_000_000:.{decimals}f}B"
+        # Millions
+        elif num >= 1_000_000:
+            return f"{sign}{num / 1_000_000:.{decimals}f}M"
+        # Thousands
+        elif num >= 1_000:
+            return f"{sign}{num / 1_000:.{decimals}f}K"
+        # Less than 1000
+        else:
+            return f"{sign}{num:.{decimals}f}"
+    except (ValueError, TypeError):
+        return str(value)
+
 import json
 import time
 import uuid
@@ -136,7 +175,7 @@ class Config:
     ENABLE_PERFORMANCE_LOGGING = True
 
     # Ollama Configuration
-    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "https://ollama.com/api")
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "006b1854cb5743d5a8a6e2baf09d163c.NQNQ-X28yY6S7WD0UtAp4_pb")
 
     # Redis Configuration
@@ -1049,9 +1088,11 @@ CONVERSATIONAL RULES:
 [DO] Use conversational language ("you're", "let's", "I'll show you")
 [DO] Ask follow-up questions to understand their needs
 [DO] Provide specific, concrete information from context
-[DO] Keep responses concise (4-5 sentences)
+[DO] Keep responses concise (4-5 sentences for general queries, can be longer for specific data requests)
 [DO] Use simple dashes (-) for lists if needed
 [DO] Make it feel like a helpful conversation
+[DO] Format large numbers with K (thousand), M (million), B (billion) - e.g., "$1.5M" instead of "$1,500,000"
+[DO] Mention data date range when country or trade data is discussed - e.g., "For Argentina imports (Nov 2024 - Oct 2025)..."
 
 [DON'T] Use markdown (**, ###, __)
 [DON'T] Use emojis or special symbols
@@ -1059,8 +1100,14 @@ CONVERSATIONAL RULES:
 [DON'T] Be overly formal or robotic
 [DON'T] Say "I don't have information" - be resourceful
 [DON'T] Add excessive pleasantries or fluff
+[DON'T] Show full numbers like "$103,144,094,031.35" - use "$103.1B" instead
 
-Remember: You're having a natural business conversation, not reading a sales brochure. Be helpful, be concise, be human."""
+RESPONSE LENGTH GUIDELINES:
+- General questions (capabilities, services, general info): 4-5 lines maximum
+- Specific data requests (top importers, shipments, statistics): Provide full details with formatted numbers
+- If user asks vague question about a country (e.g., "tell me about Argentina"), keep it brief (4-5 lines) with key stats and ask what specifically they're looking for
+
+Remember: You're having a natural business conversation, not reading a sales brochure. Be helpful, be concise, be human. Use human-readable numbers (K, M, B) and mention date ranges for context."""
 
         system_message = SystemMessage(content=system_prompt)
 
@@ -1453,11 +1500,59 @@ class ChatbotManager:
                 from urllib.parse import urlparse, parse_qs
 
                 qparams = parse_qs(urlparse(dynamic_url or "").query) if dynamic_url else {}
-                tokens = set(w for w in (message or "").lower().split() if len(w) > 2)
+
+                # Extract country from URL
+                url_country = qparams.get('country', [''])[0].lower().strip()
+
+                # Extract country from query (look for common country names)
+                query_lower = (message or "").lower()
+
+                # List of common countries to check (you can expand this)
+                common_countries = [
+                    'afghanistan', 'albania', 'algeria', 'argentina', 'australia', 'austria',
+                    'bahrain', 'bangladesh', 'belgium', 'bolivia', 'brazil', 'bulgaria',
+                    'cambodia', 'canada', 'chile', 'china', 'colombia', 'croatia', 'cuba', 'cyprus',
+                    'denmark', 'egypt', 'estonia', 'ethiopia', 'finland', 'france',
+                    'germany', 'ghana', 'greece', 'hungary', 'iceland', 'india', 'indonesia',
+                    'iran', 'iraq', 'ireland', 'israel', 'italy', 'japan', 'jordan', 'kazakhstan',
+                    'kenya', 'kuwait', 'latvia', 'lebanon', 'libya', 'lithuania', 'luxembourg',
+                    'malaysia', 'mexico', 'morocco', 'myanmar', 'nepal', 'netherlands', 'nigeria',
+                    'norway', 'oman', 'pakistan', 'peru', 'philippines', 'poland', 'portugal',
+                    'qatar', 'romania', 'russia', 'saudi arabia', 'serbia', 'singapore', 'slovakia',
+                    'slovenia', 'south africa', 'south korea', 'spain', 'sri lanka', 'sudan', 'sweden',
+                    'switzerland', 'syria', 'taiwan', 'thailand', 'turkey', 'uganda', 'ukraine',
+                    'united arab emirates', 'uae', 'united kingdom', 'uk', 'united states', 'usa',
+                    'uruguay', 'uzbekistan', 'venezuela', 'vietnam', 'yemen', 'zambia', 'zimbabwe'
+                ]
+
+                # Find country mentioned in query
+                query_country = None
+                for country in common_countries:
+                    # Check for exact word match or handle typos
+                    if country in query_lower or query_lower.replace(' ', '') == country.replace(' ', ''):
+                        query_country = country.replace(' ', '-')
+                        break
+                    # Also check with hyphens
+                    if country.replace(' ', '-') in query_lower:
+                        query_country = country.replace(' ', '-')
+                        break
+
+                print(f"  [FALLBACK HEURISTIC] URL country: '{url_country}', Query country: '{query_country}'")
+
+                # CRITICAL: If both countries are identified, they MUST match
+                if url_country and query_country:
+                    countries_match = (url_country == query_country) or (url_country == query_country.replace('-', ''))
+                    if not countries_match:
+                        print(f"  [FALLBACK HEURISTIC] ❌ Country mismatch! Query asks about '{query_country}' but cached data is for '{url_country}'. Not related.")
+                        return False, 0.0
+
+                # If countries match or can't be determined, check other tokens
+                tokens = set(w for w in query_lower.split() if len(w) > 2)
                 param_tokens = set()
                 for v in qparams.values():
                     for vv in v:
                         param_tokens.update(x for x in vv.lower().split() if len(x) > 2)
+
 
                 overlap = len(tokens & param_tokens)
                 content_overlap = sum(1 for t in tokens if t in (dynamic_content or "").lower())
@@ -1533,7 +1628,7 @@ Your job:
 - Generate the EXACT final URL based on rules below
 
 ────────────────────────
-INTENTS (ONLY TWO)
+INTENTS (ONLY FOUR)
 ────────────────────────
 
 Choose exactly ONE intent:
@@ -1559,6 +1654,24 @@ Choose exactly ONE intent:
      - Shipment overview (summary only)
    → Output a /country/... URL
 
+3. country_to_country
+   → User asks about trade BETWEEN TWO specific countries
+   → Key phrases: "exports TO", "imports FROM", "trade between X and Y"
+   → Examples:
+     - "Belgium's exports to France"
+     - "India's imports from China"
+     - "Trade between USA and Mexico"
+   → Output a /cntry/... URL
+
+4. hs_code
+   → User asks about HS code, chapter, heading, or subheading
+   → Key phrases: "HS code", "chapter", "heading"
+   → Examples:
+     - "India's chapter 01 imports"
+     - "Show HS code 8471 data for USA"
+     - "Belgium's heading 2710 exports"
+   → Output a /chapter/... URL
+
 If unclear, set intent = "unknown" and url = "".
 
 ────────────────────────
@@ -1569,10 +1682,11 @@ GLOBAL RULES
 - confidence must be between 0 and 1
 - url must be a complete URL or empty string ""
 - Do NOT invent missing data
-- Country names must be lowercase and URL-safe
+- Country names must be lowercase and URL-safe (use %20 for spaces)
 - product must be URL-safe (lowercase, spaces replaced with %20)
 - hs_code must be numeric only
-- direction decides mirror_import vs mirror_export
+- For search_trade_data: Use "import" or "export" (NOT "mirror_import" or "mirror_export")
+- For hs_code and country_to_country: Use "import" or "export"
 - Default language path: /en/
 
 ────────────────────────
@@ -1589,37 +1703,51 @@ Entity → Endpoint mapping:
 - supplier  → suppliers
 - buyer     → buyers
 
-Direction → type mapping:
-- import → mirror_import
-- export → mirror_export
+Direction → type mapping (SMART SELECTION):
+- import → "import" (system automatically selects detailed_import if available, else mirror_import)
+- export → "export" (system automatically selects detailed_export if available, else mirror_export)
+
+IMPORTANT: Always use "import" or "export" (not "mirror_import" or "mirror_export")
+The backend will intelligently choose the best available data type for each country.
 
 URL rules:
 - country is REQUIRED
-- Either product OR hs_code can be present
-- Do NOT include both unless user explicitly asks
+- At least ONE of the following MUST be present: product, hs_code, importer, exporter, origin_country, destination_country
+- If NONE of these are present, use search_country_data intent instead (e.g., /country/{country}/imports)
+- Do NOT include both product AND hs_code unless user explicitly asks
 - If direction is missing, do NOT generate URL (url = "")
+
+Examples of when to use search_trade_data vs search_country_data:
+
+CORRECT - Use search_trade_data (has product):
+- "top oil importers in Indonesia" → .../importer?type=import&country=indonesia&product=oil
+- "steel exporters in Germany" → .../exporter?type=export&country=germany&product=steel
+
+INCORRECT - Use search_country_data (no product):
+- "top importers in Indonesia" → .../country/indonesia/imports (NOT search-data!)
+- "all exporters in Albania" → .../country/albania/exports (NOT search-data!)
 
 URL formats:
 
 Trade:
-https://www.marketinsidedata.com/en/search-data/trade?type={mirror_import|mirror_export}&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/trade?type={mirror_import|mirror_export}&country={country}&hs_code={hs_code}
+https://www.marketinsidedata.com/en/search-data/trade?type={import|export}&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/trade?type={import|export}&country={country}&hs_code={hs_code}
 
 Importer:
-https://www.marketinsidedata.com/en/search-data/importer?type=mirror_import&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/importer?type=mirror_import&country={country}&hs_code={hs_code}
+https://www.marketinsidedata.com/en/search-data/importer?type=import&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/importer?type=import&country={country}&hs_code={hs_code}
 
 Exporter:
-https://www.marketinsidedata.com/en/search-data/exporter?type=mirror_export&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/exporter?type=mirror_export&country={country}&hs_code={hs_code}
+https://www.marketinsidedata.com/en/search-data/exporter?type=export&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/exporter?type=export&country={country}&hs_code={hs_code}
 
 Supplier:
-https://www.marketinsidedata.com/en/search-data/suppliers?type=mirror_import&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/suppliers?type=mirror_import&country={country}&hs_code={hs_code}
+https://www.marketinsidedata.com/en/search-data/suppliers?type=import&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/suppliers?type=import&country={country}&hs_code={hs_code}
 
 Buyer:
-https://www.marketinsidedata.com/en/search-data/buyers?type=mirror_export&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/buyers?type=mirror_export&country={country}&hs_code={hs_code}
+https://www.marketinsidedata.com/en/search-data/buyers?type=export&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/buyers?type=export&country={country}&hs_code={hs_code}
 
 ────────────────────────
 INTENT: search_country_data
@@ -1637,6 +1765,67 @@ Rules:
 URL formats:
 https://www.marketinsidedata.com/en/country/{country}/imports
 https://www.marketinsidedata.com/en/country/{country}/exports
+
+────────────────────────
+INTENT: country_to_country
+────────────────────────
+
+Base URL:
+https://www.marketinsidedata.com/en/cntry/
+
+Rules:
+- TWO countries are REQUIRED (origin and destination)
+- direction is REQUIRED (import or export)
+- No product
+- No hs_code
+- Country names must be title case (capitalize first letter of each word)
+- Use %20 for spaces in country names
+
+URL Pattern:
+https://www.marketinsidedata.com/en/cntry/{OriginCountry}-{import|export}-{DestinationCountry}
+
+Direction Logic:
+- If query says "Country A exports TO Country B":
+  → origin = Country A, direction = export, destination = Country B
+  → URL: /cntry/Country-A-export-Country-B
+
+- If query says "Country A imports FROM Country B":
+  → origin = Country A, direction = import, destination = Country B
+  → URL: /cntry/Country-A-import-Country-B
+
+Examples:
+https://www.marketinsidedata.com/en/cntry/Belgium-export-France
+https://www.marketinsidedata.com/en/cntry/India-import-United%20States
+https://www.marketinsidedata.com/en/cntry/United%20States-export-Mexico
+
+────────────────────────
+INTENT: hs_code
+────────────────────────
+
+Base URL:
+https://www.marketinsidedata.com/en/chapter/
+
+Rules:
+- country is REQUIRED
+- direction is REQUIRED (import or export)
+- hs_code is REQUIRED (2, 4, 6, or 8+ digits)
+- No product
+- Country names must be lowercase
+
+URL Pattern:
+https://www.marketinsidedata.com/en/chapter/{country}-{import|export}-hs-code-{code}
+
+HS Code Levels:
+- 2 digits = Chapter (e.g., 01)
+- 4 digits = Heading (e.g., 0101, 8471)
+- 6 digits = Subheading (e.g., 010121)
+- 8+ digits = Full HS Code (e.g., 84713020)
+
+Examples:
+https://www.marketinsidedata.com/en/chapter/india-import-hs-code-01
+https://www.marketinsidedata.com/en/chapter/usa-export-hs-code-8471
+https://www.marketinsidedata.com/en/chapter/belgium-import-hs-code-271012
+https://www.marketinsidedata.com/en/chapter/germany-export-hs-code-84713020
 
 ────────────────────────
 FINAL OUTPUT FORMAT
@@ -1672,7 +1861,7 @@ IMPORTANT
             return {"intent": "unknown", "confidence": 0.0, "url": {}}
 
         intent = parsed.get("intent", "unknown")
-        if intent not in ("search_country_data", "search_trade_data", "unknown"):
+        if intent not in ("search_country_data", "search_trade_data", "country_to_country", "hs_code", "unknown"):
             intent = "unknown"
 
         try:
@@ -1741,6 +1930,8 @@ IMPORTANT
         if API_CLIENT_AVAILABLE and intent in (
             "search_country_data",
             "search_trade_data",
+            "country_to_country",
+            "hs_code",
             "unknown",
         ):
             try:
@@ -1812,10 +2003,25 @@ IMPORTANT
             print(f"  [CACHE HIT] Content loaded: {len(dynamic_content)} chars")
             # sources_used.append("Dynamic Content (Redis)")
         else:
-            print(f"  [DEBUG] [CACHE MISS] - No cached data found, fetching...")
-            # Fetch content and generate embeddings
-            fetched = await self.dynamic_content_manager.fetch_content(dynamic_url, session_id)
-            related, score, detected_country = False, 0.0, None
+            print(f"  [DEBUG] [CACHE MISS] - No cached data found")
+            # ALWAYS use intent detection for cache misses to generate the correct URL
+            # Don't blindly use the provided dynamic_url (could be invalid, truncated, or wrong country)
+            try:
+                print(f"  [DEBUG] Running intent detection to determine correct URL...")
+                api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"dynamic_url": dynamic_url})
+                fetched = api_data or None
+                if fetched:
+                    print(f"  [DEBUG] Intent detection generated valid URL, fetched: {len(fetched)} chars")
+                else:
+                    print(f"  [DEBUG] Intent detection returned no data")
+            except DynamicContentError as e:
+                print(f"  [WARN] Failed to fetch dynamic content (DynamicContentError): {e}")
+                print(f"  [INFO] Falling back to knowledge base only")
+                fetched = None
+            except Exception as e:
+                print(f"  [WARN] Failed to call API (Exception): {e}")
+                print(f"  [INFO] Falling back to knowledge base only")
+                fetched = None
             if fetched:
                 related, score, detected_country = await self.is_query_related_via_llm(
                     message, dynamic_url or "", fetched
@@ -1922,7 +2128,7 @@ IMPORTANT
             print(f"\n[ERROR] Workflow invocation failed after {workflow_time:.1f}s:")
             print(traceback.format_exc())
 
-            # Check if it's a timeout-like issue
+            # Check if it's a timeout-like issueDynamic URL provided:
             if workflow_time > 40.0:
                 raise HTTPException(
                     status_code=504,
@@ -2317,11 +2523,22 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         print(f"  - dynamic_url: {request.dynamic_url}")
 
         # Guardrail node handles hostility detection in workflow
-        response, processing_time, sources_used = await chatbot_manager.chat(
-            message=request.message,
-            session_id=request.session_id,
-            dynamic_url=request.dynamic_url
-        )
+        # Add timeout to prevent indefinite hanging
+        try:
+            response, processing_time, sources_used = await asyncio.wait_for(
+                chatbot_manager.chat(
+                    message=request.message,
+                    session_id=request.session_id,
+                    dynamic_url=request.dynamic_url
+                ),
+                timeout=90.0  # 90 second max timeout for entire chat operation
+            )
+        except asyncio.TimeoutError:
+            print(f"[ERROR] Chat operation timed out after 90 seconds")
+            raise HTTPException(
+                status_code=504,
+                detail="Request timeout - the AI model took too long to respond. Please try again."
+            )
 
         # Schedule session cleanup in background
         background_tasks.add_task(chatbot_manager.cleanup_old_sessions)

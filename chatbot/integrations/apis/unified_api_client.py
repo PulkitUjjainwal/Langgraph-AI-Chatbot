@@ -694,6 +694,19 @@ class UnifiedAPIClient:
         # Build request body (with smart data_type selection based on country availability)
         request_body = await self._build_search_request(params, platform)
 
+        # CRITICAL VALIDATION: API requires at least ONE filter parameter
+        required_filters = ['product', 'hs_code', 'importer', 'exporter', 'supplier', 'buyer', 'origin_country', 'destination_country']
+        has_filter = any(request_body.get(f) for f in required_filters)
+
+        if not has_filter:
+            logger.warning(f"  ⚠ Search query missing required filter! Country-only queries not supported.")
+            logger.warning(f"  ⚠ Required: at least one of {required_filters}")
+            return {
+                "error": "Search data requires at least one filter parameter (product, hs_code, importer, exporter, supplier, buyer, origin_country, or destination_country)",
+                "search_params": params,
+                "suggestion": f"Use /country/{params.get('country')}/{'imports' if 'import' in params.get('type', '') else 'exports'} for country overview data"
+            }
+
         # Determine which endpoints to call
         endpoints_to_call = self._get_search_endpoints(params, request_body)
 
