@@ -11,6 +11,46 @@ from chatbot.config.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def format_large_number(value, decimals=1):
+    """
+    Format large numbers into human-readable format with K, M, B suffixes
+
+    Args:
+        value: Number to format (can be int, float, or string)
+        decimals: Number of decimal places (default 1 for cleaner display)
+
+    Returns:
+        Formatted string (e.g., "1.5M", "3.2B", "450K")
+    """
+    try:
+        # Convert to float if string
+        if isinstance(value, str):
+            # Remove commas and dollar signs
+            value = value.replace(',', '').replace('$', '').strip()
+            value = float(value)
+
+        num = float(value)
+
+        # Negative numbers
+        sign = '-' if num < 0 else ''
+        num = abs(num)
+
+        # Billions
+        if num >= 1_000_000_000:
+            return f"{sign}{num / 1_000_000_000:.{decimals}f}B"
+        # Millions
+        elif num >= 1_000_000:
+            return f"{sign}{num / 1_000_000:.{decimals}f}M"
+        # Thousands
+        elif num >= 1_000:
+            return f"{sign}{num / 1_000:.{decimals}f}K"
+        # Less than 1000
+        else:
+            return f"{sign}{num:,.0f}"
+    except (ValueError, TypeError):
+        return str(value)
+
+
 class UnifiedFormatter:
     """Format API responses as text for embeddings"""
 
@@ -42,10 +82,10 @@ Address: {overview.get('address', 'N/A')}
 Country: {overview.get('country_name', 'N/A')}
 Headquarter: {overview.get('headquarter', 'N/A')}
 Date Range: {overview.get('date_from', 'N/A')} to {overview.get('date_to', 'N/A')}
-Import Turnover: ${overview.get('import_turnover', 0):,.2f}
-Export Turnover: ${overview.get('export_turnover', 0):,.2f}
-Import Shipments: {overview.get('import_shipments', 0):,}
-Export Shipments: {overview.get('export_shipments', 0):,}
+Import Turnover: ${format_large_number(overview.get('import_turnover', 0))}
+Export Turnover: ${format_large_number(overview.get('export_turnover', 0))}
+Import Shipments: {format_large_number(overview.get('import_shipments', 0))}
+Export Shipments: {format_large_number(overview.get('export_shipments', 0))}
 Website: {overview.get('websiteurl') or 'N/A'}
 Phone: {overview.get('phone') or 'N/A'}
 Industry: {overview.get('industry') or 'N/A'}""")
