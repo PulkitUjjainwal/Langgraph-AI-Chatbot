@@ -18,6 +18,32 @@ type SuggestionsState = {
   suggestions?: any;
 };
 
+// Lead capture types
+type LeadFormField = {
+  name: string;
+  type: string;
+  label: string;
+  placeholder: string;
+  required: boolean;
+};
+
+type LeadPrompt = {
+  show_form: boolean;
+  prompt_type: string;
+  message: string;
+  fields: LeadFormField[];
+  buttons: {
+    submit: string;
+    skip: string;
+  };
+};
+
+type LeadFormData = {
+  email: string;
+  phone: string;
+  company_name: string;
+};
+
 const SESSION_STORAGE_KEY = "chat_session_id";
 
 function createSessionId(): string {
@@ -46,6 +72,18 @@ export default function ChatWidget() {
   const [productInput, setProductInput] = useState("");
   const [currentUrl, setCurrentUrl] = useState("");
   const [isInitializing, setIsInitializing] = useState(false);
+
+  // Lead capture state
+  const [showLeadForm, setShowLeadForm] = useState(false);
+  const [leadPrompt, setLeadPrompt] = useState<LeadPrompt | null>(null);
+  const [leadFormData, setLeadFormData] = useState<LeadFormData>({
+    email: "",
+    phone: "",
+    company_name: "",
+  });
+  const [leadFormError, setLeadFormError] = useState("");
+  const [isSubmittingLead, setIsSubmittingLead] = useState(false);
+  const [leadCaptured, setLeadCaptured] = useState(false);
 
   // Get current page URL
   useEffect(() => {
@@ -206,6 +244,91 @@ export default function ChatWidget() {
     return "http://localhost:8003";
   };
 
+  // Lead capture functions
+  const handleLeadFormChange = (field: string, value: string) => {
+    setLeadFormData((prev) => ({ ...prev, [field]: value }));
+    setLeadFormError("");
+  };
+
+  const validateEmail = (email: string): boolean => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  };
+
+  const submitLeadForm = async () => {
+    // Validate email
+    if (!leadFormData.email.trim()) {
+      setLeadFormError("Email is required");
+      return;
+    }
+    if (!validateEmail(leadFormData.email)) {
+      setLeadFormError("Please enter a valid email address");
+      return;
+    }
+
+    setIsSubmittingLead(true);
+    setLeadFormError("");
+
+    try {
+      const apiBaseUrl = getApiBaseUrl();
+      const response = await fetch(`${apiBaseUrl}/api/lead/capture`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          email: leadFormData.email.trim(),
+          phone: leadFormData.phone.trim() || null,
+          company_name: leadFormData.company_name.trim() || null,
+          source_url: currentUrl,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log("✅ Lead captured:", data);
+        setLeadCaptured(true);
+        setShowLeadForm(false);
+        setLeadPrompt(null);
+
+        // Add thank you message from bot
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `lead-thanks-${Date.now()}`,
+            role: "assistant",
+            text: data.message || "Thank you! I'll send you personalized insights.",
+          },
+        ]);
+      } else {
+        const error = await response.json();
+        setLeadFormError(error.detail || "Failed to submit. Please try again.");
+      }
+    } catch (error) {
+      console.error("❌ Lead submission error:", error);
+      setLeadFormError("Network error. Please try again.");
+    } finally {
+      setIsSubmittingLead(false);
+    }
+  };
+
+  const skipLeadForm = async () => {
+    try {
+      const apiBaseUrl = getApiBaseUrl();
+      await fetch(`${apiBaseUrl}/api/lead/skip`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      console.log("Lead form skipped");
+    } catch (error) {
+      console.error("Error recording skip:", error);
+    }
+
+    setShowLeadForm(false);
+    setLeadPrompt(null);
+    setLeadFormError("");
+  };
+
   // Initialize session with current URL (when chatbot opens)
   async function initializeSession() {
     const sid = sessionId || createSessionId();
@@ -296,39 +419,6 @@ export default function ChatWidget() {
     }
   }, [open, sessionId]);
 
-  async function sendChatRequest(query: string, slotValues?: SlotValues) {
-    const sid = sessionId || createSessionId();
-    if (!sessionId) {
-      setSessionId(sid);
-      try {
-        window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
-      } catch {
-        // ignore
-      }
-    }
-
-    const extraData: any = {};
-    if (slotValues && Object.keys(slotValues).length > 0) {
-      extraData.slot_values = slotValues;
-    }
-
-    const apiBaseUrl = getApiBaseUrl();
-    
-    // CRITICAL FIX: Always send dynamic_url in chat requests
-    const resp = await fetch(`${apiBaseUrl}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message: query,
-        session_id: sid,
-        dynamic_url: currentUrl, // Always include current URL
-        ...extraData,
-      }),
-    });
-
-    return resp;
-  }
-
   // Streaming chat request using Server-Sent Events
   async function sendStreamingRequest(
     query: string,
@@ -415,6 +505,48 @@ export default function ChatWidget() {
     }
   }
 
+  // Check if lead prompt should be shown (lightweight check)
+  const checkLeadPrompt = async (message: string, messageCount: number) => {
+    if (leadCaptured) return;
+
+    // High-intent keywords that trigger lead prompt
+    const highIntentKeywords = [
+      'buyers', 'buyer', 'suppliers', 'supplier',
+      'contact', 'contacts', 'email', 'phone',
+      'download', 'export', 'send me', 'send it',
+      'api', 'pricing', 'price', 'cost', 'quote',
+      'list of', 'names of', 'complete list'
+    ];
+
+    const messageLower = message.toLowerCase();
+    const hasHighIntent = highIntentKeywords.some(kw => messageLower.includes(kw));
+
+    // Trigger on high intent OR after 3+ messages
+    if (hasHighIntent || messageCount >= 3) {
+      // Use a simple prompt without full chat request
+      const promptMessages = {
+        high_intent: "I can send you this detailed information directly. What's your email?",
+        engagement: "I'm happy to help! To send you a summary, could you share your email?",
+      };
+
+      const promptType = hasHighIntent ? "high_intent" : "engagement";
+
+      setLeadPrompt({
+        show_form: true,
+        prompt_type: promptType,
+        message: promptMessages[promptType],
+        fields: [
+          { name: "email", type: "email", label: "Email", placeholder: "your@email.com", required: true },
+          { name: "phone", type: "tel", label: "Phone", placeholder: "+1 234 567 8900", required: false },
+          { name: "company_name", type: "text", label: "Company", placeholder: "Your Company", required: false },
+        ],
+        buttons: { submit: "Send to my email", skip: "Maybe later" },
+      });
+      setShowLeadForm(true);
+      console.log("💡 Lead prompt triggered:", promptType);
+    }
+  };
+
   async function handleSend(text: string, slotValues?: SlotValues) {
     if (isSending) return;
     setIsSending(true);
@@ -443,6 +575,11 @@ export default function ChatWidget() {
 
       // Clear suggestions state after successful response
       setSuggestionsState(null);
+
+      // Check for lead prompt after response (lightweight client-side check)
+      const currentMessageCount = messages.length + 2; // +2 for user msg and assistant msg
+      checkLeadPrompt(text, currentMessageCount);
+
     } catch (err) {
       console.error("Chat error:", err);
       // Update the assistant message with error
@@ -535,7 +672,100 @@ export default function ChatWidget() {
           )}
 
           <ChatMessages messages={messages} isStreaming={isSending} />
-          
+
+          {/* Lead Capture Form */}
+          {showLeadForm && leadPrompt && (
+            <div className="border-t border-chat-border px-4 py-4 bg-gradient-to-b from-blue-50 to-white">
+              <div className="flex items-start gap-2 mb-3">
+                <svg className="h-5 w-5 text-blue-500 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+                <p className="text-sm text-gray-700 font-medium">{leadPrompt.message}</p>
+              </div>
+
+              <div className="space-y-3">
+                {/* Email Input */}
+                <div>
+                  <input
+                    type="email"
+                    value={leadFormData.email}
+                    onChange={(e) => handleLeadFormChange("email", e.target.value)}
+                    placeholder="your@email.com *"
+                    disabled={isSubmittingLead}
+                    className={`w-full rounded-lg border px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                      leadFormError && !leadFormData.email ? "border-red-400" : "border-gray-300"
+                    } ${isSubmittingLead ? "opacity-60 cursor-not-allowed" : ""}`}
+                  />
+                </div>
+
+                {/* Phone Input */}
+                <div>
+                  <input
+                    type="tel"
+                    value={leadFormData.phone}
+                    onChange={(e) => handleLeadFormChange("phone", e.target.value)}
+                    placeholder="Phone (optional)"
+                    disabled={isSubmittingLead}
+                    className={`w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                      isSubmittingLead ? "opacity-60 cursor-not-allowed" : ""
+                    }`}
+                  />
+                </div>
+
+                {/* Company Input */}
+                <div>
+                  <input
+                    type="text"
+                    value={leadFormData.company_name}
+                    onChange={(e) => handleLeadFormChange("company_name", e.target.value)}
+                    placeholder="Company (optional)"
+                    disabled={isSubmittingLead}
+                    className={`w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                      isSubmittingLead ? "opacity-60 cursor-not-allowed" : ""
+                    }`}
+                  />
+                </div>
+
+                {/* Error Message */}
+                {leadFormError && (
+                  <p className="text-xs text-red-500">{leadFormError}</p>
+                )}
+
+                {/* Buttons */}
+                <div className="flex gap-2 pt-1">
+                  <button
+                    onClick={submitLeadForm}
+                    disabled={isSubmittingLead}
+                    className={`flex-1 rounded-lg bg-blue-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-600 transition-colors ${
+                      isSubmittingLead ? "opacity-70 cursor-not-allowed" : ""
+                    }`}
+                  >
+                    {isSubmittingLead ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Sending...
+                      </span>
+                    ) : (
+                      leadPrompt.buttons?.submit || "Send to my email"
+                    )}
+                  </button>
+                  <button
+                    onClick={skipLeadForm}
+                    disabled={isSubmittingLead}
+                    className={`rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors ${
+                      isSubmittingLead ? "opacity-70 cursor-not-allowed" : ""
+                    }`}
+                  >
+                    {leadPrompt.buttons?.skip || "Maybe later"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {isCollecting && (
             <div className="border-t px-4 py-3 bg-gray-50">
               {missingFields.length > 0 && (

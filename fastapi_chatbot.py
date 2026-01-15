@@ -96,8 +96,14 @@ from chatbot.models.api_models import (
     InitRequest, InitResponse,
     ResetRequest, ResetResponse,
     HistoryResponse, HealthResponse,
-    RedisStatsResponse
+    RedisStatsResponse,
+    LeadCaptureRequest, LeadCaptureResponse,
+    LeadSkipRequest, LeadSkipResponse,
+    LeadStatsResponse
 )
+
+# Import Lead Manager
+from lead_manager import LeadManager, get_lead_form_config
 
 # Import modular utility functions
 from chatbot.utils import (
@@ -2113,6 +2119,31 @@ RULES:
 - No markdown, no emojis
 - Answer directly, then ask one follow-up question if relevant
 - IMPORTANT: Use conversation history to understand follow-up questions like "list all of them" or "the same"
+
+# ## Core Product Knowledge (CRITICAL)
+
+# ### 1. API Products
+# We offer 7 specific APIs. If asked "what APIs do you have?", list these:
+# - **Global Import-Export Data API**: Full shipment records.
+# - **Trade Data Retrieval API**: Targeted search for specific trade events.
+# - **Group By Data API**: Aggregated data for analytics.
+# - **Company Information API**: Firmographic details.
+# - **Company People Details API**: Key contact information.
+# - **Supply Chain Analysis API**: Buyer-seller relationship mapping.
+# - **HS Code Finder API**: Product classification tools.
+
+# **API Rule:** Do NOT say "We have a RESTful API" as the primary answer. Say "We offer 4 specialized APIs including [list top 2-3]..." Only mention "RESTful" if the user asks about integration or technical specs.
+
+# ### 2. Data License (Offline Delivery)
+# Data License is for **bulk data access** delivered OFFLINE.
+built from verified Customs Data and Bill of Lading records
+# - **Delivery Methods**: SFTP, AWS S3, Snowflake, CSV, Excel.
+Work fully offline with clean, structured global trade data designed for procurement, analytics, compliance, government, and consulting teams
+# - **CRITICAL DISTINCTION**: Data License is **NOT** the same as the Web Platform. Do not say "access via our platform" for Data License queries. Say "delivered directly to your system via SFTP, AWS, or Snowflake."
+
+# ### 3. Web Platform
+Answer according to Home page and Platform pages accurately list down all features of the web platform.
+if query is for platform
 """
 
         # Create LLM for streaming
@@ -2313,12 +2344,13 @@ What APIs and integrations does Export Genius offer?"""
 chatbot_manager: Optional[ChatbotManager] = None
 redis_manager: Optional[RedisMemoryManager] = None
 hostility_detector: Optional[HostilityDetector] = None
+lead_manager: Optional[LeadManager] = None  # Lead generation manager
 app_start_time: float = 0
 _initialization_lock = False
 
 async def ensure_initialized():
     """Lazy initialization on first request"""
-    global chatbot_manager, redis_manager, hostility_detector, _initialization_lock, app_start_time
+    global chatbot_manager, redis_manager, hostility_detector, lead_manager, _initialization_lock, app_start_time
 
     if chatbot_manager is not None:
         return  # Already initialized
@@ -2361,6 +2393,10 @@ async def ensure_initialized():
 
         # Initialize chatbot
         chatbot_manager = ChatbotManager(kb_retriever, redis_manager, hostility_detector)
+
+        # Initialize lead manager
+        lead_manager = LeadManager(redis_manager)
+        print("[OK] Lead generation enabled")
 
         print("\n" + "=" * 70)
         print("CHATBOT READY!")
@@ -2410,7 +2446,7 @@ def check_and_pull_ollama_models():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    global chatbot_manager, hostility_detector, app_start_time, redis_manager
+    global chatbot_manager, hostility_detector, lead_manager, app_start_time, redis_manager
     import sys
 
     sys.stderr.write("\n" + "=" * 70 + "\n")
@@ -2449,6 +2485,11 @@ async def lifespan(app: FastAPI):
 
         # Initialize chatbot manager with Redis and hostility detector
         chatbot_manager = ChatbotManager(kb_retriever, redis_manager, hostility_detector)
+
+        # Initialize lead manager
+        lead_manager = LeadManager(redis_manager)
+        sys.stderr.write("[OK] Lead generation enabled\n")
+        sys.stderr.flush()
 
         # Print Redis stats
         stats = redis_manager.get_stats()
@@ -2554,11 +2595,32 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         # Schedule session cleanup in background
         background_tasks.add_task(chatbot_manager.cleanup_old_sessions)
 
+        # Check if we should prompt for lead capture
+        lead_prompt = None
+        if lead_manager:
+            # Get message count from session
+            session_info = chatbot_manager.sessions.get(request.session_id, {})
+            message_count = session_info.get("message_count", 1)
+
+            # Check if we should prompt
+            should_prompt, prompt_type, prompt_message = lead_manager.should_prompt_for_lead(
+                session_id=request.session_id,
+                message=request.message,
+                message_count=message_count
+            )
+
+            if should_prompt:
+                lead_prompt = get_lead_form_config(prompt_type, prompt_message)
+                # Record that we showed a prompt
+                lead_manager.record_prompt(request.session_id, message_count, prompt_type)
+                print(f"[LEAD] Prompting for lead capture (type: {prompt_type})")
+
         return ChatResponse(
             response=response,
             session_id=request.session_id,
             processing_time=processing_time,
-            sources_used=sources_used
+            sources_used=sources_used,
+            lead_prompt=lead_prompt
         )
 
     except Exception as e:
@@ -2809,15 +2871,122 @@ async def reset_session(request: ResetRequest):
     """Reset conversation history for a session"""
     if not chatbot_manager:
         raise HTTPException(status_code=503, detail="Chatbot not initialized")
-    
+
     chatbot_manager.reset_session(request.session_id)
-    
+
     return JSONResponse(
         content={
             "status": "success",
             "message": f"Session {request.session_id} reset successfully"
         }
     )
+
+
+# ============================================================================
+# LEAD CAPTURE ENDPOINTS
+# ============================================================================
+
+@router.post("/lead/capture", response_model=LeadCaptureResponse)
+async def capture_lead(request: LeadCaptureRequest):
+    """
+    Capture lead information from user
+
+    - **session_id**: Session identifier
+    - **email**: User's email address (required)
+    - **phone**: User's phone number (optional)
+    - **company_name**: User's company name (optional)
+    - **name**: User's name (optional)
+    - **source_url**: Page URL where lead was captured (optional)
+    """
+    await ensure_initialized()
+
+    if not lead_manager:
+        raise HTTPException(status_code=503, detail="Lead manager not initialized")
+
+    # Validate and save lead
+    success, message = lead_manager.save_lead(
+        session_id=request.session_id,
+        email=request.email,
+        phone=request.phone,
+        company_name=request.company_name,
+        name=request.name,
+        source_url=request.source_url
+    )
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return LeadCaptureResponse(
+        status="success",
+        message="Thank you! I'll send you personalized insights.",
+        session_id=request.session_id
+    )
+
+
+@router.post("/lead/skip", response_model=LeadSkipResponse)
+async def skip_lead(request: LeadSkipRequest):
+    """
+    Record that user skipped the lead form
+
+    - **session_id**: Session identifier
+    """
+    await ensure_initialized()
+
+    if not lead_manager:
+        raise HTTPException(status_code=503, detail="Lead manager not initialized")
+
+    # Record the skip
+    lead_manager.record_skip(request.session_id)
+
+    return LeadSkipResponse(
+        status="success",
+        message="No problem! Let me know if you change your mind."
+    )
+
+
+@router.get("/lead/stats", response_model=LeadStatsResponse)
+async def get_lead_stats(include_leads: bool = False, limit: int = 100):
+    """
+    Get lead capture statistics (admin endpoint)
+
+    - **include_leads**: If true, include list of leads
+    - **limit**: Maximum number of leads to return
+    """
+    await ensure_initialized()
+
+    if not lead_manager:
+        raise HTTPException(status_code=503, detail="Lead manager not initialized")
+
+    stats = lead_manager.get_lead_stats()
+
+    leads = None
+    if include_leads:
+        leads = lead_manager.get_all_leads(limit=limit)
+
+    return LeadStatsResponse(
+        total_leads=stats.get("total_leads", 0),
+        leads=leads
+    )
+
+
+@router.get("/lead/{session_id}")
+async def get_lead(session_id: str):
+    """
+    Get lead info for a specific session
+
+    - **session_id**: Session identifier
+    """
+    await ensure_initialized()
+
+    if not lead_manager:
+        raise HTTPException(status_code=503, detail="Lead manager not initialized")
+
+    lead = lead_manager.get_lead(session_id)
+
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found for this session")
+
+    return lead
 
 
 @router.get("/history/{session_id}", response_model=HistoryResponse)

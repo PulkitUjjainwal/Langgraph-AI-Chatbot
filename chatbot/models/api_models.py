@@ -22,7 +22,7 @@ class ChatRequest(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "message": "What is Export Genius?",
+                "message": "What is Market Inside?",
                 "session_id": "user123",
                 "dynamic_url": "https://www.exportgenius.in/company/example/abc123",
                 "ip_address": "192.168.1.1"
@@ -36,14 +36,24 @@ class ChatResponse(BaseModel):
     session_id: str = Field(..., description="Session identifier")
     processing_time: float = Field(..., description="Processing time in seconds")
     sources_used: List[str] = Field(default_factory=list, description="Sources used for response")
+    lead_prompt: Optional[Dict[str, Any]] = Field(None, description="Lead capture form config if needed")
 
     class Config:
         json_schema_extra = {
             "example": {
-                "response": "Export Genius is a global trade intelligence platform...",
+                "response": "Market Inside is a global trade intelligence platform...",
                 "session_id": "user123",
                 "processing_time": 2.34,
-                "sources_used": ["Knowledge Base", "Dynamic Content"]
+                "sources_used": ["Knowledge Base", "Dynamic Content"],
+                "lead_prompt": {
+                    "show_form": True,
+                    "prompt_type": "high_intent",
+                    "message": "I can send you this detailed information. What's your email?",
+                    "fields": [
+                        {"name": "email", "type": "email", "required": True},
+                        {"name": "phone", "type": "tel", "required": False}
+                    ]
+                }
             }
         }
 
@@ -132,3 +142,91 @@ class RedisStatsResponse(BaseModel):
     total_keys: int
     memory_used: Optional[str] = None
     db_size: int
+
+
+# ============================================================================
+# LEAD CAPTURE MODELS
+# ============================================================================
+
+class LeadCaptureRequest(BaseModel):
+    """Request model for lead capture endpoint"""
+    session_id: str = Field(..., description="Session identifier")
+    email: str = Field(..., description="User's email address")
+    phone: Optional[str] = Field(None, description="User's phone number")
+    company_name: Optional[str] = Field(None, description="User's company name")
+    name: Optional[str] = Field(None, description="User's name")
+    source_url: Optional[str] = Field(None, description="Page URL where lead was captured")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user123",
+                "email": "john@example.com",
+                "phone": "+1234567890",
+                "company_name": "Acme Corp",
+                "name": "John Doe",
+                "source_url": "https://marketinside.com/company/xyz"
+            }
+        }
+
+
+class LeadCaptureResponse(BaseModel):
+    """Response model for lead capture endpoint"""
+    status: str = Field(..., description="Status: success or error")
+    message: str = Field(..., description="Response message")
+    session_id: str = Field(..., description="Session identifier")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "success",
+                "message": "Thank you! I'll send you personalized insights.",
+                "session_id": "user123"
+            }
+        }
+
+
+class LeadSkipRequest(BaseModel):
+    """Request model for lead skip endpoint"""
+    session_id: str = Field(..., description="Session identifier")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user123"
+            }
+        }
+
+
+class LeadSkipResponse(BaseModel):
+    """Response model for lead skip endpoint"""
+    status: str = Field(..., description="Status: success")
+    message: str = Field(..., description="Response message")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "success",
+                "message": "No problem! Let me know if you change your mind."
+            }
+        }
+
+
+class LeadStatsResponse(BaseModel):
+    """Response model for lead stats endpoint"""
+    total_leads: int = Field(..., description="Total number of captured leads")
+    leads: Optional[List[Dict[str, Any]]] = Field(None, description="List of leads (if requested)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "total_leads": 150,
+                "leads": [
+                    {
+                        "email": "john@example.com",
+                        "company_name": "Acme Corp",
+                        "captured_at": "2025-01-15T10:30:00Z"
+                    }
+                ]
+            }
+        }
