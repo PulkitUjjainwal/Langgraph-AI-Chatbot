@@ -845,26 +845,43 @@ def create_chatbot_node():
         Returns: 'simple', 'standard', or 'detailed'
         """
         query_lower = query.lower()
+        word_count = len(query.split())
 
-        # Simple yes/no questions
+        # SIMPLE: Short queries, yes/no, general "about" questions (< 8 words)
         simple_patterns = [
             'do you have', 'can you', 'is there', 'are there',
-            'do you provide', 'does export genius', 'is it possible'
+            'do you provide', 'is it possible',
+            'what is mi', 'what is market', 'tell me about mi',
+            'tell me about market', 'about mi', 'about market inside',
+            'what does mi', 'what do you do', 'who are you',
+            'what is this', 'what are you', 'global trade data',
+            'mi?', 'market inside?'
         ]
-        if any(pattern in query_lower for pattern in simple_patterns):
-            # Check if it's really simple (< 10 words)
-            if len(query.split()) < 10:
-                return 'simple'
+        if any(pattern in query_lower for pattern in simple_patterns) or word_count <= 5:
+            return 'simple'
 
-        # Detailed requests (asking for explanation or multiple things)
-        detailed_patterns = [
-            'tell me about', 'explain', 'how does', 'what are all',
-            'show me everything', 'give me details', 'walk me through'
+        # Explicit detailed indicators (user WANTS comprehensive info)
+        detailed_indicators = [
+            ' all ', 'everything', 'comprehensive', 'in detail',
+            'complete list', 'full breakdown', 'entire', 'explain in detail'
         ]
-        if any(pattern in query_lower for pattern in detailed_patterns):
+
+        # Complex explanation patterns
+        detailed_patterns = [
+            'explain how', 'explain why', 'how does it work',
+            'show me everything', 'give me all', 'walk me through',
+            'break down', 'detailed analysis', 'what are all',
+            'list all', 'show all', 'complete breakdown'
+        ]
+
+        # Only classify as detailed if EXPLICITLY requested or complex pattern + long query
+        has_detailed_indicator = any(ind in query_lower for ind in detailed_indicators)
+        has_detailed_pattern = any(pat in query_lower for pat in detailed_patterns)
+
+        if has_detailed_pattern or (has_detailed_indicator and word_count > 8):
             return 'detailed'
 
-        # Default to standard
+        # Standard for most queries
         return 'standard'
 
     def get_optimal_temperature(query: str) -> float:
@@ -1086,28 +1103,23 @@ CRITICAL RULES FOR DATA TYPES:
 
 CONVERSATIONAL RULES:
 [DO] Use conversational language ("you're", "let's", "I'll show you")
-[DO] Ask follow-up questions to understand their needs
 [DO] Provide specific, concrete information from context
-[DO] Keep responses concise (4-5 sentences for general queries, can be longer for specific data requests)
-[DO] Use simple dashes (-) for lists if needed
-[DO] Make it feel like a helpful conversation
 [DO] Format large numbers with K (thousand), M (million), B (billion) - e.g., "$1.5M" instead of "$1,500,000"
 [DO] Mention data date range when country or trade data is discussed - e.g., "For Argentina imports (Nov 2024 - Oct 2025)..."
 
 [DON'T] Use markdown (**, ###, __)
 [DON'T] Use emojis or special symbols
-[DON'T] Generalize when specific details are available in context
 [DON'T] Be overly formal or robotic
-[DON'T] Say "I don't have information" - be resourceful
-[DON'T] Add excessive pleasantries or fluff
+[DON'T] Add excessive pleasantries, fluff, or filler phrases
+[DON'T] Repeat yourself or rephrase the same point
 [DON'T] Show full numbers like "$103,144,094,031.35" - use "$103.1B" instead
 
-RESPONSE LENGTH GUIDELINES:
-- General questions (capabilities, services, general info): 4-5 lines maximum
-- Specific data requests (top importers, shipments, statistics): Provide full details with formatted numbers
-- If user asks vague question about a country (e.g., "tell me about Argentina"), keep it brief (4-5 lines) with key stats and ask what specifically they're looking for
+STRICT RESPONSE LENGTH (ENFORCED):
+- General/about questions ("what is MI", "tell me about market inside"): 1-2 sentences MAX (20-30 words)
+- Standard queries: 2-3 sentences MAX (40-50 words)
+- ONLY give longer responses when user explicitly asks for details, stats, or comprehensive info
 
-Remember: You're having a natural business conversation, not reading a sales brochure. Be helpful, be concise, be human. Use human-readable numbers (K, M, B) and mention date ranges for context."""
+Remember: Brevity is key. Every word must add value. Shorter responses are ALWAYS better."""
 
         system_message = SystemMessage(content=system_prompt)
 
@@ -1228,6 +1240,8 @@ class ChatbotManager:
         self.dynamic_content_manager = DynamicContentManager(redis_manager)
         self.hybrid_retriever = HybridRetriever(kb_retriever, redis_manager)
         self.sessions: Dict[str, Dict[str, Any]] = {}
+        self._stream_history: Dict[str, List[Dict[str, str]]] = {}  # Conversation history for streaming
+        self._stream_context: Dict[str, str] = {}  # Last dynamic content for follow-up questions
         self.app = self._create_workflow()
         print("[OK] Chatbot Manager initialized (Redis-backed)")
 
@@ -2008,8 +2022,153 @@ IMPORTANT
 
         return response, processing_time, sources_used
 
-    # async def chat1(self,message:str, session_id:str,dynamic_url:Optional[str]=None) ->tuple[str,float,List[str]]:        
-    #     return await self.chat(message,session_id,dynamic_url)
+    async def chat_stream(self, message: str, session_id: str, dynamic_url: Optional[str] = None):
+        """
+        Stream chat response - yields chunks as they're generated by the LLM.
+
+        This is a simplified streaming version that:
+        1. Gets context (KB + dynamic content)
+        2. Includes conversation history for context
+        3. Streams LLM response directly (bypasses full workflow for speed)
+
+        Yields:
+            str: Chunks of the response text
+        """
+        start_time = time.time()
+        print(f"\n{'='*70}")
+        print(f"[STREAM] Session: {session_id}")
+        print(f"[STREAM] Query: {message[:100]}...")
+        print(f"{'='*70}")
+
+        # Initialize history for this session if not exists
+        if session_id not in self._stream_history:
+            self._stream_history[session_id] = []
+
+        # Get dynamic content (same logic as chat())
+        dynamic_content = ""
+        if dynamic_url:
+            cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(dynamic_url, session_id)
+            if cached_data:
+                _, _, full_content = cached_data
+                related, score = await self.is_query_related_via_llm(message, dynamic_url, full_content)
+                if related and score >= 0.5:
+                    dynamic_content = full_content
+                    print(f"  [STREAM] Using cached content: {len(full_content)} chars")
+            if not dynamic_content:
+                try:
+                    api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"dynamic_url": dynamic_url})
+                    dynamic_content = api_data or ""
+                except Exception as e:
+                    print(f"  [STREAM] API call failed: {e}")
+
+        # For follow-up questions, use cached context from previous query
+        if not dynamic_content and session_id in self._stream_context:
+            dynamic_content = self._stream_context[session_id]
+            print(f"  [STREAM] Using previous context for follow-up: {len(dynamic_content)} chars")
+
+        # Cache successful dynamic content for follow-up questions
+        if dynamic_content:
+            self._stream_context[session_id] = dynamic_content
+
+        # Get KB context using correct method
+        kb_context = ""
+        if self.kb_retriever:
+            try:
+                kb_results = await asyncio.wait_for(
+                    asyncio.to_thread(self.kb_retriever.retrieve, message, 3),
+                    timeout=5.0
+                )
+                kb_context = "\n".join([doc.get("content", "") for doc in kb_results[:3]])
+                print(f"  [STREAM] KB context retrieved: {len(kb_context)} chars")
+            except Exception as e:
+                print(f"  [STREAM] KB retrieval failed: {e}")
+
+        # Merge context
+        merged_context = ""
+        if dynamic_content:
+            merged_context = f"DYNAMIC CONTENT:\n{dynamic_content[:2500]}\n\n"
+        if kb_context:
+            merged_context += f"KNOWLEDGE BASE:\n{kb_context[:1500]}"
+
+        # Build conversation history string (last 6 messages = 3 exchanges)
+        history_messages = self._stream_history[session_id][-6:]
+        history_text = ""
+        if history_messages:
+            history_text = "CONVERSATION HISTORY:\n"
+            for msg in history_messages:
+                role = "User" if msg["role"] == "user" else "Assistant"
+                history_text += f"{role}: {msg['content'][:500]}\n"
+            history_text += "\n"
+
+        # Build system prompt with history
+        system_prompt = f"""You are Alex, a trade data consultant at Market Inside Data.
+
+{history_text}CONTEXT:
+{merged_context}
+
+RULES:
+- Be brief and direct (2-4 sentences for most queries)
+- Use exact data from context, never make up numbers
+- Format large numbers with K/M/B (e.g., $1.5M)
+- No markdown, no emojis
+- Answer directly, then ask one follow-up question if relevant
+- IMPORTANT: Use conversation history to understand follow-up questions like "list all of them" or "the same"
+"""
+
+        # Create LLM for streaming
+        llm_kwargs = {
+            'model': Config.LLM_MODEL,
+            'temperature': 0.5,
+            'top_p': Config.TOP_P,
+            'num_predict': Config.NUM_PREDICT,
+            'num_ctx': Config.NUM_CTX,
+        }
+
+        if Config.OLLAMA_API_KEY:
+            cloud_client = ollama.Client(
+                host=Config.OLLAMA_BASE_URL,
+                headers={'Authorization': f'Bearer {Config.OLLAMA_API_KEY}'}
+            )
+            llm_kwargs['client'] = cloud_client
+        else:
+            llm_kwargs['base_url'] = Config.OLLAMA_BASE_URL
+
+        llm = ChatOllama(**llm_kwargs)
+
+        # Prepare messages
+        llm_messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=message)
+        ]
+
+        print(f"  [STREAM] Starting LLM streaming with {len(history_messages)} history messages...")
+        chunk_count = 0
+        full_response = ""
+
+        try:
+            # Stream the response
+            async for chunk in llm.astream(llm_messages):
+                if hasattr(chunk, 'content') and chunk.content:
+                    chunk_count += 1
+                    # Clean markdown from chunk
+                    clean_chunk = chunk.content.replace('**', '').replace('__', '')
+                    full_response += clean_chunk
+                    yield clean_chunk
+
+            elapsed = time.time() - start_time
+            print(f"  [STREAM] Completed: {chunk_count} chunks in {elapsed:.2f}s")
+
+            # Store this exchange in history
+            self._stream_history[session_id].append({"role": "user", "content": message})
+            self._stream_history[session_id].append({"role": "assistant", "content": full_response})
+
+            # Keep only last 10 messages to prevent memory bloat
+            if len(self._stream_history[session_id]) > 10:
+                self._stream_history[session_id] = self._stream_history[session_id][-10:]
+
+        except Exception as e:
+            print(f"  [STREAM] Error during streaming: {e}")
+            yield f"\n\nI apologize, but I encountered an error. Please try again."
 
     async def generate_questions(self, content: str, company_name: Optional[str] = None) -> List[str]:
         """
@@ -2417,12 +2576,48 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     """
-    Stream chatbot response (Server-Sent Events)
-    
-    Note: Streaming implementation would require additional logic
-    This is a placeholder for future implementation
+    Stream chatbot response using Server-Sent Events (SSE)
+
+    Returns chunks of the response as they're generated by the LLM.
+    Format: data: {"chunk": "text", "done": false}\n\n
+    Final message: data: {"chunk": "", "done": true, "processing_time": 1.23}\n\n
     """
-    raise HTTPException(status_code=501, detail="Streaming not yet implemented")
+    await ensure_initialized()
+
+    if not chatbot_manager:
+        raise HTTPException(status_code=503, detail="Chatbot not initialized")
+
+    async def generate_stream():
+        start_time = time.time()
+        full_response = ""
+
+        try:
+            async for chunk in chatbot_manager.chat_stream(
+                message=request.message,
+                session_id=request.session_id,
+                dynamic_url=request.dynamic_url
+            ):
+                full_response += chunk
+                # Send chunk as SSE event
+                yield f"data: {json.dumps({'chunk': chunk, 'done': False})}\n\n"
+
+            # Send final message with completion status
+            processing_time = time.time() - start_time
+            yield f"data: {json.dumps({'chunk': '', 'done': True, 'processing_time': processing_time, 'full_response': full_response})}\n\n"
+
+        except Exception as e:
+            print(f"[ERROR] Streaming failed: {e}")
+            yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
+
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        }
+    )
 
 
 @router.post("/init", response_model=InitResponse)
