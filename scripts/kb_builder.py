@@ -90,7 +90,7 @@ class MarketInsideKBBuilder:
     # Default pages to scrape (includes homepage)
     DEFAULT_PAGES = [
         # Homepage (was missing)
-        "https://www.marketinsidedata.com/en",
+        "https://www.marketinsidedata.com",
 
         # Core pages
         "https://www.marketinsidedata.com/en/about-us",
