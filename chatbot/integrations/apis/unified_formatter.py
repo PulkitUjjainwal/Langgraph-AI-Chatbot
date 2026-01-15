@@ -107,6 +107,9 @@ Industry: {overview.get('industry') or 'N/A'}""")
                         country = item.get('country', 'N/A')
                         value = item.get('value', 'locked')
                         percentage = item.get('percentage', 'locked')
+                        # Format value if it's numeric
+                        if value != 'locked' and isinstance(value, (int, float)):
+                            value = f"${format_large_number(value)}"
                         sections.append(f"  • {country}: Value={value}, Share={percentage}%")
 
                 if exports:
@@ -115,6 +118,9 @@ Industry: {overview.get('industry') or 'N/A'}""")
                         country = item.get('country', 'N/A')
                         value = item.get('value', 'locked')
                         percentage = item.get('percentage', 'locked')
+                        # Format value if it's numeric
+                        if value != 'locked' and isinstance(value, (int, float)):
+                            value = f"${format_large_number(value)}"
                         sections.append(f"  • {country}: Value={value}, Share={percentage}%")
 
         # ===================================================================

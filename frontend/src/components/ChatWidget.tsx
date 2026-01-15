@@ -329,13 +329,100 @@ export default function ChatWidget() {
     return resp;
   }
 
+  // Streaming chat request using Server-Sent Events
+  async function sendStreamingRequest(
+    query: string,
+    assistantMsgId: string,
+    slotValues?: SlotValues
+  ) {
+    const sid = sessionId || createSessionId();
+    if (!sessionId) {
+      setSessionId(sid);
+      try {
+        window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
+      } catch {
+        // ignore
+      }
+    }
+
+    const apiBaseUrl = getApiBaseUrl();
+    const extraData: any = {};
+    if (slotValues && Object.keys(slotValues).length > 0) {
+      extraData.slot_values = slotValues;
+    }
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/chat/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: query,
+          session_id: sid,
+          dynamic_url: currentUrl,
+          ...extraData,
+        }),
+      });
+
+      if (!response.ok) throw new Error("Stream request failed");
+      if (!response.body) throw new Error("No response body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulatedText = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("\n");
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              if (data.error) {
+                throw new Error(data.error);
+              }
+
+              if (data.chunk) {
+                accumulatedText += data.chunk;
+                // Update message with streamed content
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantMsgId
+                      ? { ...m, text: accumulatedText }
+                      : m
+                  )
+                );
+              }
+
+              if (data.done) {
+                console.log(`Streaming complete in ${data.processing_time?.toFixed(2)}s`);
+              }
+            } catch (parseError) {
+              // Skip invalid JSON lines
+            }
+          }
+        }
+      }
+
+      return accumulatedText;
+    } catch (error) {
+      console.error("Streaming error:", error);
+      throw error;
+    }
+  }
+
   async function handleSend(text: string, slotValues?: SlotValues) {
     if (isSending) return;
     setIsSending(true);
 
     const userId = `user-${Date.now()}`;
-    const typingId = `typing-${Date.now() + 1}`;
+    const assistantId = `assistant-${Date.now() + 1}`;
 
+    // Add user message and empty assistant message for streaming
     setMessages((prev) => [
       ...prev,
       {
@@ -344,61 +431,26 @@ export default function ChatWidget() {
         text,
       },
       {
-        id: typingId,
+        id: assistantId,
         role: "assistant" as const,
-        text: "thinking...",
+        text: "", // Start empty, will be filled by streaming
       },
     ]);
 
     try {
-      const resp = await sendChatRequest(text, slotValues);
-      if (!resp.ok) throw new Error("bad_response");
+      // Use streaming for real-time response
+      await sendStreamingRequest(text, assistantId, slotValues);
 
-      const data: any = await resp.json();
-      console.log("API response data:", data);
-
-      // CRITICAL FIX: Use 'response' field instead of 'message'
-      // Backend sends ChatResponse with 'response' field
-      const assistantText: string = data.response || data.message || "I couldn't process that request.";
-
-      // Handle suggestions state if present
-      const payload = data?.api_response ?? data;
-      const collecting =
-        payload?.status === "collecting" ||
-        Boolean(payload?.suggestions) ||
-        (Array.isArray(payload?.missing_fields) && payload.missing_fields.length > 0);
-
-      setSuggestionsState(
-        collecting
-          ? {
-              status: payload?.status,
-              missing_fields: Array.isArray(payload?.missing_fields) ? payload.missing_fields : [],
-              draft_payload: payload?.draft_payload,
-              suggestions: payload?.suggestions,
-            }
-          : null
-      );
-
-      // Replace typing indicator with actual response
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === typingId
-            ? {
-                id: `api-${Date.now()}`,
-                role: "assistant" as const,
-                text: assistantText,
-              }
-            : m
-        )
-      );
+      // Clear suggestions state after successful response
+      setSuggestionsState(null);
     } catch (err) {
       console.error("Chat error:", err);
+      // Update the assistant message with error
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === typingId
+          m.id === assistantId
             ? {
-                id: `err-${Date.now()}`,
-                role: "assistant",
+                ...m,
                 text: "Something went wrong. Please try again.",
               }
             : m
@@ -482,7 +534,7 @@ export default function ChatWidget() {
             </div>
           )}
 
-          <ChatMessages messages={messages} />
+          <ChatMessages messages={messages} isStreaming={isSending} />
           
           {isCollecting && (
             <div className="border-t px-4 py-3 bg-gray-50">

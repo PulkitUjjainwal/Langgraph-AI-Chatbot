@@ -3,9 +3,10 @@ import type { ChatMessage } from "./ChatWidget";
 
 type Props = {
   messages: ChatMessage[];
+  isStreaming?: boolean;
 };
 
-export function ChatMessages({ messages }: Props) {
+export function ChatMessages({ messages, isStreaming = false }: Props) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -35,8 +36,11 @@ export function ChatMessages({ messages }: Props) {
       className="flex-1 space-y-4 overflow-y-auto px-4 py-4 bg-gray-50 scroll-smooth"
       style={{ scrollBehavior: "smooth" }}
     >
-      {messages.map((msg) => {
+      {messages.map((msg, index) => {
         const isTyping = msg.text === "thinking...";
+        const isLastMessage = index === messages.length - 1;
+        const isWaitingForStream = msg.role === "assistant" && msg.text === "" && isLastMessage && isStreaming;
+        const showStreamingCursor = msg.role === "assistant" && msg.text !== "" && isLastMessage && isStreaming;
 
         return (
           <div
@@ -49,12 +53,10 @@ export function ChatMessages({ messages }: Props) {
               className={`max-w-[80%] whitespace-pre-wrap rounded-lg px-4 py-3 text-sm shadow-sm transition-all duration-200 ${
                 msg.role === "user"
                   ? "bg-chat-primary text-white rounded-br-sm"
-                  : isTyping
-                  ? "bg-white text-chat-text border border-chat-border rounded-bl-sm animate-pulse"
                   : "bg-white text-chat-text border border-chat-border rounded-bl-sm"
               }`}
             >
-              {isTyping ? (
+              {isTyping || isWaitingForStream ? (
                 <div className="flex items-center gap-2">
                   <div className="flex gap-1">
                     <span className="inline-block w-2 h-2 bg-chat-accent rounded-full animate-bounce" style={{ animationDelay: "0ms" }}></span>
@@ -64,7 +66,12 @@ export function ChatMessages({ messages }: Props) {
                   <span className="text-xs text-chat-muted">AI is thinking...</span>
                 </div>
               ) : (
-                msg.text
+                <>
+                  {msg.text}
+                  {showStreamingCursor && (
+                    <span className="inline-block w-0.5 h-4 bg-chat-accent ml-0.5 animate-pulse" />
+                  )}
+                </>
               )}
             </div>
           </div>
