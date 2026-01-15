@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatHeader } from "./ChatHeader";
 import { ChatMessages } from "./ChatMessages";
 import { ChatFooter } from "./ChatFooter";
@@ -47,58 +47,69 @@ export default function ChatWidget() {
   const [currentUrl, setCurrentUrl] = useState("");
   const [isInitializing, setIsInitializing] = useState(false);
 
-  // Get current page URL
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      setCurrentUrl(window.location.href);
-    }
-  }, []);
+  // Refs to avoid stale closures in event handlers
+  const currentUrlRef = useRef<string>("");
+  const sessionIdRef = useRef<string>(sessionId);
+  const isInitializingRef = useRef<boolean>(false);
 
-  // Monitor URL changes and call /init immediately
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  // Monitor URL changes and call /init immediately (runs even if chatbot is closed)
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const handleUrlChange = async () => {
+    const handleUrlChange = () => {
       const newUrl = window.location.href;
-      if (newUrl !== currentUrl) {
-        setCurrentUrl(newUrl);
-        console.log("🌐 URL changed to:", newUrl);
+      if (newUrl === currentUrlRef.current) return;
 
-        // Proactively call /init when URL changes (even if chatbot is closed)
-        await initializeSessionProactive(newUrl);
-      }
+      currentUrlRef.current = newUrl;
+      setCurrentUrl(newUrl);
+      console.log("🌐 URL changed to:", newUrl);
+
+      void initializeSessionProactive(newUrl);
     };
+
+    // Run once on mount for initial URL
+    handleUrlChange();
 
     const originalPushState = history.pushState;
     const originalReplaceState = history.replaceState;
 
-    history.pushState = function(...args) {
-      originalPushState.apply(history, args);
+    history.pushState = function (...args) {
+      originalPushState.apply(history, args as any);
       handleUrlChange();
     };
 
-    history.replaceState = function(...args) {
-      originalReplaceState.apply(history, args);
+    history.replaceState = function (...args) {
+      originalReplaceState.apply(history, args as any);
       handleUrlChange();
     };
 
-    window.addEventListener('popstate', handleUrlChange);
+    window.addEventListener("popstate", handleUrlChange);
 
     return () => {
       history.pushState = originalPushState;
       history.replaceState = originalReplaceState;
-      window.removeEventListener('popstate', handleUrlChange);
+      window.removeEventListener("popstate", handleUrlChange);
     };
-  }, [currentUrl]);
+  }, []);
 
   // Show initial welcome message on first open
   useEffect(() => {
     if (open && messages.length === 0) {
-      if (!sessionId) {
-        const newSessionId = createSessionId();
-        setSessionId(newSessionId);
+      if (!sessionIdRef.current) {
+        const storedSid =
+          typeof window !== "undefined"
+            ? window.localStorage.getItem(SESSION_STORAGE_KEY) ?? ""
+            : "";
+        const sid = storedSid || createSessionId();
+
+        sessionIdRef.current = sid;
+        setSessionId(sid);
         try {
-          window.localStorage.setItem(SESSION_STORAGE_KEY, newSessionId);
+          window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
         } catch {
           // ignore
         }
@@ -206,52 +217,16 @@ export default function ChatWidget() {
     return "http://localhost:8003";
   };
 
-  // Initialize session with current URL (when chatbot opens)
-  async function initializeSession() {
-    const sid = sessionId || createSessionId();
-    if (!sessionId) {
-      setSessionId(sid);
-      try {
-        window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
-      } catch {
-        // ignore
-      }
-    }
-
-    try {
-      const apiBaseUrl = getApiBaseUrl();
-      const resp = await fetch(`${apiBaseUrl}/api/init`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: sid,
-          dynamic_url: currentUrl,
-        }),
-      });
-
-      if (resp.ok) {
-        const data = await resp.json();
-        console.log("✅ Session initialized:", data);
-
-        // Store suggested questions
-        if (data.suggested_questions && Array.isArray(data.suggested_questions)) {
-          setSuggestedQuestions(data.suggested_questions);
-          console.log("💡 Suggested questions:", data.suggested_questions);
-        }
-      }
-    } catch (error) {
-      console.error("❌ Failed to initialize session:", error);
-    }
-  }
-
   // Proactive initialization when URL changes (even if chatbot is closed)
   async function initializeSessionProactive(url: string) {
-    if (isInitializing) return; // Prevent duplicate calls
+    if (isInitializingRef.current) return; // Prevent duplicate calls
 
+    isInitializingRef.current = true;
     setIsInitializing(true);
 
-    const sid = sessionId || createSessionId();
-    if (!sessionId) {
+    const sid = sessionIdRef.current || createSessionId();
+    if (!sessionIdRef.current) {
+      sessionIdRef.current = sid;
       setSessionId(sid);
       try {
         window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
@@ -286,47 +261,8 @@ export default function ChatWidget() {
       console.error("❌ Failed to proactively initialize:", error);
     } finally {
       setIsInitializing(false);
+      isInitializingRef.current = false;
     }
-  }
-
-  // Initialize session when chat opens
-  useEffect(() => {
-    if (open && sessionId) {
-      initializeSession();
-    }
-  }, [open, sessionId]);
-
-  async function sendChatRequest(query: string, slotValues?: SlotValues) {
-    const sid = sessionId || createSessionId();
-    if (!sessionId) {
-      setSessionId(sid);
-      try {
-        window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
-      } catch {
-        // ignore
-      }
-    }
-
-    const extraData: any = {};
-    if (slotValues && Object.keys(slotValues).length > 0) {
-      extraData.slot_values = slotValues;
-    }
-
-    const apiBaseUrl = getApiBaseUrl();
-    
-    // CRITICAL FIX: Always send dynamic_url in chat requests
-    const resp = await fetch(`${apiBaseUrl}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message: query,
-        session_id: sid,
-        dynamic_url: currentUrl, // Always include current URL
-        ...extraData,
-      }),
-    });
-
-    return resp;
   }
 
   // Streaming chat request using Server-Sent Events
@@ -335,8 +271,9 @@ export default function ChatWidget() {
     assistantMsgId: string,
     slotValues?: SlotValues
   ) {
-    const sid = sessionId || createSessionId();
-    if (!sessionId) {
+    const sid = sessionIdRef.current || createSessionId();
+    if (!sessionIdRef.current) {
+      sessionIdRef.current = sid;
       setSessionId(sid);
       try {
         window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
@@ -464,10 +401,10 @@ export default function ChatWidget() {
   return (
     <>
       {/* Floating Button */}
-      <div className="fixed bottom-5 right-5 z-[2147483647]">
+      <div className="fixed bottom-5 right-5 z-2147483647">
         <button
           onClick={() => setOpen(true)}
-          className="relative flex items-center gap-2 rounded-full bg-gradient-to-r from-chat-accent to-chat-primary
+          className="relative flex items-center gap-2 rounded-full bg-linear-to-r from-chat-accent to-chat-primary
             px-6 py-3.5 text-sm font-semibold text-white shadow-xl
             hover:shadow-2xl hover:scale-105 transition-all duration-200
             ring-2 ring-white ring-offset-2"
@@ -498,8 +435,8 @@ export default function ChatWidget() {
 
       {/* Popup */}
       {open && (
-        <div className="fixed bottom-24 right-5 z-[2147483647]
-          flex h-[600px] w-[400px] flex-col
+        <div className="fixed bottom-24 right-5 z-2147483647
+          flex h-150 w-100 flex-col
           rounded-2xl bg-white shadow-2xl border border-chat-border overflow-hidden
           animate-in slide-in-from-bottom-4 duration-300"
           style={{ animation: "scaleIn 0.3s ease-out forwards" }}
@@ -508,15 +445,15 @@ export default function ChatWidget() {
           
           {/* Suggested Questions */}
           {suggestedQuestions.length > 0 && messages.length <= 1 && (
-            <div className="border-b border-chat-border px-4 py-3 bg-gradient-to-b from-orange-50 to-white">
+            <div className="border-b border-chat-border px-4 py-3 bg-linear-to-b from-orange-50 to-white">
               <div className="flex items-center gap-2 mb-2">
                 <svg className="h-4 w-4 text-chat-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
                 </svg>
                 <p className="text-xs text-chat-primary font-semibold">Suggested questions:</p>
               </div>
-              <div className="space-y-2">
-                {suggestedQuestions.slice(0, 3).map((question, idx) => (
+              <div className="space-y-2 testing-chatbot">
+                {suggestedQuestions.slice(0, 5).map((question, idx) => (
                   <button
                     key={idx}
                     onClick={() => handleSend(question)}
