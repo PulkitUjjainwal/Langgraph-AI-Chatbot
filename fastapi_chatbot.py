@@ -2874,6 +2874,7 @@ async def init_session(request: InitRequest):
     company_name = None
 
     try:
+
         if request.dynamic_url:
             print(f"[INIT] Dynamic URL provided: {request.dynamic_url}")
 
