@@ -3,9 +3,10 @@ import { useState } from "react";
 type Props = {
   onSend: (text: string) => void;
   isSending?: boolean;
+  position?: "top" | "bottom";
 };
 
-export function ChatFooter({ onSend, isSending = false }: Props) {
+export function ChatFooter({ onSend, isSending = false, position = "bottom" }: Props) {
   const [message, setMessage] = useState("");
 
   function handleSend() {
@@ -15,8 +16,10 @@ export function ChatFooter({ onSend, isSending = false }: Props) {
     setMessage("");
   }
 
+  const isTop = position === "top";
+
   return (
-    <div className="border-t border-gray-200 px-4 py-3 bg-white">
+    <div className={`px-4 py-3 ${isTop ? "bg-gray-50 border-b border-gray-200" : "border-t border-gray-200 bg-white"}`}>
       {/* Input Container */}
       <div className="flex items-center gap-2">
         <div className="flex-1 relative">
@@ -71,11 +74,13 @@ export function ChatFooter({ onSend, isSending = false }: Props) {
         </div>
       </div>
 
-      {/* Disclaimer */}
-      <p className="text-[10px] text-gray-400 text-center mt-2">
-        By chatting, you agree to our{" "}
-        <a href="#" className="text-orange-600 hover:underline">terms</a>
-      </p>
+      {/* Disclaimer - only show at bottom */}
+      {!isTop && (
+        <p className="text-[10px] text-gray-400 text-center mt-2">
+          By chatting, you agree to our{" "}
+          <a href="#" className="text-orange-600 hover:underline">terms</a>
+        </p>
+      )}
     </div>
   );
 }
