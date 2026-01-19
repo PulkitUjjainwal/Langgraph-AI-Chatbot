@@ -8,7 +8,6 @@ type Props = {
 
 export function ChatFooter({ onSend, isSending = false, position = "bottom" }: Props) {
   const [message, setMessage] = useState("");
-
   function handleSend() {
     if (isSending) return;
     if (!message.trim()) return;
@@ -16,7 +15,7 @@ export function ChatFooter({ onSend, isSending = false, position = "bottom" }: P
     setMessage("");
   }
 
-  const isTop = position === "top";
+  const isTop = position === "bottom";
 
   return (
     <div className={`px-4 py-3 ${isTop ? "bg-gray-50 border-b border-gray-200" : "border-t border-gray-200 bg-white"}`}>

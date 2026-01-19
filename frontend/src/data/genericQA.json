@@ -1,0 +1,27 @@
+{
+  "I want to schedule a product demo": {
+    "type": "schedule_demo",
+    "message": "I'd be happy to help you schedule a demo! Our team can walk you through the platform and show you how our trade intelligence data can benefit your business."
+  },
+  "I want to find new customers": {
+    "type": "hybrid",
+    "message": "I can help you discover new customers using our comprehensive buyer and supplier database. Our platform provides detailed shipment records, contact information, and trade patterns to help you identify the perfect prospects.",
+    "actions": ["chat", "schedule_demo"]
+  },
+  "I want to learn about your data": {
+    "type": "init",
+    "message": "Loading contextual questions..."
+  },
+  "I need to consult with an expert": {
+    "type": "whatsapp",
+    "message": "Our trade experts are ready to help! Connect with us directly on WhatsApp for immediate assistance with your trade intelligence needs."
+  },
+  "I need technical help": {
+    "type": "whatsapp",
+    "message": "Our technical support team is here to help you. Connect with us on WhatsApp for quick assistance with any technical issues or questions."
+  },
+  "Talk to an expert": {
+    "type": "whatsapp",
+    "message": "Connect with our trade intelligence experts via WhatsApp for personalized guidance and support tailored to your business needs."
+  }
+}
