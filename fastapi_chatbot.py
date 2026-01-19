@@ -134,6 +134,14 @@ from redis_memory import RedisMemoryManager, RedisCheckpointSaver
 # Import hostility detection
 from hostility_detector import HostilityDetector, HostilityConfig
 
+# Import FAQ service for page-specific questions
+try:
+    from chatbot.database.faq_service import FAQService, get_faq_service, init_faq_service
+    FAQ_SERVICE_AVAILABLE = True
+except ImportError as e:
+    FAQ_SERVICE_AVAILABLE = False
+    print(f"[FAQ] FAQ service not available: {e}")
+
 print("[DEBUG] All imports completed successfully!")
 
 # Import optional dependencies
@@ -2537,12 +2545,13 @@ chatbot_manager: Optional[ChatbotManager] = None
 redis_manager: Optional[RedisMemoryManager] = None
 hostility_detector: Optional[HostilityDetector] = None
 lead_manager: Optional[LeadManager] = None  # Lead generation manager
+faq_service: Optional['FAQService'] = None  # FAQ service for page-specific questions
 app_start_time: float = 0
 _initialization_lock = False
 
 async def ensure_initialized():
     """Lazy initialization on first request"""
-    global chatbot_manager, redis_manager, hostility_detector, lead_manager, _initialization_lock, app_start_time
+    global chatbot_manager, redis_manager, hostility_detector, lead_manager, faq_service, _initialization_lock, app_start_time
 
     if chatbot_manager is not None:
         return  # Already initialized
@@ -2589,6 +2598,18 @@ async def ensure_initialized():
         # Initialize lead manager
         lead_manager = LeadManager(redis_manager)
         print("[OK] Lead generation enabled")
+
+        # Initialize FAQ service (for page-specific suggested questions)
+        if FAQ_SERVICE_AVAILABLE:
+            try:
+                faq_service = await init_faq_service()
+                if faq_service and faq_service.is_available:
+                    print("[OK] FAQ service enabled (MySQL)")
+                else:
+                    print("[INFO] FAQ service unavailable - using LLM fallback")
+            except Exception as e:
+                print(f"[INFO] FAQ service init failed: {e} - using LLM fallback")
+                faq_service = None
 
         print("\n" + "=" * 70)
         print("CHATBOT READY!")
@@ -2880,14 +2901,14 @@ async def init_session(request: InitRequest):
     Initialize session: Pre-cache dynamic URL and generate suggested questions
 
     This endpoint optimizes first message response time by:
-    1. Pre-fetching and caching dynamic URL content (if provided)
-    2. Generating 5 sales-focused suggested questions
-    3. Returning questions immediately for better UX
+    1. First trying to get page-specific questions from MySQL (fastest - ~10ms)
+    2. Falling back to LLM-generated questions if MySQL unavailable
+    3. Pre-fetching and caching dynamic URL content for future chat messages
 
     **Benefits:**
+    - Page-specific questions from MySQL: ~10ms response time
     - First chat message is 3-5x faster (uses pre-warmed cache)
-    - Users get personalized question suggestions
-    - Improved user experience and engagement
+    - Users get relevant question suggestions for their current page
 
     **Usage:**
     - Call on page load with session_id and optional dynamic_url
@@ -2914,9 +2935,30 @@ async def init_session(request: InitRequest):
     error_message = None
     content_for_questions = ""
     company_name = None
+    suggested_questions = []
+    questions_source = "none"
 
     try:
+        # =====================================================================
+        # STEP 1: Try to get questions from FAQ service (MySQL) - FASTEST
+        # =====================================================================
+        if faq_service and faq_service.is_available and request.dynamic_url:
+            try:
+                faq_questions = await faq_service.get_suggested_questions(
+                    url=request.dynamic_url,
+                    limit=5
+                )
+                if faq_questions and len(faq_questions) > 0:
+                    suggested_questions = faq_questions
+                    questions_source = "mysql"
+                    print(f"[INIT] ✓ Got {len(faq_questions)} questions from MySQL (~10ms)")
+            except Exception as e:
+                print(f"[INIT] FAQ service error: {e} - will use LLM fallback")
 
+        # =====================================================================
+        # STEP 2: Pre-cache dynamic URL content (for future chat messages)
+        # This runs even if we got questions from MySQL
+        # =====================================================================
         if request.dynamic_url:
             print(f"[INIT] Dynamic URL provided: {request.dynamic_url}")
 
@@ -2995,34 +3037,36 @@ async def init_session(request: InitRequest):
             except:
                 pass
 
-        # Generate questions
-        if not content_for_questions:
+        # =====================================================================
+        # STEP 3: If no questions from MySQL, generate with LLM (fallback)
+        # =====================================================================
+        if not suggested_questions or len(suggested_questions) == 0:
             # No dynamic content - use static KB sample
-            print(f"[INIT] No dynamic content - generating questions from static KB")
-            # Get sample from KB
-            kb_chunks = chatbot_manager.kb_retriever.get_chunks()
-            if kb_chunks:
-                content_for_questions = "\n".join([c['chunk_text'] for c in kb_chunks[:5]])
+            if not content_for_questions:
+                print(f"[INIT] No dynamic content - generating questions from static KB")
+                kb_chunks = chatbot_manager.kb_retriever.get_chunks()
+                if kb_chunks:
+                    content_for_questions = "\n".join([c['chunk_text'] for c in kb_chunks[:5]])
 
-        # Generate 5 sales-focused questions
-        print(f"[INIT] Generating 5 suggested questions...")
-        suggested_questions = await chatbot_manager.generate_questions(
-            content=content_for_questions,
-            company_name=company_name
-        )
+            # Generate 5 sales-focused questions using LLM
+            print(f"[INIT] Generating 5 suggested questions via LLM...")
+            suggested_questions = await chatbot_manager.generate_questions(
+                content=content_for_questions,
+                company_name=company_name
+            )
+            questions_source = "llm"
 
         processing_time = time.time() - start_time
 
         # Prepare response
-        # Always return success if we have suggested questions
-        # Error message is informational only
         status = "success"
         cache_status = {
             "cache_hit": cache_hit,
-            "cached_at": datetime.now().isoformat() if dynamic_url_processed else None
+            "cached_at": datetime.now().isoformat() if dynamic_url_processed else None,
+            "questions_source": questions_source  # Track where questions came from
         }
 
-        print(f"[INIT] Complete - {processing_time:.2f}s, {len(suggested_questions)} questions")
+        print(f"[INIT] Complete - {processing_time:.2f}s, {len(suggested_questions)} questions (source: {questions_source})")
 
         return InitResponse(
             status=status,
