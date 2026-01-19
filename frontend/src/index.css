@@ -1,22 +1,34 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;600;700&display=swap');
 @import "tailwindcss";
 
 :root {
+  /* Market Inside Brand Colors - Orange Theme */
   --chat-primary: #ea580c;
   --chat-primary-hover: #c2410c;
+  --chat-primary-dark: #9a3412;
   --chat-accent: #f97316;
-  --chat-accent-light: #fed7aa;
-  --chat-text: #111827;
+  --chat-accent-light: #ffedd5;
+  --chat-text: #1f2937;
+  --chat-text-light: #6b7280;
   --chat-bg: #ffffff;
-  --chat-muted: #6b7280;
+  --chat-muted: #9ca3af;
   --chat-border: #e5e7eb;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* AWS-style dark header */
+  --chat-header-bg: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+  --chat-header-text: #ffffff;
+
+  /* Google-style card colors */
+  --chat-card-hover: #fff7ed;
+  --chat-link-color: #ea580c;
+
+  font-family: 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
 /* Smooth scrollbar styling */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--chat-accent-light) transparent;
+  scrollbar-color: #d1d5db transparent;
 }
 
 *::-webkit-scrollbar {
@@ -29,7 +41,7 @@
 }
 
 *::-webkit-scrollbar-thumb {
-  background-color: var(--chat-accent-light);
+  background-color: #d1d5db;
   border-radius: 3px;
   transition: background-color 0.2s;
 }
@@ -72,6 +84,26 @@
   }
 }
 
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(100px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes pulse-soft {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
 .animate-in {
   animation: fadeIn 0.3s ease-out forwards;
 }
@@ -80,25 +112,89 @@
   animation: slideInFromBottom 0.3s ease-out forwards;
 }
 
+.slide-in-from-right {
+  animation: slideInRight 0.4s ease-out forwards;
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 2s ease-in-out infinite;
+}
+
 /* Better focus states */
 input:focus,
 textarea:focus,
-button:focus {
+button:focus-visible {
   outline: none;
-  ring: 2px;
-  ring-color: var(--chat-accent);
-  ring-offset: 2px;
+  box-shadow: 0 0 0 2px var(--chat-accent);
+}
+
+/* AWS-style tooltip notification */
+.tooltip-notification {
+  animation: slideInRight 0.4s ease-out forwards;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.2), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+}
+
+.tooltip-notification:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 20px 35px -5px rgba(0, 0, 0, 0.25), 0 12px 15px -6px rgba(0, 0, 0, 0.1);
+}
+
+/* Google-style question card */
+.question-card {
+  transition: all 0.2s ease;
+  border: 1px solid var(--chat-border);
+}
+
+.question-card:hover {
+  background-color: var(--chat-card-hover);
+  border-color: var(--chat-accent);
+  transform: translateX(2px);
+}
+
+.question-card:hover .question-title {
+  color: var(--chat-primary);
+}
+
+/* Chat bubble animations */
+.chat-bubble {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* Typing indicator */
+.typing-dot {
+  animation: bounce 1.4s infinite ease-in-out both;
+}
+
+.typing-dot:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes bounce {
+  0%, 80%, 100% {
+    transform: scale(0);
+  }
+  40% {
+    transform: scale(1);
+  }
 }
 
 @theme {
   --color-chat-primary: var(--chat-primary);
   --color-chat-primary-hover: var(--chat-primary-hover);
+  --color-chat-primary-dark: var(--chat-primary-dark);
   --color-chat-accent: var(--chat-accent);
   --color-chat-accent-light: var(--chat-accent-light);
   --color-chat-text: var(--chat-text);
+  --color-chat-text-light: var(--chat-text-light);
   --color-chat-muted: var(--chat-muted);
   --color-chat-bg: var(--chat-bg);
   --color-chat-border: var(--chat-border);
+  --color-chat-link: var(--chat-link-color);
+  --color-chat-card-hover: var(--chat-card-hover);
 
-  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-sans: 'Roboto', ui-sans-serif, system-ui, sans-serif;
 }

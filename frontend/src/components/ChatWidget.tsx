@@ -18,7 +18,7 @@ type SuggestionsState = {
   suggestions?: any;
 };
 
-// Lead capture types
+// Lead capture types (keeping logic but removing UI)
 type LeadFormField = {
   name: string;
   type: string;
@@ -44,6 +44,12 @@ type LeadFormData = {
   company_name: string;
 };
 
+// Question card type for Google-style display
+type QuestionCard = {
+  title: string;
+  description: string;
+};
+
 const SESSION_STORAGE_KEY = "chat_session_id";
 
 function createSessionId(): string {
@@ -56,12 +62,35 @@ function createSessionId(): string {
   return `sid-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+// Generate description for questions
+function generateQuestionDescription(question: string): string {
+  const q = question.toLowerCase();
+  if (q.includes('buyer') || q.includes('importer')) {
+    return "Find active importers and their shipment details";
+  }
+  if (q.includes('supplier') || q.includes('exporter')) {
+    return "Discover suppliers and export patterns";
+  }
+  if (q.includes('hs code') || q.includes('product')) {
+    return "Explore product categories and trade volumes";
+  }
+  if (q.includes('country') || q.includes('market')) {
+    return "Analyze market trends and opportunities";
+  }
+  if (q.includes('trend') || q.includes('analysis')) {
+    return "Get insights on trade patterns and changes";
+  }
+  return "Get detailed trade intelligence data";
+}
+
 export default function ChatWidget() {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [suggestionsState, setSuggestionsState] = useState<SuggestionsState | null>(null);
   const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([]);
+  const [showTooltip, setShowTooltip] = useState(false);
+  const [tooltipDismissed, setTooltipDismissed] = useState(false);
 
   const [sessionId, setSessionId] = useState<string>(() => {
     if (typeof window === "undefined") return "";
@@ -73,19 +102,21 @@ export default function ChatWidget() {
   const [currentUrl, setCurrentUrl] = useState("");
   const [isInitializing, setIsInitializing] = useState(false);
 
-  // Lead capture state
-  const [showLeadForm, setShowLeadForm] = useState(false);
-  const [leadPrompt, setLeadPrompt] = useState<LeadPrompt | null>(null);
+  // Lead capture state (keeping logic for future use)
+  const [_showLeadForm, setShowLeadForm] = useState(false);
+  const [_leadPrompt, setLeadPrompt] = useState<LeadPrompt | null>(null);
   const [leadFormData, setLeadFormData] = useState<LeadFormData>({
     email: "",
     phone: "",
     company_name: "",
   });
-  const [leadFormError, setLeadFormError] = useState("");
-  const [isSubmittingLead, setIsSubmittingLead] = useState(false);
+  const [_leadFormError, setLeadFormError] = useState("");
+  const [_isSubmittingLead, setIsSubmittingLead] = useState(false);
   const [leadCaptured, setLeadCaptured] = useState(false);
+  // Suppress unused warnings
+  void _showLeadForm; void _leadPrompt; void _leadFormError; void _isSubmittingLead;
 
-  // Refs to avoid stale closures in event handlers
+  // Refs
   const currentUrlRef = useRef<string>("");
   const sessionIdRef = useRef<string>(sessionId);
   const isInitializingRef = useRef<boolean>(false);
@@ -94,7 +125,25 @@ export default function ChatWidget() {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
-  // Monitor URL changes and call /init immediately (runs even if chatbot is closed)
+  // Show tooltip after 3 seconds if not dismissed
+  useEffect(() => {
+    if (!open && !tooltipDismissed && suggestedQuestions.length > 0) {
+      const timer = setTimeout(() => {
+        setShowTooltip(true);
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [open, tooltipDismissed, suggestedQuestions]);
+
+  // Convert questions to cards with descriptions
+  const questionCards: QuestionCard[] = useMemo(() => {
+    return suggestedQuestions.slice(0, 3).map(q => ({
+      title: q,
+      description: generateQuestionDescription(q)
+    }));
+  }, [suggestedQuestions]);
+
+  // Monitor URL changes
   useEffect(() => {
     if (typeof window === "undefined") return;
 
@@ -104,12 +153,10 @@ export default function ChatWidget() {
 
       currentUrlRef.current = newUrl;
       setCurrentUrl(newUrl);
-      console.log("🌐 URL changed to:", newUrl);
-
+      console.log("URL changed to:", newUrl);
       void initializeSessionProactive(newUrl);
     };
 
-    // Run once on mount for initial URL
     handleUrlChange();
 
     const originalPushState = history.pushState;
@@ -134,30 +181,27 @@ export default function ChatWidget() {
     };
   }, []);
 
-  // Show initial welcome message on first open
+  // Show initial welcome message
   useEffect(() => {
     if (open && messages.length === 0) {
       if (!sessionIdRef.current) {
-        const storedSid =
-          typeof window !== "undefined"
-            ? window.localStorage.getItem(SESSION_STORAGE_KEY) ?? ""
-            : "";
+        const storedSid = typeof window !== "undefined"
+          ? window.localStorage.getItem(SESSION_STORAGE_KEY) ?? ""
+          : "";
         const sid = storedSid || createSessionId();
 
         sessionIdRef.current = sid;
         setSessionId(sid);
         try {
           window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
-        } catch {
-          // ignore
-        }
+        } catch {}
       }
 
       setMessages([
         {
           id: "welcome-1",
           role: "assistant",
-          text: "Hi! I'm your trade intelligence assistant. Ask me anything about markets, products or companies.",
+          text: "Hi! I'm your trade intelligence assistant. Ask me anything about markets, products, or companies.",
         },
       ]);
     }
@@ -183,10 +227,7 @@ export default function ChatWidget() {
             const label = (o as any).label;
             const value = (o as any).value;
             if (typeof value === "string") {
-              return {
-                label: typeof label === "string" ? label : value,
-                value,
-              };
+              return { label: typeof label === "string" ? label : value, value };
             }
           }
           return null;
@@ -255,8 +296,8 @@ export default function ChatWidget() {
     return "http://localhost:8003";
   };
 
-  // Lead capture functions
-  const handleLeadFormChange = (field: string, value: string) => {
+  // Lead capture functions (keeping logic for future use)
+  const _handleLeadFormChange = (field: string, value: string) => {
     setLeadFormData((prev) => ({ ...prev, [field]: value }));
     setLeadFormError("");
   };
@@ -266,8 +307,7 @@ export default function ChatWidget() {
     return emailRegex.test(email);
   };
 
-  const submitLeadForm = async () => {
-    // Validate email
+  const _submitLeadForm = async () => {
     if (!leadFormData.email.trim()) {
       setLeadFormError("Email is required");
       return;
@@ -296,12 +336,11 @@ export default function ChatWidget() {
 
       if (response.ok) {
         const data = await response.json();
-        console.log("✅ Lead captured:", data);
+        console.log("Lead captured:", data);
         setLeadCaptured(true);
         setShowLeadForm(false);
         setLeadPrompt(null);
 
-        // Add thank you message from bot
         setMessages((prev) => [
           ...prev,
           {
@@ -315,14 +354,14 @@ export default function ChatWidget() {
         setLeadFormError(error.detail || "Failed to submit. Please try again.");
       }
     } catch (error) {
-      console.error("❌ Lead submission error:", error);
+      console.error("Lead submission error:", error);
       setLeadFormError("Network error. Please try again.");
     } finally {
       setIsSubmittingLead(false);
     }
   };
 
-  const skipLeadForm = async () => {
+  const _skipLeadForm = async () => {
     try {
       const apiBaseUrl = getApiBaseUrl();
       await fetch(`${apiBaseUrl}/api/lead/skip`, {
@@ -330,7 +369,6 @@ export default function ChatWidget() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: sessionId }),
       });
-      console.log("Lead form skipped");
     } catch (error) {
       console.error("Error recording skip:", error);
     }
@@ -340,16 +378,13 @@ export default function ChatWidget() {
     setLeadFormError("");
   };
 
-  // Initialize session with current URL (when chatbot opens)
-  async function initializeSession() {
+  async function _initializeSession() {
     const sid = sessionId || createSessionId();
     if (!sessionId) {
       setSessionId(sid);
       try {
         window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
 
     try {
@@ -365,22 +400,19 @@ export default function ChatWidget() {
 
       if (resp.ok) {
         const data = await resp.json();
-        console.log("✅ Session initialized:", data);
+        console.log("Session initialized:", data);
 
-        // Store suggested questions
         if (data.suggested_questions && Array.isArray(data.suggested_questions)) {
           setSuggestedQuestions(data.suggested_questions);
-          console.log("💡 Suggested questions:", data.suggested_questions);
         }
       }
     } catch (error) {
-      console.error("❌ Failed to initialize session:", error);
+      console.error("Failed to initialize session:", error);
     }
   }
 
-  // Proactive initialization when URL changes (even if chatbot is closed)
   async function initializeSessionProactive(url: string) {
-    if (isInitializingRef.current) return; // Prevent duplicate calls
+    if (isInitializingRef.current) return;
 
     isInitializingRef.current = true;
     setIsInitializing(true);
@@ -391,9 +423,7 @@ export default function ChatWidget() {
       setSessionId(sid);
       try {
         window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
 
     try {
@@ -409,24 +439,20 @@ export default function ChatWidget() {
 
       if (resp.ok) {
         const data = await resp.json();
-        console.log("🔄 Proactive init for URL:", url);
-        console.log("✅ Context loaded:", data);
+        console.log("Proactive init for URL:", url);
 
-        // Update suggested questions for new page
         if (data.suggested_questions && Array.isArray(data.suggested_questions)) {
           setSuggestedQuestions(data.suggested_questions);
-          console.log("💡 Updated suggested questions for new page:", data.suggested_questions);
         }
       }
     } catch (error) {
-      console.error("❌ Failed to proactively initialize:", error);
+      console.error("Failed to proactively initialize:", error);
     } finally {
       setIsInitializing(false);
       isInitializingRef.current = false;
     }
   }
 
-  // Streaming chat request using Server-Sent Events
   async function sendStreamingRequest(
     query: string,
     assistantMsgId: string,
@@ -438,9 +464,7 @@ export default function ChatWidget() {
       setSessionId(sid);
       try {
         window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
 
     const apiBaseUrl = getApiBaseUrl();
@@ -486,12 +510,9 @@ export default function ChatWidget() {
 
               if (data.chunk) {
                 accumulatedText += data.chunk;
-                // Update message with streamed content
                 setMessages((prev) =>
                   prev.map((m) =>
-                    m.id === assistantMsgId
-                      ? { ...m, text: accumulatedText }
-                      : m
+                    m.id === assistantMsgId ? { ...m, text: accumulatedText } : m
                   )
                 );
               }
@@ -499,9 +520,7 @@ export default function ChatWidget() {
               if (data.done) {
                 console.log(`Streaming complete in ${data.processing_time?.toFixed(2)}s`);
               }
-            } catch (parseError) {
-              // Skip invalid JSON lines
-            }
+            } catch (parseError) {}
           }
         }
       }
@@ -513,47 +532,13 @@ export default function ChatWidget() {
     }
   }
 
-  // Check if lead prompt should be shown (lightweight check)
-  const checkLeadPrompt = async (message: string, messageCount: number) => {
+  // Lead prompt check (keeping logic but not showing UI)
+  const checkLeadPrompt = async (_message: string, _messageCount: number) => {
     if (leadCaptured) return;
-
-    // High-intent keywords that trigger lead prompt
-    const highIntentKeywords = [
-      'buyers', 'buyer', 'suppliers', 'supplier',
-      'contact', 'contacts', 'email', 'phone',
-      'download', 'export', 'send me', 'send it',
-      'api', 'pricing', 'price', 'cost', 'quote',
-      'list of', 'names of', 'complete list'
-    ];
-
-    const messageLower = message.toLowerCase();
-    const hasHighIntent = highIntentKeywords.some(kw => messageLower.includes(kw));
-
-    // Trigger on high intent OR after 3+ messages
-    if (hasHighIntent || messageCount >= 3) {
-      // Use a simple prompt without full chat request
-      const promptMessages = {
-        high_intent: "I can send you this detailed information directly. What's your email?",
-        engagement: "I'm happy to help! To send you a summary, could you share your email?",
-      };
-
-      const promptType = hasHighIntent ? "high_intent" : "engagement";
-
-      setLeadPrompt({
-        show_form: true,
-        prompt_type: promptType,
-        message: promptMessages[promptType],
-        fields: [
-          { name: "email", type: "email", label: "Email", placeholder: "your@email.com", required: true },
-          { name: "phone", type: "tel", label: "Phone", placeholder: "+1 234 567 8900", required: false },
-          { name: "company_name", type: "text", label: "Company", placeholder: "Your Company", required: false },
-        ],
-        buttons: { submit: "Send to my email", skip: "Maybe later" },
-      });
-      setShowLeadForm(true);
-      console.log("💡 Lead prompt triggered:", promptType);
-    }
+    // Logic kept but UI disabled
   };
+  // Suppress unused warnings for lead functions
+  void _handleLeadFormChange; void _submitLeadForm; void _skipLeadForm; void _initializeSession;
 
   async function handleSend(text: string, slotValues?: SlotValues) {
     if (isSending) return;
@@ -562,42 +547,23 @@ export default function ChatWidget() {
     const userId = `user-${Date.now()}`;
     const assistantId = `assistant-${Date.now() + 1}`;
 
-    // Add user message and empty assistant message for streaming
     setMessages((prev) => [
       ...prev,
-      {
-        id: userId,
-        role: "user" as const,
-        text,
-      },
-      {
-        id: assistantId,
-        role: "assistant" as const,
-        text: "", // Start empty, will be filled by streaming
-      },
+      { id: userId, role: "user" as const, text },
+      { id: assistantId, role: "assistant" as const, text: "" },
     ]);
 
     try {
-      // Use streaming for real-time response
       await sendStreamingRequest(text, assistantId, slotValues);
-
-      // Clear suggestions state after successful response
       setSuggestionsState(null);
-
-      // Check for lead prompt after response (lightweight client-side check)
-      const currentMessageCount = messages.length + 2; // +2 for user msg and assistant msg
+      const currentMessageCount = messages.length + 2;
       checkLeadPrompt(text, currentMessageCount);
-
     } catch (err) {
       console.error("Chat error:", err);
-      // Update the assistant message with error
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantId
-            ? {
-                ...m,
-                text: "Something went wrong. Please try again.",
-              }
+            ? { ...m, text: "Something went wrong. Please try again." }
             : m
         )
       );
@@ -606,32 +572,110 @@ export default function ChatWidget() {
     }
   }
 
+  const handleTooltipClick = () => {
+    setShowTooltip(false);
+    setOpen(true);
+  };
+
+  const dismissTooltip = () => {
+    setShowTooltip(false);
+    setTooltipDismissed(true);
+  };
+
   return (
     <>
+      {/* AWS-Style Tooltip Notifications */}
+      {showTooltip && !open && (
+        <div className="fixed bottom-24 right-5 z-2147483646 flex flex-col gap-2 max-w-sm">
+          {/* Main tooltip */}
+          <div
+            className="tooltip-notification flex items-start gap-3 bg-slate-800 text-white rounded-xl p-4 cursor-pointer"
+            onClick={handleTooltipClick}
+          >
+            <div className="flex-shrink-0 mt-0.5">
+              <div className="h-8 w-8 rounded-lg bg-orange-500/20 flex items-center justify-center">
+                <svg className="h-5 w-5 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                </svg>
+              </div>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium">
+                Hi, I can help you find trade data and answer questions.
+              </p>
+            </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                dismissTooltip();
+              }}
+              className="flex-shrink-0 text-gray-400 hover:text-white transition-colors"
+            >
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Secondary tooltip with hint */}
+          <div
+            className="tooltip-notification flex items-start gap-3 bg-slate-800 text-white rounded-xl p-4 cursor-pointer"
+            style={{ animationDelay: '0.1s' }}
+            onClick={handleTooltipClick}
+          >
+            <div className="flex-shrink-0 mt-0.5">
+              <div className="h-8 w-8 rounded-lg bg-amber-500/20 flex items-center justify-center">
+                <svg className="h-5 w-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium">
+                Ask about buyers, suppliers, or market trends!
+              </p>
+            </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                dismissTooltip();
+              }}
+              className="flex-shrink-0 text-gray-400 hover:text-white transition-colors"
+            >
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Floating Button */}
       <div className="fixed bottom-5 right-5 z-2147483647">
         <button
-          onClick={() => setOpen(true)}
-          className="relative flex items-center gap-2 rounded-full bg-linear-to-r from-chat-accent to-chat-primary
-            px-6 py-3.5 text-sm font-semibold text-white shadow-xl
-            hover:shadow-2xl hover:scale-105 transition-all duration-200
-            ring-2 ring-white ring-offset-2"
+          onClick={() => {
+            setOpen(true);
+            setShowTooltip(false);
+          }}
+          className="relative flex items-center justify-center h-14 w-14 rounded-full
+            bg-gradient-to-br from-orange-500 to-orange-600
+            text-white shadow-lg
+            hover:shadow-xl hover:scale-105 transition-all duration-200"
         >
-          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+          <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
           </svg>
-          <span>Chat with AI</span>
 
-          {/* Badge for new suggestions */}
-          {!open && suggestedQuestions.length > 0 && (
-            <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-green-500 text-xs font-bold text-white shadow-lg animate-pulse">
-              {suggestedQuestions.length}
+          {/* Notification badge */}
+          {!open && suggestedQuestions.length > 0 && !showTooltip && (
+            <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-xs font-bold text-white animate-pulse">
+              {Math.min(suggestedQuestions.length, 3)}
             </span>
           )}
 
-          {/* Loading indicator */}
+          {/* Loading spinner */}
           {isInitializing && (
-            <div className="absolute inset-0 flex items-center justify-center rounded-full bg-chat-primary bg-opacity-90">
+            <div className="absolute inset-0 flex items-center justify-center rounded-full bg-orange-600/90">
               <svg className="h-5 w-5 animate-spin text-white" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -641,38 +685,47 @@ export default function ChatWidget() {
         </button>
       </div>
 
-      {/* Popup */}
+      {/* Chat Popup - Google Workspace Style Dimensions */}
       {open && (
-        <div className="fixed bottom-24 right-5 z-2147483647
-          flex h-150 w-100 flex-col
-          rounded-2xl bg-white shadow-2xl border border-chat-border overflow-hidden
-          animate-in slide-in-from-bottom-4 duration-300"
-          style={{ animation: "scaleIn 0.3s ease-out forwards" }}
+        <div
+          className="fixed bottom-24 right-5 z-2147483647
+            flex flex-col
+            rounded-2xl bg-white shadow-2xl overflow-hidden
+            border border-gray-200"
+          style={{
+            width: '380px',
+            height: '580px',
+            animation: 'scaleIn 0.3s ease-out forwards'
+          }}
         >
           <ChatHeader onClose={() => setOpen(false)} />
-          
-          {/* Suggested Questions */}
-          {suggestedQuestions.length > 0 && messages.length <= 1 && (
-            <div className="border-b border-chat-border px-4 py-3 bg-linear-to-b from-orange-50 to-white">
-              <div className="flex items-center gap-2 mb-2">
-                <svg className="h-4 w-4 text-chat-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                </svg>
-                <p className="text-xs text-chat-primary font-semibold">Suggested questions:</p>
-              </div>
-              <div className="space-y-2 testing-chatbot">
-                {suggestedQuestions.slice(0, 5).map((question, idx) => (
+
+          {/* Welcome Section with Suggested Questions - Google Style */}
+          {questionCards.length > 0 && messages.length <= 1 && (
+            <div className="px-4 py-4 bg-gray-50 border-b border-gray-100">
+              <p className="text-sm text-gray-600 mb-3">
+                Want help getting started?
+              </p>
+              <p className="text-xs text-gray-500 mb-3">
+                Tell us a little bit about what you're looking for.
+              </p>
+
+              {/* Google-style Question Cards */}
+              <div className="space-y-2">
+                {questionCards.map((card, idx) => (
                   <button
                     key={idx}
-                    onClick={() => handleSend(question)}
+                    onClick={() => handleSend(card.title)}
                     disabled={isSending}
-                    className="w-full text-left text-xs px-3 py-2.5 rounded-lg
-                      bg-white border border-gray-200 text-gray-700
-                      hover:bg-chat-accent-light hover:border-chat-accent hover:text-chat-primary
-                      transition-all duration-200 shadow-sm hover:shadow
-                      disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                    className="question-card w-full text-left px-4 py-3 rounded-lg bg-white
+                      hover:bg-orange-50 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {question}
+                    <p className="question-title text-sm font-medium text-orange-600 mb-0.5">
+                      {card.title}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {card.description}
+                    </p>
                   </button>
                 ))}
               </div>
@@ -681,103 +734,11 @@ export default function ChatWidget() {
 
           <ChatMessages messages={messages} isStreaming={isSending} />
 
-          {/* Lead Capture Form */}
-          {showLeadForm && leadPrompt && (
-            <div className="border-t border-chat-border px-4 py-4 bg-gradient-to-b from-blue-50 to-white">
-              <div className="flex items-start gap-2 mb-3">
-                <svg className="h-5 w-5 text-blue-500 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                </svg>
-                <p className="text-sm text-gray-700 font-medium">{leadPrompt.message}</p>
-              </div>
-
-              <div className="space-y-3">
-                {/* Email Input */}
-                <div>
-                  <input
-                    type="email"
-                    value={leadFormData.email}
-                    onChange={(e) => handleLeadFormChange("email", e.target.value)}
-                    placeholder="your@email.com *"
-                    disabled={isSubmittingLead}
-                    className={`w-full rounded-lg border px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${
-                      leadFormError && !leadFormData.email ? "border-red-400" : "border-gray-300"
-                    } ${isSubmittingLead ? "opacity-60 cursor-not-allowed" : ""}`}
-                  />
-                </div>
-
-                {/* Phone Input */}
-                <div>
-                  <input
-                    type="tel"
-                    value={leadFormData.phone}
-                    onChange={(e) => handleLeadFormChange("phone", e.target.value)}
-                    placeholder="Phone (optional)"
-                    disabled={isSubmittingLead}
-                    className={`w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${
-                      isSubmittingLead ? "opacity-60 cursor-not-allowed" : ""
-                    }`}
-                  />
-                </div>
-
-                {/* Company Input */}
-                <div>
-                  <input
-                    type="text"
-                    value={leadFormData.company_name}
-                    onChange={(e) => handleLeadFormChange("company_name", e.target.value)}
-                    placeholder="Company (optional)"
-                    disabled={isSubmittingLead}
-                    className={`w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${
-                      isSubmittingLead ? "opacity-60 cursor-not-allowed" : ""
-                    }`}
-                  />
-                </div>
-
-                {/* Error Message */}
-                {leadFormError && (
-                  <p className="text-xs text-red-500">{leadFormError}</p>
-                )}
-
-                {/* Buttons */}
-                <div className="flex gap-2 pt-1">
-                  <button
-                    onClick={submitLeadForm}
-                    disabled={isSubmittingLead}
-                    className={`flex-1 rounded-lg bg-blue-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-600 transition-colors ${
-                      isSubmittingLead ? "opacity-70 cursor-not-allowed" : ""
-                    }`}
-                  >
-                    {isSubmittingLead ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        Sending...
-                      </span>
-                    ) : (
-                      leadPrompt.buttons?.submit || "Send to my email"
-                    )}
-                  </button>
-                  <button
-                    onClick={skipLeadForm}
-                    disabled={isSubmittingLead}
-                    className={`rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors ${
-                      isSubmittingLead ? "opacity-70 cursor-not-allowed" : ""
-                    }`}
-                  >
-                    {leadPrompt.buttons?.skip || "Maybe later"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
+          {/* Data Collection UI (if needed) */}
           {isCollecting && (
-            <div className="border-t px-4 py-3 bg-gray-50">
+            <div className="border-t border-gray-200 px-4 py-3 bg-gray-50">
               {missingFields.length > 0 && (
-                <div className="mb-2 text-xs text-gray-600">
+                <div className="mb-2 text-xs text-gray-500">
                   Needed: {missingFields.join(", ")}
                 </div>
               )}
@@ -789,9 +750,7 @@ export default function ChatWidget() {
                       key={opt.value}
                       disabled={isSending}
                       onClick={() => handleSend(opt.label, { data_type: opt.value })}
-                      className={`rounded-lg bg-chat-primary px-3 py-2 text-xs font-medium text-white hover:bg-chat-primary-hover ${
-                        isSending ? "opacity-70 cursor-not-allowed" : ""
-                      }`}
+                      className="rounded-full bg-orange-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-orange-600 disabled:opacity-50"
                     >
                       {opt.label}
                     </button>
@@ -817,9 +776,7 @@ export default function ChatWidget() {
                     placeholder="Select country..."
                     list="country-options"
                     disabled={isSending}
-                    className={`flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-chat-accent ${
-                      isSending ? "opacity-60 cursor-not-allowed" : ""
-                    }`}
+                    className="flex-1 rounded-full border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:border-orange-500 disabled:opacity-50"
                   />
                   <datalist id="country-options">
                     {countryOptions.map((c) => (
@@ -834,9 +791,7 @@ export default function ChatWidget() {
                       setCountryInput("");
                       handleSend(v, { country: v });
                     }}
-                    className={`rounded-lg bg-chat-primary px-3 py-2 text-xs font-medium text-white hover:bg-chat-primary-hover ${
-                      isSending || !countryInput.trim() ? "opacity-70 cursor-not-allowed" : ""
-                    }`}
+                    className="rounded-full bg-orange-500 px-3 py-2 text-xs font-medium text-white hover:bg-orange-600 disabled:opacity-50"
                   >
                     Set
                   </button>
@@ -860,9 +815,7 @@ export default function ChatWidget() {
                     }}
                     placeholder="Type product..."
                     disabled={isSending}
-                    className={`flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-chat-accent ${
-                      isSending ? "opacity-60 cursor-not-allowed" : ""
-                    }`}
+                    className="flex-1 rounded-full border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:border-orange-500 disabled:opacity-50"
                   />
                   <button
                     disabled={isSending || !productInput.trim()}
@@ -872,9 +825,7 @@ export default function ChatWidget() {
                       setProductInput("");
                       handleSend(v, { product: v });
                     }}
-                    className={`rounded-lg bg-chat-primary px-3 py-2 text-xs font-medium text-white hover:bg-chat-primary-hover ${
-                      isSending || !productInput.trim() ? "opacity-70 cursor-not-allowed" : ""
-                    }`}
+                    className="rounded-full bg-orange-500 px-3 py-2 text-xs font-medium text-white hover:bg-orange-600 disabled:opacity-50"
                   >
                     Set
                   </button>
@@ -882,7 +833,7 @@ export default function ChatWidget() {
               )}
             </div>
           )}
-          
+
           <ChatFooter onSend={handleSend} isSending={isSending} />
         </div>
       )}

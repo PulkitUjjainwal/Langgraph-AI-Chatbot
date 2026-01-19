@@ -105,23 +105,29 @@ Industry: {overview.get('industry') or 'N/A'}""")
                     sections.append("Import Countries:")
                     for item in imports[:10]:
                         country = item.get('country', 'N/A')
-                        value = item.get('value', 'locked')
-                        percentage = item.get('percentage', 'locked')
-                        # Format value if it's numeric
-                        if value != 'locked' and isinstance(value, (int, float)):
-                            value = f"${format_large_number(value)}"
-                        sections.append(f"  • {country}: Value={value}, Share={percentage}%")
+                        value = item.get('value')
+                        percentage = item.get('percentage')
+                        # Build display string with only unlocked values
+                        display_parts = [country]
+                        if value and value != 'locked' and isinstance(value, (int, float)):
+                            display_parts.append(f"Value=${format_large_number(value)}")
+                        if percentage and percentage != 'locked':
+                            display_parts.append(f"Share={percentage}%")
+                        sections.append(f"  • {': '.join(display_parts) if len(display_parts) > 1 else display_parts[0]}")
 
                 if exports:
                     sections.append("\nExport Countries:")
                     for item in exports[:10]:
                         country = item.get('country', 'N/A')
-                        value = item.get('value', 'locked')
-                        percentage = item.get('percentage', 'locked')
-                        # Format value if it's numeric
-                        if value != 'locked' and isinstance(value, (int, float)):
-                            value = f"${format_large_number(value)}"
-                        sections.append(f"  • {country}: Value={value}, Share={percentage}%")
+                        value = item.get('value')
+                        percentage = item.get('percentage')
+                        # Build display string with only unlocked values
+                        display_parts = [country]
+                        if value and value != 'locked' and isinstance(value, (int, float)):
+                            display_parts.append(f"Value=${format_large_number(value)}")
+                        if percentage and percentage != 'locked':
+                            display_parts.append(f"Share={percentage}%")
+                        sections.append(f"  • {': '.join(display_parts) if len(display_parts) > 1 else display_parts[0]}")
 
         # ===================================================================
         # MONTHLY TURNOVER TRENDS
@@ -138,15 +144,19 @@ Industry: {overview.get('industry') or 'N/A'}""")
                     sections.append("\nImport Trends (Last 12 Months):")
                     for month_data in imports[-12:]:
                         month = month_data.get('month', 'N/A')
-                        value = month_data.get('value', 'locked')
-                        sections.append(f"  • {month}: {value}")
+                        value = month_data.get('value')
+                        # Only show if value is unlocked
+                        if value and value != 'locked':
+                            sections.append(f"  • {month}: {value}")
 
                 if exports:
                     sections.append("\nExport Trends (Last 12 Months):")
                     for month_data in exports[-12:]:
                         month = month_data.get('month', 'N/A')
-                        value = month_data.get('value', 'locked')
-                        sections.append(f"  • {month}: {value}")
+                        value = month_data.get('value')
+                        # Only show if value is unlocked
+                        if value and value != 'locked':
+                            sections.append(f"  • {month}: {value}")
 
         # ===================================================================
         # TOP COMMODITIES
@@ -164,18 +174,22 @@ Industry: {overview.get('industry') or 'N/A'}""")
                     for idx, item in enumerate(imports[:15], 1):
                         product = item.get('comodity_description', 'N/A')
                         hs_code = item.get('hs_code', 'N/A')
-                        value = item.get('value', 'locked')
+                        value = item.get('value')
                         sections.append(f"  {idx}. HS {hs_code}: {product[:80]}")
-                        sections.append(f"     Value={value}")
+                        # Only show value if unlocked
+                        if value and value != 'locked':
+                            sections.append(f"     Value={value}")
 
                 if exports:
                     sections.append("\nTop Export Products:")
                     for idx, item in enumerate(exports[:15], 1):
                         product = item.get('comodity_description', 'N/A')
                         hs_code = item.get('hs_code', 'N/A')
-                        value = item.get('value', 'locked')
+                        value = item.get('value')
                         sections.append(f"  {idx}. HS {hs_code}: {product[:80]}")
-                        sections.append(f"     Value={value}")
+                        # Only show value if unlocked
+                        if value and value != 'locked':
+                            sections.append(f"     Value={value}")
 
         # ===================================================================
         # COMPETITORS
@@ -218,16 +232,24 @@ Industry: {overview.get('industry') or 'N/A'}""")
                     for idx, port in enumerate(loading[:10], 1):
                         port_name = port.get('port_of_loading', 'N/A')
                         country = port.get('port_country', 'N/A')
-                        value = port.get('value', 'locked')
-                        sections.append(f"  {idx}. {port_name} ({country}): {value}")
+                        value = port.get('value')
+                        # Only show value if unlocked
+                        if value and value != 'locked':
+                            sections.append(f"  {idx}. {port_name} ({country}): {value}")
+                        else:
+                            sections.append(f"  {idx}. {port_name} ({country})")
 
                 if unloading:
                     sections.append("\nUnloading Ports (Import):")
                     for idx, port in enumerate(unloading[:10], 1):
                         port_name = port.get('port_of_unloading', 'N/A')
                         country = port.get('port_country', 'N/A')
-                        value = port.get('value', 'locked')
-                        sections.append(f"  {idx}. {port_name} ({country}): {value}")
+                        value = port.get('value')
+                        # Only show value if unlocked
+                        if value and value != 'locked':
+                            sections.append(f"  {idx}. {port_name} ({country}): {value}")
+                        else:
+                            sections.append(f"  {idx}. {port_name} ({country})")
 
         # ===================================================================
         # RECENT SHIPMENTS
@@ -515,29 +537,24 @@ Date Range: {date_from} to {date_to}""")
                     importer_addr = product.get('importer_address') or product.get('buyer_address') or ''
                     exporter_addr = product.get('exporter_address') or product.get('supplier_address') or ''
 
-                    # Show importer/buyer with address if available
+                    # Show importer/buyer with address if available (skip if locked/anonymous)
                     if importer_name:
                         if importer_addr and len(importer_addr) > 3:
                             sections.append(f"   Importer/Buyer: {importer_name} ({importer_addr[:100]})")
                         else:
                             sections.append(f"   Importer/Buyer: {importer_name}")
-                    else:
-                        sections.append(f"   Importer/Buyer: [Locked/Anonymous]")
 
-                    # Show exporter/supplier with address if available
+                    # Show exporter/supplier with address if available (skip if locked/anonymous)
                     if exporter_name:
                         if exporter_addr and len(exporter_addr) > 3:
                             sections.append(f"   Exporter/Supplier: {exporter_name} ({exporter_addr[:100]})")
                         else:
                             sections.append(f"   Exporter/Supplier: {exporter_name}")
-                    else:
-                        sections.append(f"   Exporter/Supplier: [Locked/Anonymous]")
 
+                    # Show value only if not locked
                     value = product.get('total_value_usd', product.get('value_usd', 0))
                     if isinstance(value, str):
-                        if value.lower() == 'locked':
-                            sections.append(f"   Value: [Locked]")
-                        else:
+                        if value.lower() != 'locked':
                             try:
                                 value = float(value)
                                 sections.append(f"   Value: ${value:,.2f}")
@@ -579,11 +596,12 @@ Date Range: {date_from} to {date_to}""")
                     count = importer.get('count', importer.get('total_shipments', 0))
                     value = importer.get('value_usd', importer.get('total_value_usd', 0))
 
-                    # Convert value if it's a string
+                    # Convert value if it's a string (skip if locked)
                     value_str = ""
+                    show_value = True
                     if isinstance(value, str):
                         if value.lower() == 'locked':
-                            value_str = "[Locked]"
+                            show_value = False
                         else:
                             try:
                                 value_str = f"${float(value):,.2f}"
@@ -596,7 +614,8 @@ Date Range: {date_from} to {date_to}""")
                     if country != 'N/A':
                         sections.append(f"   Origin: {country}")
                     sections.append(f"   Shipments: {count:,}")
-                    sections.append(f"   Value: {value_str}")
+                    if show_value and value_str:
+                        sections.append(f"   Value: {value_str}")
 
                     # Show product description if available
                     product_desc = importer.get('product_desc', '')

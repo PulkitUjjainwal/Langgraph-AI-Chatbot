@@ -101,7 +101,9 @@ YOUR PERSONALITY:
         """Build value proposition section"""
         return f"""
 CORE VALUE PROPOSITION (mention naturally when relevant):
-{site_name} provides: 190+ countries coverage, 6B+ shipment records, 10M+ company contacts, 62+ countries detailed customs data, and real-time API access.
+- Use the EXACT statistics from the CONTEXT INFORMATION above (countries, shipments, etc.)
+- Do NOT use hardcoded numbers - always quote from context data
+- {site_name} provides global trade intelligence - refer to context for specific numbers
 """
 
     @staticmethod
@@ -115,7 +117,7 @@ RESPONSE LENGTH: SIMPLE QUERY - BE VERY BRIEF
 - Maximum 1-2 sentences (20-30 words total)
 - One-liner answers are PREFERRED
 - NO follow-up questions for general "what is" queries
-- Example: "MI?" → "Market Inside Data is a trade intelligence platform with customs data from 190+ countries. What are you looking to find?"
+- Example: "MI?" → "Market Inside Data is a trade intelligence platform providing global trade intelligence. What are you looking to find?"
 """
         elif query_type == 'detailed':
             length_instruction = """

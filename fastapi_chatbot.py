@@ -181,7 +181,7 @@ class Config:
     ENABLE_PERFORMANCE_LOGGING = True
 
     # Ollama Configuration
-    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "https://ollama.com/api")
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "006b1854cb5743d5a8a6e2baf09d163c.NQNQ-X28yY6S7WD0UtAp4_pb")
     # OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "https://ollama.com/api")
     # OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "006b1854cb5743d5a8a6e2baf09d163c.NQNQ-X28yY6S7WD0UtAp4_pb")
@@ -814,6 +814,57 @@ def score_response_quality(response: str, query: str) -> dict:
     }
 
 
+# =========================================================================
+# MODULE-LEVEL HELPER (accessible from ChatbotManager streaming)
+# =========================================================================
+
+def detect_query_type_simple(query: str) -> str:
+    """
+    Detect query complexity for dynamic response length (module-level version)
+
+    Returns: 'simple', 'standard', or 'detailed'
+    """
+    query_lower = query.lower()
+    word_count = len(query.split())
+
+    # SIMPLE: Short queries, yes/no, general "about" questions (< 8 words)
+    simple_patterns = [
+        'do you have', 'can you', 'is there', 'are there',
+        'do you provide', 'is it possible',
+        'what is mi', 'what is market', 'tell me about mi',
+        'tell me about market', 'about mi', 'about market inside',
+        'what does mi', 'what do you do', 'who are you',
+        'what is this', 'what are you', 'global trade data',
+        'mi?', 'market inside?'
+    ]
+    if any(pattern in query_lower for pattern in simple_patterns) or word_count <= 5:
+        return 'simple'
+
+    # Explicit detailed indicators (user WANTS comprehensive info)
+    detailed_indicators = [
+        ' all ', 'everything', 'comprehensive', 'in detail',
+        'complete list', 'full breakdown', 'entire', 'explain in detail'
+    ]
+
+    # Complex explanation patterns
+    detailed_patterns = [
+        'explain how', 'explain why', 'how does it work',
+        'show me everything', 'give me all', 'walk me through',
+        'break down', 'detailed analysis', 'what are all',
+        'list all', 'show all', 'complete breakdown'
+    ]
+
+    # Only classify as detailed if EXPLICITLY requested or complex pattern + long query
+    has_detailed_indicator = any(ind in query_lower for ind in detailed_indicators)
+    has_detailed_pattern = any(pat in query_lower for pat in detailed_patterns)
+
+    if has_detailed_pattern or (has_detailed_indicator and word_count > 8):
+        return 'detailed'
+
+    # Standard for most queries
+    return 'standard'
+
+
 def create_chatbot_node():
     """Create chatbot node with SMART CONTEXT INJECTION"""
 
@@ -828,15 +879,8 @@ def create_chatbot_node():
         'timeout': 30.0,  # CRITICAL FIX: 30 second timeout to prevent hanging (reduced from 60s)
     }
 
-    # Create custom ollama client for cloud API with authentication
-    if Config.OLLAMA_API_KEY:
-        cloud_client = ollama.Client(
-            host=Config.OLLAMA_BASE_URL,
-            headers={'Authorization': f'Bearer {Config.OLLAMA_API_KEY}'}
-        )
-        llm_kwargs['client'] = cloud_client
-    else:
-        llm_kwargs['base_url'] = Config.OLLAMA_BASE_URL
+    # Use local Ollama
+    llm_kwargs['base_url'] = "http://localhost:11434"
 
     llm = ChatOllama(**llm_kwargs)
 
@@ -1157,15 +1201,8 @@ Remember: Brevity is key. Every word must add value. Shorter responses are ALWAY
             'timeout': 30.0,  # CRITICAL FIX: 30 second timeout to prevent hanging (reduced from 60s)
         }
 
-        # Create custom ollama client for cloud API with authentication
-        if Config.OLLAMA_API_KEY:
-            cloud_client = ollama.Client(
-                host=Config.OLLAMA_BASE_URL,
-                headers={'Authorization': f'Bearer {Config.OLLAMA_API_KEY}'}
-            )
-            llm_dynamic_kwargs['client'] = cloud_client
-        else:
-            llm_dynamic_kwargs['base_url'] = Config.OLLAMA_BASE_URL
+        # Use local Ollama
+        llm_dynamic_kwargs['base_url'] = "http://localhost:11434"
 
         llm_dynamic = ChatOllama(**llm_dynamic_kwargs)
 
@@ -1622,14 +1659,8 @@ class ChatbotManager:
             "timeout": 8.0,
         }
 
-        if Config.OLLAMA_API_KEY:
-            cloud_client = ollama.Client(
-                host=Config.OLLAMA_BASE_URL,
-                headers={"Authorization": f"Bearer {Config.OLLAMA_API_KEY}"},
-            )
-            llm_kwargs["client"] = cloud_client
-        else:
-            llm_kwargs["base_url"] = Config.OLLAMA_BASE_URL
+        # Use local Ollama
+        llm_kwargs["base_url"] = "http://localhost:11434"
 
         self._intent_llm = ChatOllama(**llm_kwargs)
         return self._intent_llm
@@ -1909,20 +1940,9 @@ IMPORTANT
         Returns a compact JSON string for downstream handling.
         """
         # Prefer explicit extra_data, else session meta
-        # dynamic_url = ""
-        # if extra_data and isinstance(extra_data, dict):
-        #     dynamic_url = (extra_data.get("dynamic_url") or "").strip()
-
-        # if not dynamic_url:
-        #     try:
-        #         session_meta = self.redis.get_session_meta(session_id) if hasattr(self.redis, "get_session_meta") else {}
-        #     except Exception:
-        #         session_meta = {}
-        #     dynamic_url = (session_meta.get("dynamic_url") or "").strip()
-
-        #0 now need to check whether do we  have mirror data or import data for the country in question
-
-        # direction = await 
+        dynamic_url_from_extra = ""
+        if extra_data and isinstance(extra_data, dict):
+            dynamic_url_from_extra = (extra_data.get("dynamic_url") or "").strip()
 
         # 1) Detect intent and entities
         intent_result = await self._detect_intent_and_entities(message)
@@ -2226,7 +2246,7 @@ IMPORTANT
         if dynamic_content:
             self._stream_context[session_id] = dynamic_content
 
-        # Get KB context using correct method
+        # Get KB context using correct method and field name
         kb_context = ""
         if self.kb_retriever:
             try:
@@ -2234,7 +2254,8 @@ IMPORTANT
                     asyncio.to_thread(self.kb_retriever.retrieve, message, 3),
                     timeout=5.0
                 )
-                kb_context = "\n".join([doc.get("content", "") for doc in kb_results[:3]])
+                # Use 'chunk_text' field (same as main chat function)
+                kb_context = "\n".join([doc.get("chunk_text", "") for doc in kb_results[:3]])
                 print(f"  [STREAM] KB context retrieved: {len(kb_context)} chars")
             except Exception as e:
                 print(f"  [STREAM] KB retrieval failed: {e}")
@@ -2250,27 +2271,61 @@ IMPORTANT
         history_messages = self._stream_history[session_id][-6:]
         history_text = ""
         if history_messages:
-            history_text = "CONVERSATION HISTORY:\n"
             for msg in history_messages:
                 role = "User" if msg["role"] == "user" else "Assistant"
                 history_text += f"{role}: {msg['content'][:500]}\n"
-            history_text += "\n"
 
-        # Build system prompt with history
-        system_prompt = f"""You are Alex, a trade data consultant at Market Inside Data.
+        # Detect query type for response length
+        smart_query_type = detect_query_type_simple(message)
 
-{history_text}CONTEXT:
-{merged_context}
+        # ========================================================================
+        # BUILD SYSTEM PROMPT USING SAME PromptBuilder AS chat() FUNCTION
+        # This ensures consistent, high-quality responses
+        # ========================================================================
+        prompt_config = PromptConfig(
+            site_name=Config.SITE_NAME,
+            context=merged_context,
+            has_dynamic_content=bool(dynamic_content),
+            conversation_history=history_text,
+            industry_info=None,
+            query_type=smart_query_type
+        )
 
-RULES:
-- Be brief and direct (2-4 sentences for most queries)
-- Use exact data from context, never make up numbers
-- Format large numbers with K/M/B (e.g., $1.5M)
-- No markdown, no emojis
-- Answer directly, then ask one follow-up question if relevant
-- IMPORTANT: Use conversation history to understand follow-up questions like "list all of them" or "the same"
+        system_prompt = PromptBuilder.build_system_prompt(prompt_config)
 
-# ## Core Product Knowledge (CRITICAL)
+        # Add progressive questioning and few-shot examples (same as chat())
+        system_prompt += f"""
+        
+
+PROGRESSIVE QUESTIONING (SMART FOLLOW-UP):
+- Use conversation history to understand follow-up questions like "list all of them" or "the same"
+- Build on what the user mentioned to understand their specific needs
+
+FEW-SHOT EXAMPLES:
+
+Example 1:
+User: "Do you have Mexico data?"
+You: "Yes! We have complete import records for Mexico covering all products and industries. What are you looking to find there - specific buyers, market trends, or competitor activity?"
+
+Example 2:
+User: "Can you help me find buyers in Indonesia?"
+You: "Absolutely! {Config.SITE_NAME} tracks all import activity in Indonesia with full buyer details. What product or industry are you targeting? That'll help me show you the most relevant active importers."
+
+Example 3:
+User: "What data do you provide?"
+You: "We provide detailed import-export data from 190+ countries including buyer/supplier names, shipment values, quantities, and complete contact information. This helps businesses find new customers, analyze competitors, and identify market opportunities. What's your main goal - finding new buyers or researching markets?"
+
+Example 4 (COMPANY DATA - List actual names from context):
+User: "top buyers?" or "list importers"
+You: List the actual company names from the DYNAMIC CONTENT above. Never say "data is locked" if names are visible in context.
+
+CONVERSATIONAL RULES:
+[DO] Use conversational language ("you're", "let's", "I'll show you")
+[DO] Provide specific, concrete information from context
+[DO] Format large numbers with K/M/B (e.g., "$1.5M" instead of "$1,500,000")
+[DON'T] Use markdown (**, ###, __)
+[DON'T] Use emojis or special symbols
+[DON'T] Add excessive pleasantries or fluff
 
 # ### 1. API Products
 # We offer 7 specific APIs. If asked "what APIs do you have?", list these:
@@ -2305,14 +2360,8 @@ if query is for platform
             'num_ctx': Config.NUM_CTX,
         }
 
-        if Config.OLLAMA_API_KEY:
-            cloud_client = ollama.Client(
-                host=Config.OLLAMA_BASE_URL,
-                headers={'Authorization': f'Bearer {Config.OLLAMA_API_KEY}'}
-            )
-            llm_kwargs['client'] = cloud_client
-        else:
-            llm_kwargs['base_url'] = Config.OLLAMA_BASE_URL
+        # Use local Ollama
+        llm_kwargs['base_url'] = "http://localhost:11434"
 
         llm = ChatOllama(**llm_kwargs)
 
@@ -2409,15 +2458,8 @@ What APIs and integrations does Export Genius offer?"""
                 'timeout': 30.0,  # CRITICAL FIX: 30 second timeout for question generation
             }
 
-            # Create custom ollama client for cloud API with authentication
-            if Config.OLLAMA_API_KEY:
-                cloud_client = ollama.Client(
-                    host=Config.OLLAMA_BASE_URL,
-                    headers={'Authorization': f'Bearer {Config.OLLAMA_API_KEY}'}
-                )
-                llm_kwargs_init['client'] = cloud_client
-            else:
-                llm_kwargs_init['base_url'] = Config.OLLAMA_BASE_URL
+            # Use local Ollama
+            llm_kwargs_init['base_url'] = "http://localhost:11434"
 
             llm = ChatOllama(**llm_kwargs_init)
             response = await asyncio.to_thread(
@@ -2430,7 +2472,7 @@ What APIs and integrations does Export Genius offer?"""
             questions = [q.strip() for q in questions_text.split('\n') if q.strip() and not q.strip().startswith('#')]
 
             # Ensure exactly 5 questions
-            if len(questions) < 5:
+            if len(questions) < 3:
                 # Add generic Export Genius questions as fallback
                 fallback_questions = [
                     "What trade data coverage does Export Genius provide?",
