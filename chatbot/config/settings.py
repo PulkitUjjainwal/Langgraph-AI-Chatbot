@@ -97,6 +97,17 @@ class Settings(BaseSettings):
     redis_ttl_days: int = Field(default=7, env="REDIS_TTL_DAYS", ge=1)
 
     # ============================================================================
+    # MYSQL CONFIGURATION (for FAQ system)
+    # ============================================================================
+    mysql_host: str = Field(default="localhost", env="MYSQL_HOST")
+    mysql_port: int = Field(default=3306, env="MYSQL_PORT", ge=1, le=65535)
+    mysql_user: str = Field(default="root", env="MYSQL_USER")
+    mysql_password: str = Field(default="", env="MYSQL_PASSWORD")
+    mysql_database: str = Field(default="chatbot", env="MYSQL_DATABASE")
+    mysql_pool_size: int = Field(default=5, env="MYSQL_POOL_SIZE", ge=1, le=20)
+    faq_enabled: bool = Field(default=True, env="FAQ_ENABLED")
+
+    # ============================================================================
     # SESSION MANAGEMENT
     # ============================================================================
     session_timeout_minutes: int = Field(default=30, ge=1)
