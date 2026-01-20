@@ -9,7 +9,7 @@ export type ChatMessage = {
   role: "assistant" | "user";
   text: string;
   actions?: {
-    type: "schedule_demo" | "whatsapp" | "chat" | "refresh";
+    type: "schedule_demo" | "whatsapp" | "call" | "hubspot_chat" | "chat" | "refresh";
     label: string;
   }[];
   suggestions?: string[]; // For pill buttons from init
@@ -300,15 +300,25 @@ export default function ChatWidget() {
         label: "Schedule a Demo"
       });
     } else if (qaEntry.type === "whatsapp") {
-      actions.push({
-        type: "whatsapp",
-        label: "Connect on WhatsApp"
-      });
+      actions.push(
+        {
+          type: "whatsapp",
+          label: "WhatsApp"
+        },
+        {
+          type: "call",
+          label: "Call"
+        },
+        {
+          type: "hubspot_chat",
+          label: "Chat"
+        }
+      );
     } else if (qaEntry.type === "hybrid" && qaEntry.actions) {
       if (qaEntry.actions.includes("chat")) {
         actions.push({
-          type: "chat",
-          label: "Learn More"
+          type: "refresh",
+          label: "Show Suggested Questions"
         });
       }
       if (qaEntry.actions.includes("schedule_demo")) {
@@ -420,12 +430,13 @@ export default function ChatWidget() {
       openScheduleDemo();
     } else if (actionType === "whatsapp") {
       openWhatsApp();
-    } else if (actionType === "chat" && originalQuery) {
-      // Call the chat/stream API with the original query
-      void handleSend(originalQuery, undefined, true);
+    } else if (actionType === "call") {
+      window.location.href = "tel:+4407727449124";
+    } else if (actionType === "hubspot_chat") {
+      window.open("https://app.hubspot.com/conversations-visitor/9059358/threads/utk/dd546325ff584de3b88068384373b5da?uuid=1ec6282844ac45a3aa07de865ae89692&mobile=false&mobileSafari=false&hideWelcomeMessage=false&hstc=261214162.419090d5d718c9aa1f7487e0db51436b.1762762601861.1768825743931.1768908425649.23&domain=marketinsidedata.com&inApp53=false&messagesUtk=dd546325ff584de3b88068384373b5da&url=https%3A%2F%2Fwww.marketinsidedata.com%2F&inline=false&isFullscreen=false&globalCookieOptOut=&isFirstVisitorSession=false&isAttachmentDisabled=false&isInitialInputFocusDisabled=false&enableWidgetCookieBanner=false&isInCMS=false&hideScrollToButton=true&isIOSMobile=false&hubspotUtk=419090d5d718c9aa1f7487e0db51436b", "_blank");
     } else if (actionType === "refresh") {
-      // Re-initialize session to get fresh questions
-      void initializeSessionProactive(currentUrl);
+      // Call init API to show suggested questions
+      void callInitAndShowQuestions();
     }
   };
 

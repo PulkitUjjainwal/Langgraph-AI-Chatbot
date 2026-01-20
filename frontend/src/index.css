@@ -1,6 +1,10 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 @import "tailwindcss";
 
+* {
+  font-family: 'Inter', sans-serif !important;
+}
+
 :root {
   /* Market Inside Brand Colors - Orange Theme */
   --chat-primary: #ea580c;
@@ -21,8 +25,6 @@
   /* Google-style card colors */
   --chat-card-hover: #fff7ed;
   --chat-link-color: #ea580c;
-
-  font-family: 'Inter', sans-serif;
 }
 
 /* Smooth scrollbar styling */
