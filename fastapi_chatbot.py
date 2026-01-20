@@ -524,6 +524,9 @@ class HybridRetriever:
 # Global dynamic content per session
 session_dynamic_content: Dict[str, str] = {}
 
+# Global source URL per session (for including in responses)
+session_source_url: Dict[str, str] = {}
+
 
 def fetch_dynamic_trade_data(query: str = "") -> str:
     """
@@ -1002,6 +1005,7 @@ def create_chatbot_node():
 
     def chatbot_node(state: AgentState) -> AgentState:
         """Generate response with smart context injection"""
+        global session_source_url  # For including source URL in responses
         start_time = time.time()
 
         user_query = state.get("original_query", "")
@@ -1104,13 +1108,17 @@ def create_chatbot_node():
         # All prompt logic now lives in chatbot/services/agent/prompts.py
         # This ensures consistency across all entry points and prevents hallucination
         # ========================================================================
+        # Get the source URL for including in response (global declared at top of function)
+        current_source_url = session_source_url.get("current", "") if dynamic_content else ""
+
         prompt_config = PromptConfig(
             site_name=Config.SITE_NAME,
             context=context,
             has_dynamic_content=bool(dynamic_content),
             conversation_history=history_text,
             industry_info=industry_info if industry_info['industry'] else None,
-            query_type=smart_query_type
+            query_type=smart_query_type,
+            source_url=current_source_url  # Include source URL for user to click
         )
 
         system_prompt = PromptBuilder.build_system_prompt(prompt_config)
@@ -1965,6 +1973,12 @@ IMPORTANT
 
         print(f"  [INTENT] Detected intent={intent} confidence={confidence:.2f} url={url[:80] if url else ''}")
 
+        # Store the detected URL globally for response generation
+        global session_source_url
+        if url:
+            session_source_url["current"] = url
+            print(f"  [URL] Stored source URL for response: {url[:80]}...")
+
         payload: Dict[str, Any] = {
             "intent": intent,
             "confidence": confidence,
@@ -2014,6 +2028,9 @@ IMPORTANT
         print(f"[CHAT START] Query: {message[:100]}...")
         print(f"{'='*70}")
 
+        # Declare global for source URL tracking
+        global session_source_url
+
         # Fetch dynamic content if URL provided
         dynamic_content = ""
         sources_used = ["Knowledge Base"]
@@ -2041,11 +2058,16 @@ IMPORTANT
             if related and score >= 0.5:
                 dynamic_content = full_content
                 sources_used.append("Dynamic Content (Redis)")
+                # Store the cached URL as source for response generation
+                if dynamic_url:
+                    session_source_url["current"] = dynamic_url
+                    print(f"  [URL] Stored cached URL for response: {dynamic_url[:80]}...")
                 print(f"  [DEBUG] Using cached content: {len(full_content)} chars")
             else:
                 api_data = await self.handle_dynamic_api_call(message, session_id,extra_data={"data_type": dataType})
                 dynamic_content = api_data
                 sources_used.append("Dynamic Content")
+                # URL is stored by handle_dynamic_api_call
                 print(f"  [DEBUG] LLM determined cached content is NOT related, fetched API data: {api_data}")
 
             print(f"  [DEBUG] [OK] CACHE HIT - Found cached data: {len(dynamic_content)} chars")
@@ -2230,6 +2252,7 @@ IMPORTANT
 
         # Get dynamic content (same logic as chat())
         dynamic_content = ""
+        global session_source_url
         if dynamic_url:
             cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(dynamic_url, session_id)
             if cached_data:
@@ -2237,11 +2260,14 @@ IMPORTANT
                 related, score = await self.is_query_related_via_llm(message, dynamic_url, full_content)
                 if related and score >= 0.5:
                     dynamic_content = full_content
+                    # Store the cached URL as source
+                    session_source_url["current"] = dynamic_url
                     print(f"  [STREAM] Using cached content: {len(full_content)} chars")
             if not dynamic_content:
                 try:
                     api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"dynamic_url": dynamic_url})
                     dynamic_content = api_data or ""
+                    # URL is stored by handle_dynamic_api_call
                 except Exception as e:
                     print(f"  [STREAM] API call failed: {e}")
 
@@ -2290,13 +2316,17 @@ IMPORTANT
         # BUILD SYSTEM PROMPT USING SAME PromptBuilder AS chat() FUNCTION
         # This ensures consistent, high-quality responses
         # ========================================================================
+        # Get the source URL for including in response (global already declared above)
+        current_source_url = session_source_url.get("current", "") if dynamic_content else ""
+
         prompt_config = PromptConfig(
             site_name=Config.SITE_NAME,
             context=merged_context,
             has_dynamic_content=bool(dynamic_content),
             conversation_history=history_text,
             industry_info=None,
-            query_type=smart_query_type
+            query_type=smart_query_type,
+            source_url=current_source_url  # Include source URL for user to click
         )
 
         system_prompt = PromptBuilder.build_system_prompt(prompt_config)
