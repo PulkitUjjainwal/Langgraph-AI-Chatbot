@@ -125,6 +125,17 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
         const isWaitingForStream = msg.role === "assistant" && msg.text === "" && isLastMessage && isStreaming;
         const showStreamingCursor = msg.role === "assistant" && msg.text !== "" && isLastMessage && isStreaming;
 
+        // Debug logging for loader
+        if (msg.role === "assistant" && msg.text === "" && isLastMessage) {
+          console.log('[ChatMessages] Loader check:', { 
+            msgId: msg.id, 
+            isLastMessage, 
+            isStreaming, 
+            isWaitingForStream,
+            messageCount: messages.length 
+          });
+        }
+
         return (
           <div
             key={msg.id}
@@ -224,7 +235,7 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
 
             {/* Suggestion pills from init response */}
             {msg.role === "assistant" && msg.suggestions && msg.suggestions.length > 0 && (
-              <div className="flex flex-wrap gap-2 mt-3 ml-9">
+              <div className="flex flex-wrap gap-2 mt-3 ml-9 justify-end">
                 {msg.suggestions.map((suggestion, suggestionIdx) => (
                   <button
                     key={suggestionIdx}
