@@ -7,6 +7,90 @@ type Props = {
   onActionClick?: (actionType: string, originalQuery?: string) => void;
 };
 
+/**
+ * Parse message text and convert URLs and markdown links to clickable elements
+ */
+function renderMessageWithLinks(text: string) {
+  if (!text) return null;
+
+  // Patterns to match:
+  // 1. Markdown links: [text](url)
+  // 2. Plain URLs: https://... or http://...
+  const markdownLinkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
+  const urlRegex = /(https?:\/\/[^\s<>\[\]"']+)/g;
+
+  // First, handle markdown links
+  let processedText = text;
+  const markdownLinks: { placeholder: string; label: string; url: string }[] = [];
+
+  let match;
+  let index = 0;
+  while ((match = markdownLinkRegex.exec(text)) !== null) {
+    const placeholder = `__MDLINK_${index}__`;
+    markdownLinks.push({
+      placeholder,
+      label: match[1],
+      url: match[2]
+    });
+    processedText = processedText.replace(match[0], placeholder);
+    index++;
+  }
+
+  // Then split by plain URLs
+  const parts: (string | JSX.Element)[] = [];
+  const segments = processedText.split(urlRegex);
+
+  segments.forEach((segment, idx) => {
+    // Check if this segment is a markdown link placeholder
+    const mdLink = markdownLinks.find(l => segment.includes(l.placeholder));
+    if (mdLink) {
+      // Replace placeholder with actual link
+      const subParts = segment.split(mdLink.placeholder);
+      subParts.forEach((subPart, subIdx) => {
+        if (subPart) parts.push(subPart);
+        if (subIdx < subParts.length - 1) {
+          parts.push(
+            <a
+              key={`md-${idx}-${subIdx}`}
+              href={mdLink.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-orange-600 hover:text-orange-700 underline underline-offset-2 font-medium break-all"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <span>{mdLink.label}</span>
+              <svg className="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+            </a>
+          );
+        }
+      });
+    } else if (segment.match(urlRegex)) {
+      // This is a plain URL
+      parts.push(
+        <a
+          key={`url-${idx}`}
+          href={segment}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-orange-600 hover:text-orange-700 underline underline-offset-2 font-medium break-all"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <span className="break-all">{segment.length > 50 ? segment.substring(0, 50) + '...' : segment}</span>
+          <svg className="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+          </svg>
+        </a>
+      );
+    } else if (segment) {
+      parts.push(segment);
+    }
+  });
+
+  return parts;
+}
+
 export function ChatMessages({ messages, isStreaming = false, onActionClick }: Props) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -71,11 +155,12 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
             )}
 
             <div
-              className={`max-w-[75%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+              className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed overflow-hidden ${
                 msg.role === "user"
                   ? "bg-chat-primary text-white rounded-br-md"
                   : "bg-gray-100 text-chat-text rounded-bl-md"
               }`}
+              style={{ wordBreak: 'break-word', overflowWrap: 'break-word' }}
             >
               {isTyping || isWaitingForStream ? (
                 <div className="flex items-center gap-1 py-1">
@@ -85,7 +170,7 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
                 </div>
               ) : (
                 <>
-                  {msg.text}
+                  {renderMessageWithLinks(msg.text)}
                   {showStreamingCursor && (
                     <span className="inline-block w-0.5 h-4 bg-orange-500 ml-0.5 animate-pulse" />
                   )}

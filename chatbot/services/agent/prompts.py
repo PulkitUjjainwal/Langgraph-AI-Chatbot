@@ -16,6 +16,7 @@ class PromptConfig:
     conversation_history: str = ""
     industry_info: Optional[dict] = None
     query_type: str = "standard"  # simple, standard, detailed
+    source_url: Optional[str] = None  # URL where data was fetched from
 
 
 class PromptBuilder:
@@ -50,12 +51,27 @@ Examples of FORBIDDEN vs CORRECT behavior:
 """
 
     @staticmethod
-    def build_company_data_instruction() -> str:
+    def build_company_data_instruction(source_url: Optional[str] = None) -> str:
         """
         Additional instruction when dynamic company data is available
         Emphasizes that the data is real-time and accurate
         """
-        return """
+        url_instruction = ""
+        if source_url:
+            url_instruction = f"""
+[IMPORTANT] SOURCE URL - INCLUDE CLICKABLE LINK IN RESPONSE:
+- Data source URL: {source_url}
+- At the END of your response, ALWAYS add this EXACT format on a new line:
+
+📊 [Check Out Our Page for More Details]({source_url})
+
+- Use markdown link format: [link text](url)
+- Keep link text short and clear like "View full data" or "Explore more details"
+- DO NOT show the raw URL - always use the markdown link format
+- This creates a clickable link for users to explore the complete data
+"""
+
+        return f"""
 [CRITICAL] COMPANY-SPECIFIC DATA AVAILABLE:
 - You have REAL company data fetched from live API for THIS specific company
 - This data is 100% accurate and up-to-date from the database
@@ -71,7 +87,7 @@ Examples of FORBIDDEN vs CORRECT behavior:
 - List ALL company names available, then offer to filter
 - Example: User asks "top buyers?" → List: "1. IDEMITSU KOSAN, 2. MITSUI CHEMICALS, etc."
 - DO NOT be vague or ask clarifying questions when names are clearly in the data
-"""
+{url_instruction}"""
 
     @staticmethod
     def build_brand_identity(site_name: str) -> str:
@@ -168,7 +184,7 @@ CRITICAL RULES:
         personality = cls.build_personality()
         value_proposition = cls.build_value_proposition(config.site_name)
         accuracy_instruction = cls.build_accuracy_instruction()
-        company_data_instruction = cls.build_company_data_instruction() if config.has_dynamic_content else ""
+        company_data_instruction = cls.build_company_data_instruction(config.source_url) if config.has_dynamic_content else ""
         response_structure = cls.build_response_structure(config.query_type)
 
         # Construct conversation history
