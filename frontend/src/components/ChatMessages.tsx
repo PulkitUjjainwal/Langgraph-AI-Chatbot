@@ -41,6 +41,17 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
         const isWaitingForStream = msg.role === "assistant" && msg.text === "" && isLastMessage && isStreaming;
         const showStreamingCursor = msg.role === "assistant" && msg.text !== "" && isLastMessage && isStreaming;
 
+        // Debug logging for loader
+        if (msg.role === "assistant" && msg.text === "" && isLastMessage) {
+          console.log('[ChatMessages] Loader check:', { 
+            msgId: msg.id, 
+            isLastMessage, 
+            isStreaming, 
+            isWaitingForStream,
+            messageCount: messages.length 
+          });
+        }
+
         return (
           <div
             key={msg.id}

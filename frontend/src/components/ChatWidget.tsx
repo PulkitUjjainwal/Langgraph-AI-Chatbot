@@ -277,13 +277,13 @@ export default function ChatWidget() {
   };
 
   // Generic Q&A checker
-  const checkGenericQA = async (userQuery: string): Promise<ChatMessage | null> => {
+  const checkGenericQA = async (userQuery: string): Promise<ChatMessage | null | 'INIT_CALL'> => {
     const normalizedQuery = userQuery.trim();
     
     // Special case: "I want to learn about your data" should call init
     if (normalizedQuery === "I want to learn about your data") {
-      await callInitAndShowQuestions();
-      return null; // Will be handled by callInitAndShowQuestions
+      // Return special marker to indicate init call is needed
+      return 'INIT_CALL';
     }
     
     // Check if query matches any generic question
@@ -328,7 +328,7 @@ export default function ChatWidget() {
   };
 
   // Call init and show suggested questions as chat message
-  const callInitAndShowQuestions = async () => {
+  const callInitAndShowQuestions = async (assistantMsgId?: string) => {
     const sid = sessionIdRef.current || createSessionId();
     if (!sessionIdRef.current) {
       sessionIdRef.current = sid;
@@ -358,12 +358,20 @@ export default function ChatWidget() {
         if (data.suggested_questions && Array.isArray(data.suggested_questions)) {
           // Add assistant message with data info and pill buttons
           const assistantMsg: ChatMessage = {
-            id: `init-${Date.now()}`,
+            id: assistantMsgId || `init-${Date.now()}`,
             role: "assistant",
             text: "We provide comprehensive trade data covering 190+ countries with detailed import/export records, HS codes, company information, and real-time trade intelligence. Here are some questions you can ask:",
             suggestions: data.suggested_questions
           };
-          setMessages((prev) => [...prev, assistantMsg]);
+          
+          // If we have an assistantMsgId, update existing message; otherwise add new one
+          if (assistantMsgId) {
+            console.log('[callInitAndShowQuestions] Updating existing message with id:', assistantMsgId);
+            setMessages((prev) => prev.map(m => m.id === assistantMsgId ? assistantMsg : m));
+          } else {
+            console.log('[callInitAndShowQuestions] Adding new message');
+            setMessages((prev) => [...prev, assistantMsg]);
+          }
         }
       } else {
         // Fallback message
@@ -691,30 +699,60 @@ export default function ChatWidget() {
     // Check if this is a generic question (only if not skipping)
     if (!skipGenericCheck) {
       const genericResponse = await checkGenericQA(text);
-      if (genericResponse) {
-        // Show generic response immediately
-        setMessages((prev) => [...prev, genericResponse]);
+      
+      // Handle special init call case
+      if (genericResponse === 'INIT_CALL') {
+        console.log('[handleSend] INIT_CALL case - showing loader and closing suggestions');
+        // Close suggestions immediately
+        setSuggestedQuestions([]);
+        // Show loader
+        setIsSending(true);
+        setMessages((prev) => [
+          ...prev,
+          { id: assistantId, role: "assistant" as const, text: "" },
+        ]);
+        console.log('[handleSend] Added loader message, calling init');
+        // Call init and update the message
+        await callInitAndShowQuestions(assistantId);
+        setIsSending(false);
         return;
       }
-      // If checkGenericQA handled it (like init call), return early
-      if (text.trim() === "I want to learn about your data") {
+      
+      if (genericResponse) {
+        // For generic questions, close suggestions first
+        setSuggestedQuestions([]);
+        // Show generic response immediately
+        setMessages((prev) => [...prev, genericResponse]);
         return;
       }
     }
 
     // Not a generic question, proceed with streaming API
+    // Show loader first (add assistant message), then close suggestions
+    console.log('[ChatWidget] Starting to show loader and close suggestions');
     setIsSending(true);
-
-    setMessages((prev) => [
-      ...prev,
-      { id: assistantId, role: "assistant" as const, text: "" },
-    ]);
+    setMessages((prev) => {
+      const newMessages = [
+        ...prev,
+        { id: assistantId, role: "assistant" as const, text: "" },
+      ];
+      console.log('[ChatWidget] Added empty assistant message for loader', { assistantId, messageCount: newMessages.length });
+      return newMessages;
+    });
+    
+    // Close suggested questions after adding the loader message
+    setSuggestedQuestions([]);
+    console.log('[ChatWidget] Closed suggested questions, isSending=true');
 
     try {
       await sendStreamingRequest(text, assistantId, slotValues);
       setSuggestionsState(null);
       const currentMessageCount = messages.length + 2;
       checkLeadPrompt(text, currentMessageCount);
+      
+      // After API response, restore suggested questions
+      const genericQuestions = Object.keys(genericQA).slice(0, 5);
+      setSuggestedQuestions(genericQuestions);
     } catch (err) {
       console.error("Chat error:", err);
       setMessages((prev) =>
