@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { ChatMessage } from "./ChatWidget";
 
 type Props = {
@@ -8,13 +9,30 @@ type Props = {
 };
 
 type FeedbackState = {
-  [messageId: string]: 'up' | 'down' | null;
+  [messageId: string]: {
+    type: 'up' | 'down' | null;
+    reason?: string;
+    submitted: boolean;
+  };
 };
+
+type FeedbackModalState = {
+  isOpen: boolean;
+  messageId: string | null;
+};
+
+const FEEDBACK_REASONS = [
+  { id: 'inaccurate', label: 'Inaccurate information', icon: '❌' },
+  { id: 'unhelpful', label: 'Not helpful', icon: '🤷' },
+  { id: 'incomplete', label: 'Incomplete response', icon: '📝' },
+  { id: 'confusing', label: 'Hard to understand', icon: '😕' },
+  { id: 'other', label: 'Other', icon: '💬' },
+];
 
 /**
  * Parse message text and convert URLs and markdown links to clickable elements
  */
-function renderMessageWithLinks(text: string) {
+function renderMessageWithLinks(text: string): ReactNode {
   if (!text) return null;
 
   // Patterns to match:
@@ -41,7 +59,7 @@ function renderMessageWithLinks(text: string) {
   }
 
   // Then split by plain URLs
-  const parts: (string | JSX.Element)[] = [];
+  const parts: ReactNode[] = [];
   const segments = processedText.split(urlRegex);
 
   segments.forEach((segment, idx) => {
@@ -92,19 +110,40 @@ function renderMessageWithLinks(text: string) {
     }
   });
 
-  return parts;
+  return <>{parts}</>;
 }
 
 export function ChatMessages({ messages, isStreaming = false, onActionClick }: Props) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [feedbackState, setFeedbackState] = useState<FeedbackState>({});
+  const [feedbackModal, setFeedbackModal] = useState<FeedbackModalState>({ isOpen: false, messageId: null });
 
   const handleFeedback = (messageId: string, type: 'up' | 'down') => {
-    setFeedbackState(prev => ({
-      ...prev,
-      [messageId]: prev[messageId] === type ? null : type
-    }));
+    if (type === 'up') {
+      // Positive feedback - submit immediately with animation
+      setFeedbackState(prev => ({
+        ...prev,
+        [messageId]: { type: 'up', submitted: true }
+      }));
+    } else {
+      // Negative feedback - show modal for reason selection
+      setFeedbackModal({ isOpen: true, messageId });
+    }
+  };
+
+  const handleFeedbackReasonSelect = (reason: string) => {
+    if (feedbackModal.messageId) {
+      setFeedbackState(prev => ({
+        ...prev,
+        [feedbackModal.messageId!]: { type: 'down', reason, submitted: true }
+      }));
+    }
+    setFeedbackModal({ isOpen: false, messageId: null });
+  };
+
+  const closeFeedbackModal = () => {
+    setFeedbackModal({ isOpen: false, messageId: null });
   };
 
   // Smooth auto-scroll to bottom when messages change
@@ -191,35 +230,45 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
                 )}
               </div>
 
-              {/* Feedback buttons for assistant messages */}
+              {/* Feedback section for assistant messages */}
               {msg.role === "assistant" && msg.text && !isTyping && !isWaitingForStream && (
-                <div className="flex items-center gap-2 mt-2 ml-2">
-                  <button
-                    onClick={() => handleFeedback(msg.id, 'up')}
-                    className={`p-1.5 rounded-full transition-all duration-200 hover:bg-gray-200 ${
-                      feedbackState[msg.id] === 'up' 
-                        ? 'bg-green-100 text-green-600' 
-                        : 'text-gray-400 hover:text-green-600'
-                    }`}
-                    title="Good response"
-                  >
-                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                      <path d="M2 10.5a1.5 1.5 0 113 0v6a1.5 1.5 0 01-3 0v-6zM6 10.333v5.43a2 2 0 001.106 1.79l.05.025A4 4 0 008.943 18h5.416a2 2 0 001.962-1.608l1.2-6A2 2 0 0015.56 8H12V4a2 2 0 00-2-2 1 1 0 00-1 1v.667a4 4 0 01-.8 2.4L6.8 7.933a4 4 0 00-.8 2.4z" />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={() => handleFeedback(msg.id, 'down')}
-                    className={`p-1.5 rounded-full transition-all duration-200 hover:bg-gray-200 ${
-                      feedbackState[msg.id] === 'down' 
-                        ? 'bg-red-100 text-red-600' 
-                        : 'text-gray-400 hover:text-red-600'
-                    }`}
-                    title="Bad response"
-                  >
-                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                      <path d="M18 9.5a1.5 1.5 0 11-3 0v-6a1.5 1.5 0 013 0v6zM14 9.667v-5.43a2 2 0 00-1.105-1.79l-.05-.025A4 4 0 0011.055 2H5.64a2 2 0 00-1.962 1.608l-1.2 6A2 2 0 004.44 12H8v4a2 2 0 002 2 1 1 0 001-1v-.667a4 4 0 01.8-2.4l1.4-1.866a4 4 0 00.8-2.4z" />
-                    </svg>
-                  </button>
+                <div className="mt-2 ml-1">
+                  {feedbackState[msg.id]?.submitted ? (
+                    // Thank you message after feedback
+                    <div className="feedback-thank-you flex items-center gap-2 py-1.5 px-3 rounded-lg bg-gradient-to-r from-gray-50 to-gray-100 border border-gray-200">
+                      <span className="text-lg">
+                        {feedbackState[msg.id]?.type === 'up' ? '🎉' : '🙏'}
+                      </span>
+                      <span className="text-xs text-gray-600 font-medium">
+                        Thanks for your feedback!
+                      </span>
+                    </div>
+                  ) : (
+                    // Feedback buttons
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-gray-400 mr-1">Was this helpful?</span>
+                      <button
+                        onClick={() => handleFeedback(msg.id, 'up')}
+                        className="feedback-btn group flex items-center gap-1 px-2 py-1 rounded-md transition-all duration-200 hover:bg-green-50 text-gray-400 hover:text-green-600"
+                        title="Yes, this was helpful"
+                      >
+                        <svg className="w-3.5 h-3.5 transition-transform group-hover:scale-110" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M2 10.5a1.5 1.5 0 113 0v6a1.5 1.5 0 01-3 0v-6zM6 10.333v5.43a2 2 0 001.106 1.79l.05.025A4 4 0 008.943 18h5.416a2 2 0 001.962-1.608l1.2-6A2 2 0 0015.56 8H12V4a2 2 0 00-2-2 1 1 0 00-1 1v.667a4 4 0 01-.8 2.4L6.8 7.933a4 4 0 00-.8 2.4z" />
+                        </svg>
+                        <span className="text-xs font-medium opacity-0 group-hover:opacity-100 transition-opacity">Yes</span>
+                      </button>
+                      <button
+                        onClick={() => handleFeedback(msg.id, 'down')}
+                        className="feedback-btn group flex items-center gap-1 px-2 py-1 rounded-md transition-all duration-200 hover:bg-red-50 text-gray-400 hover:text-red-500"
+                        title="No, this needs improvement"
+                      >
+                        <svg className="w-3.5 h-3.5 transition-transform group-hover:scale-110" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M18 9.5a1.5 1.5 0 11-3 0v-6a1.5 1.5 0 013 0v6zM14 9.667v-5.43a2 2 0 00-1.105-1.79l-.05-.025A4 4 0 0011.055 2H5.64a2 2 0 00-1.962 1.608l-1.2 6A2 2 0 004.44 12H8v4a2 2 0 002 2 1 1 0 001-1v-.667a4 4 0 01.8-2.4l1.4-1.866a4 4 0 00.8-2.4z" />
+                        </svg>
+                        <span className="text-xs font-medium opacity-0 group-hover:opacity-100 transition-opacity">No</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -264,13 +313,21 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
                       </svg>
                     );
                   } else if (action.type === "chat") {
-                    buttonStyle = "bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white shadow-md hover:shadow-lg";
-                    icon = (
-                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                      </svg>
-                    );
-                  } else if (action.type === "refresh") {
+                  buttonStyle =
+                    "bg-gradient-to-r from-[#FD853A] to-[#E67529] hover:from-[#E67529] hover:to-[#C96520] text-white shadow-md hover:shadow-lg";
+
+                  icon = (
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
+                      />
+                    </svg>
+                  );
+                }
+                else if (action.type === "refresh") {
                     buttonStyle = "bg-gradient-to-r from-gray-500 to-gray-600 hover:from-gray-600 hover:to-gray-700 text-white shadow-md hover:shadow-lg";
                     icon = (
                       <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -315,6 +372,67 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
         );
       })}
       <div ref={messagesEndRef} className="h-0" />
+
+      {/* Feedback Reason Modal */}
+      {feedbackModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/30 backdrop-blur-sm feedback-modal-backdrop"
+            onClick={closeFeedbackModal}
+          />
+
+          {/* Modal */}
+          <div className="feedback-modal relative bg-white rounded-2xl shadow-2xl w-[90%] max-w-sm mx-4 overflow-hidden">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-orange-500 to-orange-600 px-5 py-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
+                    <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 className="text-white font-semibold text-base">Help us improve</h3>
+                    <p className="text-orange-100 text-xs">What went wrong?</p>
+                  </div>
+                </div>
+                <button
+                  onClick={closeFeedbackModal}
+                  className="text-white/80 hover:text-white transition-colors p-1 hover:bg-white/10 rounded-full"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Reason Options */}
+            <div className="p-4 space-y-2">
+              {FEEDBACK_REASONS.map((reason) => (
+                <button
+                  key={reason.id}
+                  onClick={() => handleFeedbackReasonSelect(reason.id)}
+                  className="feedback-reason-btn w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-all duration-200 hover:bg-orange-50 border border-transparent hover:border-orange-200 group"
+                >
+                  <span className="text-xl group-hover:scale-110 transition-transform">{reason.icon}</span>
+                  <span className="text-sm font-medium text-gray-700 group-hover:text-orange-700">{reason.label}</span>
+                  <svg className="w-4 h-4 text-gray-300 group-hover:text-orange-500 ml-auto transition-all group-hover:translate-x-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
+              ))}
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-3 bg-gray-50 border-t border-gray-100">
+              <p className="text-xs text-gray-400 text-center">Your feedback helps us serve you better</p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

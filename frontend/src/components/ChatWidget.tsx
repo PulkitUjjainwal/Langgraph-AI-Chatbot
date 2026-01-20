@@ -437,6 +437,9 @@ export default function ChatWidget() {
     } else if (actionType === "refresh") {
       // Call init API to show suggested questions
       void callInitAndShowQuestions();
+    } else if (actionType === "chat" && originalQuery) {
+      // Handle suggestion pill clicks - send the suggestion as a message
+      void handleSend(originalQuery);
     }
   };
 

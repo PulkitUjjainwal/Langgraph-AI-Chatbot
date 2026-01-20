@@ -229,6 +229,103 @@ button:focus-visible {
   }
 }
 
+/* Feedback UI Styles */
+@keyframes feedbackThankYou {
+  0% {
+    opacity: 0;
+    transform: scale(0.8) translateY(5px);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes feedbackModalIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.9) translateY(20px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes feedbackBackdropIn {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes feedbackReasonHover {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(4px);
+  }
+}
+
+.feedback-thank-you {
+  animation: feedbackThankYou 0.4s ease-out forwards;
+}
+
+.feedback-modal {
+  animation: feedbackModalIn 0.3s ease-out forwards;
+}
+
+.feedback-modal-backdrop {
+  animation: feedbackBackdropIn 0.2s ease-out forwards;
+}
+
+.feedback-btn {
+  position: relative;
+  overflow: hidden;
+}
+
+.feedback-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at center, currentColor 0%, transparent 70%);
+  opacity: 0;
+  transform: scale(0);
+  transition: all 0.3s ease;
+}
+
+.feedback-btn:active::after {
+  opacity: 0.1;
+  transform: scale(2);
+}
+
+.feedback-reason-btn {
+  position: relative;
+}
+
+.feedback-reason-btn::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 0;
+  background: linear-gradient(to bottom, #f97316, #ea580c);
+  border-radius: 2px;
+  transition: height 0.2s ease;
+}
+
+.feedback-reason-btn:hover::before {
+  height: 60%;
+}
+
 @theme {
   --color-chat-primary: var(--chat-primary);
   --color-chat-primary-hover: var(--chat-primary-hover);

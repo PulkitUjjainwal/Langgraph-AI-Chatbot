@@ -3106,9 +3106,12 @@ async def init_session(request: InitRequest):
 
         print(f"[INIT] Complete - {processing_time:.2f}s, {len(suggested_questions)} questions (source: {questions_source})")
 
+        firstThree = suggested_questions[:3]
+
+
         return InitResponse(
             status=status,
-            suggested_questions=suggested_questions,
+            suggested_questions=firstThree,
             cache_status=cache_status,
             processing_time=processing_time,
             dynamic_url_processed=dynamic_url_processed,
@@ -3124,11 +3127,11 @@ async def init_session(request: InitRequest):
         # Return fallback questions on error
         processing_time = time.time() - start_time
         fallback_questions = [
-            "What countries does Export Genius cover?",
-            "How can Export Genius help grow my business?",
-            "What makes Export Genius unique?",
-            "How do I access the Export Genius API?",
-            "What insights are available through Export Genius?"
+            "What countries does Market Inside cover?",
+            "How can Market Inside help grow my business?",
+            "What makes Market Inside unique?",
+            "How do I access the Market Inside API?",
+            "What insights are available through Market Inside?"
         ]
 
         return InitResponse(
