@@ -235,7 +235,7 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
 
             {/* Suggestion pills from init response */}
             {msg.role === "assistant" && msg.suggestions && msg.suggestions.length > 0 && (
-              <div className="flex flex-wrap gap-2 mt-3 ml-9">
+              <div className="flex flex-wrap gap-2 mt-3 ml-9 justify-end">
                 {msg.suggestions.map((suggestion, suggestionIdx) => (
                   <button
                     key={suggestionIdx}

@@ -2632,14 +2632,22 @@ async def ensure_initialized():
         # Initialize FAQ service (for page-specific suggested questions)
         if FAQ_SERVICE_AVAILABLE:
             try:
+                print("[FAQ] Initializing FAQ service...")
                 faq_service = await init_faq_service()
                 if faq_service and faq_service.is_available:
                     print("[OK] FAQ service enabled (MySQL)")
                 else:
                     print("[INFO] FAQ service unavailable - using LLM fallback")
+                    faq_service = None
             except Exception as e:
-                print(f"[INFO] FAQ service init failed: {e} - using LLM fallback")
+                print(f"[ERROR] FAQ service init failed: {e}")
+                import traceback
+                print(traceback.format_exc())
+                print("[INFO] Using LLM fallback for question generation")
                 faq_service = None
+        else:
+            print("[INFO] FAQ service module not available - using LLM fallback")
+            faq_service = None
 
         print("\n" + "=" * 70)
         print("CHATBOT READY!")
