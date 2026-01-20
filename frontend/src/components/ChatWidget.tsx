@@ -2,11 +2,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatHeader } from "./ChatHeader";
 import { ChatMessages } from "./ChatMessages";
 import { ChatFooter } from "./ChatFooter";
+import genericQA from "../data/genericQA.json";
 
 export type ChatMessage = {
   id: string;
   role: "assistant" | "user";
   text: string;
+  actions?: {
+    type: "schedule_demo" | "whatsapp" | "chat" | "refresh";
+    label: string;
+  }[];
+  suggestions?: string[]; // For pill buttons from init
 };
 
 type SlotValues = Record<string, string>;
@@ -88,7 +94,6 @@ export default function ChatWidget() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [suggestionsState, setSuggestionsState] = useState<SuggestionsState | null>(null);
-  const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([]);
   const [showTooltip, setShowTooltip] = useState(false);
   const [tooltipDismissed, setTooltipDismissed] = useState(false);
 
@@ -101,6 +106,11 @@ export default function ChatWidget() {
   const [productInput, setProductInput] = useState("");
   const [currentUrl, setCurrentUrl] = useState("");
   const [isInitializing, setIsInitializing] = useState(false);
+
+  // Initialize with generic questions from JSON
+  const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>(() => {
+    return Object.keys(genericQA);
+  });
 
   // Lead capture state (keeping logic for future use)
   const [_showLeadForm, setShowLeadForm] = useState(false);
@@ -137,48 +147,18 @@ export default function ChatWidget() {
 
   // Convert questions to cards with descriptions
   const questionCards: QuestionCard[] = useMemo(() => {
-    return suggestedQuestions.slice(0, 3).map(q => ({
+    return suggestedQuestions.slice(0, 5).map(q => ({
       title: q,
       description: generateQuestionDescription(q)
     }));
   }, [suggestedQuestions]);
 
-  // Monitor URL changes
+  // Track current URL for init calls
   useEffect(() => {
     if (typeof window === "undefined") return;
-
-    const handleUrlChange = () => {
-      const newUrl = window.location.href;
-      if (newUrl === currentUrlRef.current) return;
-
-      currentUrlRef.current = newUrl;
-      setCurrentUrl(newUrl);
-      console.log("URL changed to:", newUrl);
-      void initializeSessionProactive(newUrl);
-    };
-
-    handleUrlChange();
-
-    const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
-
-    history.pushState = function (...args) {
-      originalPushState.apply(history, args as any);
-      handleUrlChange();
-    };
-
-    history.replaceState = function (...args) {
-      originalReplaceState.apply(history, args as any);
-      handleUrlChange();
-    };
-
-    window.addEventListener("popstate", handleUrlChange);
-
-    return () => {
-      history.pushState = originalPushState;
-      history.replaceState = originalReplaceState;
-      window.removeEventListener("popstate", handleUrlChange);
-    };
+    const url = window.location.href;
+    currentUrlRef.current = url;
+    setCurrentUrl(url);
   }, []);
 
   // Show initial welcome message
@@ -197,13 +177,13 @@ export default function ChatWidget() {
         } catch {}
       }
 
-      setMessages([
-        {
-          id: "welcome-1",
-          role: "assistant",
-          text: "Hi! I'm your trade intelligence assistant. Ask me anything about markets, products, or companies.",
-        },
-      ]);
+      // setMessages([
+      //   {
+      //     id: "welcome-1",
+      //     role: "assistant",
+      //     text: "Hi! I'm your trade intelligence assistant. Ask me anything about markets, products, or companies.",
+      //   },
+      // ]);
     }
   }, [open, messages.length, sessionId]);
 
@@ -294,6 +274,151 @@ export default function ChatWidget() {
       return (window as any).CHATBOT_CONFIG.apiUrl || "http://localhost:8003";
     }
     return "http://localhost:8003";
+  };
+
+  // Generic Q&A checker
+  const checkGenericQA = async (userQuery: string): Promise<ChatMessage | null> => {
+    const normalizedQuery = userQuery.trim();
+    
+    // Special case: "I want to learn about your data" should call init
+    if (normalizedQuery === "I want to learn about your data") {
+      await callInitAndShowQuestions();
+      return null; // Will be handled by callInitAndShowQuestions
+    }
+    
+    // Check if query matches any generic question
+    const qaEntry = (genericQA as Record<string, any>)[normalizedQuery];
+    
+    if (!qaEntry) return null;
+
+    const actions: ChatMessage["actions"] = [];
+
+    // Build action buttons based on type
+    if (qaEntry.type === "schedule_demo") {
+      actions.push({
+        type: "schedule_demo",
+        label: "Schedule a Demo"
+      });
+    } else if (qaEntry.type === "whatsapp") {
+      actions.push({
+        type: "whatsapp",
+        label: "Connect on WhatsApp"
+      });
+    } else if (qaEntry.type === "hybrid" && qaEntry.actions) {
+      if (qaEntry.actions.includes("chat")) {
+        actions.push({
+          type: "chat",
+          label: "Learn More"
+        });
+      }
+      if (qaEntry.actions.includes("schedule_demo")) {
+        actions.push({
+          type: "schedule_demo",
+          label: "Schedule a Demo"
+        });
+      }
+    }
+
+    return {
+      id: `generic-${Date.now()}`,
+      role: "assistant",
+      text: qaEntry.message,
+      actions: actions.length > 0 ? actions : undefined
+    };
+  };
+
+  // Call init and show suggested questions as chat message
+  const callInitAndShowQuestions = async () => {
+    const sid = sessionIdRef.current || createSessionId();
+    if (!sessionIdRef.current) {
+      sessionIdRef.current = sid;
+      setSessionId(sid);
+      try {
+        window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
+      } catch {}
+    }
+
+    setIsInitializing(true);
+
+    try {
+      const apiBaseUrl = getApiBaseUrl();
+      const resp = await fetch(`${apiBaseUrl}/api/init`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sid,
+          dynamic_url: currentUrl,
+        }),
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        console.log("Init response:", data);
+
+        if (data.suggested_questions && Array.isArray(data.suggested_questions)) {
+          // Add assistant message with data info and pill buttons
+          const assistantMsg: ChatMessage = {
+            id: `init-${Date.now()}`,
+            role: "assistant",
+            text: "We provide comprehensive trade data covering 190+ countries with detailed import/export records, HS codes, company information, and real-time trade intelligence. Here are some questions you can ask:",
+            suggestions: data.suggested_questions
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+        }
+      } else {
+        // Fallback message
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `init-error-${Date.now()}`,
+            role: "assistant",
+            text: "I can help you with trade intelligence data. What would you like to know?"
+          }
+        ]);
+      }
+    } catch (error) {
+      console.error("Init call failed:", error);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `init-error-${Date.now()}`,
+          role: "assistant",
+          text: "I can help you with trade intelligence data. What would you like to know?"
+        }
+      ]);
+    } finally {
+      setIsInitializing(false);
+    }
+  };
+
+  // Open schedule demo modal
+  const openScheduleDemo = () => {
+    if (typeof window !== "undefined" && typeof (window as any).openScheduleDemo === "function") {
+      (window as any).openScheduleDemo();
+    } else {
+      console.error("Schedule demo function not available");
+    }
+  };
+
+  // Open WhatsApp
+  const openWhatsApp = () => {
+    const whatsappUrl = "https://api.whatsapp.com/send/?phone=4407727449124&text&type=phone_number&app_absent=0";
+    window.open(whatsappUrl, "_blank");
+  };
+
+  // Handle action button clicks
+  const handleActionClick = (actionType: string, originalQuery?: string) => {
+    if (actionType === "schedule_demo") {
+      openScheduleDemo();
+    } else if (actionType === "whatsapp") {
+      openWhatsApp();
+    } else if (actionType === "chat" && originalQuery) {
+      // Call the chat/stream API with the original query
+      void handleSend(originalQuery, undefined, true);
+    } else if (actionType === "refresh") {
+      // Re-initialize session to get fresh questions
+      void initializeSessionProactive(currentUrl);
+    }
   };
 
   // Lead capture functions (keeping logic for future use)
@@ -443,10 +568,21 @@ export default function ChatWidget() {
 
         if (data.suggested_questions && Array.isArray(data.suggested_questions)) {
           setSuggestedQuestions(data.suggested_questions);
+        } else {
+          // Fallback to generic questions if no URL-specific questions
+          const genericQuestions = Object.keys(genericQA).slice(0, 3);
+          setSuggestedQuestions(genericQuestions);
         }
+      } else {
+        // If init fails, show generic questions
+        const genericQuestions = Object.keys(genericQA).slice(0, 3);
+        setSuggestedQuestions(genericQuestions);
       }
     } catch (error) {
       console.error("Failed to proactively initialize:", error);
+      // On error, show generic questions
+      const genericQuestions = Object.keys(genericQA).slice(0, 3);
+      setSuggestedQuestions(genericQuestions);
     } finally {
       setIsInitializing(false);
       isInitializingRef.current = false;
@@ -540,16 +676,37 @@ export default function ChatWidget() {
   // Suppress unused warnings for lead functions
   void _handleLeadFormChange; void _submitLeadForm; void _skipLeadForm; void _initializeSession;
 
-  async function handleSend(text: string, slotValues?: SlotValues) {
+  async function handleSend(text: string, slotValues?: SlotValues, skipGenericCheck = false) {
     if (isSending) return;
-    setIsSending(true);
 
     const userId = `user-${Date.now()}`;
     const assistantId = `assistant-${Date.now() + 1}`;
 
+    // Add user message first
     setMessages((prev) => [
       ...prev,
       { id: userId, role: "user" as const, text },
+    ]);
+
+    // Check if this is a generic question (only if not skipping)
+    if (!skipGenericCheck) {
+      const genericResponse = await checkGenericQA(text);
+      if (genericResponse) {
+        // Show generic response immediately
+        setMessages((prev) => [...prev, genericResponse]);
+        return;
+      }
+      // If checkGenericQA handled it (like init call), return early
+      if (text.trim() === "I want to learn about your data") {
+        return;
+      }
+    }
+
+    // Not a generic question, proceed with streaming API
+    setIsSending(true);
+
+    setMessages((prev) => [
+      ...prev,
       { id: assistantId, role: "assistant" as const, text: "" },
     ]);
 
@@ -701,7 +858,6 @@ export default function ChatWidget() {
           <ChatHeader onClose={() => setOpen(false)} />
 
           {/* Input Field - AWS Style (at top, below header) */}
-          <ChatFooter onSend={handleSend} isSending={isSending} position="top" />
 
           {/* Welcome Section with Suggested Questions - AWS Style */}
           {questionCards.length > 0 && messages.length <= 1 && (
@@ -734,7 +890,11 @@ export default function ChatWidget() {
           )}
 
           {/* Messages Area - Scrollable */}
-          <ChatMessages messages={messages} isStreaming={isSending} />
+          <ChatMessages 
+            messages={messages} 
+            isStreaming={isSending} 
+            onActionClick={handleActionClick}
+          />
 
           {/* Data Collection UI (if needed) */}
           {isCollecting && (
@@ -835,6 +995,7 @@ export default function ChatWidget() {
               )}
             </div>
           )}
+           <ChatFooter onSend={handleSend} isSending={isSending} position="bottom" />
 
           {/* Disclaimer at bottom - AWS Style */}
           <div className="px-4 py-2 bg-white border-t border-gray-100">
