@@ -147,7 +147,7 @@ export default function ChatWidget() {
 
   // Convert questions to cards with descriptions
   const questionCards: QuestionCard[] = useMemo(() => {
-    return suggestedQuestions.slice(0, 5).map(q => ({
+    return suggestedQuestions.slice(0, 3).map(q => ({
       title: q,
       description: generateQuestionDescription(q)
     }));
@@ -762,7 +762,7 @@ export default function ChatWidget() {
       checkLeadPrompt(text, currentMessageCount);
       
       // After API response, restore suggested questions
-      const genericQuestions = Object.keys(genericQA).slice(0, 5);
+      const genericQuestions = Object.keys(genericQA).slice(0, 3);
       setSuggestedQuestions(genericQuestions);
     } catch (err) {
       console.error("Chat error:", err);

@@ -1,10 +1,14 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChatMessage } from "./ChatWidget";
 
 type Props = {
   messages: ChatMessage[];
   isStreaming?: boolean;
   onActionClick?: (actionType: string, originalQuery?: string) => void;
+};
+
+type FeedbackState = {
+  [messageId: string]: 'up' | 'down' | null;
 };
 
 /**
@@ -94,6 +98,14 @@ function renderMessageWithLinks(text: string) {
 export function ChatMessages({ messages, isStreaming = false, onActionClick }: Props) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [feedbackState, setFeedbackState] = useState<FeedbackState>({});
+
+  const handleFeedback = (messageId: string, type: 'up' | 'down') => {
+    setFeedbackState(prev => ({
+      ...prev,
+      [messageId]: prev[messageId] === type ? null : type
+    }));
+  };
 
   // Smooth auto-scroll to bottom when messages change
   const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
@@ -154,27 +166,61 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
               </div>
             )}
 
-            <div
-              className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed overflow-hidden ${
-                msg.role === "user"
-                  ? "bg-chat-primary text-white rounded-br-md"
-                  : "bg-gray-100 text-chat-text rounded-bl-md"
-              }`}
-              style={{ wordBreak: 'break-word', overflowWrap: 'break-word' }}
-            >
-              {isTyping || isWaitingForStream ? (
-                <div className="flex items-center gap-1 py-1">
-                  <span className="typing-dot inline-block w-2 h-2 bg-orange-500 rounded-full"></span>
-                  <span className="typing-dot inline-block w-2 h-2 bg-orange-500 rounded-full"></span>
-                  <span className="typing-dot inline-block w-2 h-2 bg-orange-500 rounded-full"></span>
+            <div className="flex-1">
+              <div
+                className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed overflow-hidden ${
+                  msg.role === "user"
+                    ? "bg-chat-primary text-white rounded-br-md"
+                    : "bg-gray-100 text-chat-text rounded-bl-md"
+                }`}
+                style={{ wordBreak: 'break-word', overflowWrap: 'break-word' }}
+              >
+                {isTyping || isWaitingForStream ? (
+                  <div className="flex items-center gap-1 py-1">
+                    <span className="typing-dot inline-block w-2 h-2 bg-orange-500 rounded-full"></span>
+                    <span className="typing-dot inline-block w-2 h-2 bg-orange-500 rounded-full"></span>
+                    <span className="typing-dot inline-block w-2 h-2 bg-orange-500 rounded-full"></span>
+                  </div>
+                ) : (
+                  <>
+                    {renderMessageWithLinks(msg.text)}
+                    {showStreamingCursor && (
+                      <span className="inline-block w-0.5 h-4 bg-orange-500 ml-0.5 animate-pulse" />
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* Feedback buttons for assistant messages */}
+              {msg.role === "assistant" && msg.text && !isTyping && !isWaitingForStream && (
+                <div className="flex items-center gap-2 mt-2 ml-2">
+                  <button
+                    onClick={() => handleFeedback(msg.id, 'up')}
+                    className={`p-1.5 rounded-full transition-all duration-200 hover:bg-gray-200 ${
+                      feedbackState[msg.id] === 'up' 
+                        ? 'bg-green-100 text-green-600' 
+                        : 'text-gray-400 hover:text-green-600'
+                    }`}
+                    title="Good response"
+                  >
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M2 10.5a1.5 1.5 0 113 0v6a1.5 1.5 0 01-3 0v-6zM6 10.333v5.43a2 2 0 001.106 1.79l.05.025A4 4 0 008.943 18h5.416a2 2 0 001.962-1.608l1.2-6A2 2 0 0015.56 8H12V4a2 2 0 00-2-2 1 1 0 00-1 1v.667a4 4 0 01-.8 2.4L6.8 7.933a4 4 0 00-.8 2.4z" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={() => handleFeedback(msg.id, 'down')}
+                    className={`p-1.5 rounded-full transition-all duration-200 hover:bg-gray-200 ${
+                      feedbackState[msg.id] === 'down' 
+                        ? 'bg-red-100 text-red-600' 
+                        : 'text-gray-400 hover:text-red-600'
+                    }`}
+                    title="Bad response"
+                  >
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M18 9.5a1.5 1.5 0 11-3 0v-6a1.5 1.5 0 013 0v6zM14 9.667v-5.43a2 2 0 00-1.105-1.79l-.05-.025A4 4 0 0011.055 2H5.64a2 2 0 00-1.962 1.608l-1.2 6A2 2 0 004.44 12H8v4a2 2 0 002 2 1 1 0 001-1v-.667a4 4 0 01.8-2.4l1.4-1.866a4 4 0 00.8-2.4z" />
+                    </svg>
+                  </button>
                 </div>
-              ) : (
-                <>
-                  {renderMessageWithLinks(msg.text)}
-                  {showStreamingCursor && (
-                    <span className="inline-block w-0.5 h-4 bg-orange-500 ml-0.5 animate-pulse" />
-                  )}
-                </>
               )}
             </div>
 
