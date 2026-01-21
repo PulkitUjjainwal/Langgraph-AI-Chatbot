@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS faq (
 -- INSERT PAGE CONFIGURATIONS
 -- ============================================================================
 INSERT INTO pages (page_key, page_name, url_pattern, description) VALUES
-('home', 'Homepage', 'https://www.marketinsidedata.com/%', 'Main landing page'),
+('home', 'Homepage', '%/%', 'Main landing page'),
 ('home_en', 'Homepage EN', 'https://www.marketinsidedata.com/en%', 'English homepage'),
 ('search_data', 'Search Data', '%/search-data%', 'Data search page'),
 ('data_license', 'Data License', '%/data-license%', 'Data licensing page'),
