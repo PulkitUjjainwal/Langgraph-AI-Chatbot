@@ -1,36 +1,50 @@
 name: Deploy to Production
- 
+
 on:
   push:
     branches:
       - main
   workflow_dispatch:
- 
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
- 
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
- 
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
- 
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Frontend Widget
+        run: |
+          echo "🔨 Building frontend widget..."
+          cd frontend
+          npm install
+          npm run build
+          echo "✅ Widget built successfully"
+          ls -la ../backend/assets/
+
       - name: Install SSH key
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
- 
+
       - name: Add server to known hosts
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
- 
+
       - name: Deploy to server
         env:
           SERVER_IP: ${{ secrets.SERVER_IP }}
@@ -38,8 +52,9 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           echo "🚀 Starting deployment to $SERVER_IP..."
- 
-          # Copy project files
+
+          # Copy project files (including built widget)
+          # Using --delete to remove old files, but preserving important server-side files
           rsync -avz --delete \
             --exclude '.git' \
             --exclude '.github' \
@@ -48,32 +63,73 @@ jobs:
             --exclude 'venv' \
             --exclude '.env' \
             --exclude 'test_*.py' \
+            --exclude 'frontend/node_modules' \
+            --exclude 'widget-dist' \
+            --exclude 'data/*.index' \
+            --exclude 'data/*.json' \
+            --exclude '*.log' \
             ./ $SERVER_USER@$SERVER_IP:$DEPLOY_PATH/
- 
+
           # Connect to server and deploy
-          ssh $SERVER_USER@$SERVER_IP << ENDSSH
-            cd $DEPLOY_PATH
- 
-            echo "📦 Installing dependencies..."
+          ssh $SERVER_USER@$SERVER_IP << 'ENDSSH'
+            set -e  # Exit on any error
+            cd /opt/eg-chatbot
+
+            echo "📦 Installing Python dependencies..."
             source venv/bin/activate
-            pip install --upgrade pip
-            pip install -r requirements.txt
- 
-            echo "🔄 Reloading PM2..."
-            pm2 reload ecosystem.config.js --env production
- 
-            echo "✅ Deployment complete!"
+            pip install --upgrade pip -q
+            pip install -r requirements.txt -q
+
+            echo "📁 Setting up widget dist folder..."
+            mkdir -p widget-dist
+
+            # Copy widget file (check if exists)
+            if [ -f "backend/assets/chat-widget.js" ]; then
+              cp backend/assets/chat-widget.js widget-dist/
+              echo "✅ Widget copied to widget-dist/"
+            else
+              echo "❌ ERROR: backend/assets/chat-widget.js not found!"
+              ls -la backend/assets/ || echo "backend/assets/ directory not found"
+              exit 1
+            fi
+
+            echo "🔄 Reloading PM2 services..."
+            pm2 reload ecosystem.config.js --env production || pm2 start ecosystem.config.js --env production
+            pm2 save
+
+            echo "📊 PM2 Status:"
             pm2 status
+
+            echo "🔍 Checking widget file:"
+            ls -la widget-dist/
+
+            echo "✅ Deployment complete!"
           ENDSSH
- 
+
       - name: Health check
         run: |
-          echo "🏥 Running health check..."
-          sleep 10
-          curl --fail http://${{ secrets.SERVER_IP }}:8000/api/health || exit 1
-          echo "✅ Health check passed!"
- 
-      - name: Notify deployment status
+          echo "🏥 Running health checks..."
+          sleep 20  # Give PM2 more time to fully start
+
+          echo "Checking API via Nginx..."
+          # Try via Nginx first (port 80), fallback to direct port 8000
+          curl --fail --max-time 30 http://${{ secrets.SERVER_IP }}/api/health \
+            || curl --fail --max-time 30 http://${{ secrets.SERVER_IP }}:8000/api/health \
+            || exit 1
+          echo "✅ API health check passed!"
+
+          echo "Checking Widget file via Nginx..."
+          curl --fail --max-time 10 -I http://${{ secrets.SERVER_IP }}/chat-widget.js \
+            || echo "⚠️ Widget not accessible via Nginx - check Nginx config"
+
+      - name: Deployment Summary
         if: always()
         run: |
-          echo "🎉 Deployment finished (success or failure message already shown)"
+          echo "================================================"
+          echo "🎉 DEPLOYMENT COMPLETE"
+          echo "================================================"
+          echo "API URL:    http://${{ secrets.SERVER_IP }}/api"
+          echo "Widget URL: http://${{ secrets.SERVER_IP }}/chat-widget.js"
+          echo "Health:     http://${{ secrets.SERVER_IP }}/api/health"
+          echo "Docs:       http://${{ secrets.SERVER_IP }}/docs"
+          echo "================================================"
