@@ -129,7 +129,6 @@ export default function ChatWidget() {
   // Refs
   const currentUrlRef = useRef<string>("");
   const sessionIdRef = useRef<string>(sessionId);
-  const isInitializingRef = useRef<boolean>(false);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -555,59 +554,6 @@ export default function ChatWidget() {
       }
     } catch (error) {
       console.error("Failed to initialize session:", error);
-    }
-  }
-
-  async function initializeSessionProactive(url: string) {
-    if (isInitializingRef.current) return;
-
-    isInitializingRef.current = true;
-    setIsInitializing(true);
-
-    const sid = sessionIdRef.current || createSessionId();
-    if (!sessionIdRef.current) {
-      sessionIdRef.current = sid;
-      setSessionId(sid);
-      try {
-        window.localStorage.setItem(SESSION_STORAGE_KEY, sid);
-      } catch {}
-    }
-
-    try {
-      const apiBaseUrl = getApiBaseUrl();
-      const resp = await fetch(`${apiBaseUrl}/api/init`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: sid,
-          dynamic_url: url,
-        }),
-      });
-
-      if (resp.ok) {
-        const data = await resp.json();
-        console.log("Proactive init for URL:", url);
-
-        if (data.suggested_questions && Array.isArray(data.suggested_questions)) {
-          setSuggestedQuestions(data.suggested_questions);
-        } else {
-          // Fallback to generic questions if no URL-specific questions
-          const genericQuestions = Object.keys(genericQA).slice(0, 3);
-          setSuggestedQuestions(genericQuestions);
-        }
-      } else {
-        // If init fails, show generic questions
-        const genericQuestions = Object.keys(genericQA).slice(0, 3);
-        setSuggestedQuestions(genericQuestions);
-      }
-    } catch (error) {
-      console.error("Failed to proactively initialize:", error);
-      // On error, show generic questions
-      const genericQuestions = Object.keys(genericQA).slice(0, 3);
-      setSuggestedQuestions(genericQuestions);
-    } finally {
-      setIsInitializing(false);
-      isInitializingRef.current = false;
     }
   }
 
