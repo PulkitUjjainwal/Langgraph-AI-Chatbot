@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import type { ReactNode } from "react";
 import type { ChatMessage } from "./ChatWidget";
 
@@ -6,6 +6,31 @@ type Props = {
   messages: ChatMessage[];
   isStreaming?: boolean;
   onActionClick?: (actionType: string, originalQuery?: string) => void;
+  onFeedbackSubmit?: (feedbackData: FeedbackSubmitData) => Promise<void>;
+  onDelayedFeedbackSubmit?: (feedbackData: DelayedFeedbackData) => Promise<void>;
+  sessionId?: string;
+  pageUrl?: string;
+};
+
+export type FeedbackSubmitData = {
+  sessionId: string;
+  feedbackType: 'thumbs_up' | 'thumbs_down';
+  messageId: string;
+  assistantMessage: string;
+  userQuery?: string;
+  reason?: string;
+  pageUrl?: string;
+  conversation: { role: string; content: string; message_id?: string }[];
+};
+
+export type DelayedFeedbackData = {
+  sessionId: string;
+  feedbackType: 'rating';
+  rating: number;
+  workedWell: string[];
+  comment?: string;
+  pageUrl?: string;
+  conversation: { role: string; content: string; message_id?: string }[];
 };
 
 type FeedbackState = {
@@ -13,12 +38,24 @@ type FeedbackState = {
     type: 'up' | 'down' | null;
     reason?: string;
     submitted: boolean;
+    submitting?: boolean;
   };
 };
 
 type FeedbackModalState = {
   isOpen: boolean;
   messageId: string | null;
+  assistantMessage?: string;
+  userQuery?: string;
+};
+
+type DelayedFeedbackState = {
+  show: boolean;
+  rating: number;
+  workedWell: string[];
+  comment: string;
+  submitting: boolean;
+  submitted: boolean;
 };
 
 const FEEDBACK_REASONS = [
@@ -28,6 +65,17 @@ const FEEDBACK_REASONS = [
   { id: 'confusing', label: 'Hard to understand', icon: '😕' },
   { id: 'other', label: 'Other', icon: '💬' },
 ];
+
+const WORKED_WELL_OPTIONS = [
+  { id: 'clarity', label: 'Clarity' },
+  { id: 'language', label: 'Language used' },
+  { id: 'accuracy', label: 'Accuracy' },
+  { id: 'relevance', label: 'Relevance' },
+  { id: 'speed', label: 'Response speed' },
+];
+
+// Inactivity timeout in milliseconds (60 seconds)
+const INACTIVITY_TIMEOUT = 10000;
 
 /**
  * Parse message text and convert URLs and markdown links to clickable elements
@@ -113,37 +161,253 @@ function renderMessageWithLinks(text: string): ReactNode {
   return <>{parts}</>;
 }
 
-export function ChatMessages({ messages, isStreaming = false, onActionClick }: Props) {
+export function ChatMessages({
+  messages,
+  isStreaming = false,
+  onActionClick,
+  onFeedbackSubmit,
+  onDelayedFeedbackSubmit,
+  sessionId = '',
+  pageUrl = ''
+}: Props) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [feedbackState, setFeedbackState] = useState<FeedbackState>({});
-  const [feedbackModal, setFeedbackModal] = useState<FeedbackModalState>({ isOpen: false, messageId: null });
+  const [feedbackModal, setFeedbackModal] = useState<FeedbackModalState>({
+    isOpen: false,
+    messageId: null,
+    assistantMessage: undefined,
+    userQuery: undefined
+  });
 
-  const handleFeedback = (messageId: string, type: 'up' | 'down') => {
+  // Delayed feedback state
+  const [delayedFeedback, setDelayedFeedback] = useState<DelayedFeedbackState>({
+    show: false,
+    rating: 0,
+    workedWell: [],
+    comment: '',
+    submitting: false,
+    submitted: false
+  });
+  const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastActivityRef = useRef<number>(Date.now());
+  const hasShownDelayedFeedbackRef = useRef<boolean>(false);
+
+  // Find the user query that preceded an assistant message
+  const findUserQuery = (messageIndex: number): string | undefined => {
+    for (let i = messageIndex - 1; i >= 0; i--) {
+      if (messages[i]?.role === 'user') {
+        return messages[i].text;
+      }
+    }
+    return undefined;
+  };
+
+  // Submit feedback to backend
+  const submitFeedbackToBackend = async (
+    messageId: string,
+    type: 'up' | 'down',
+    assistantMessage: string,
+    userQuery?: string,
+    reason?: string
+  ) => {
+    if (!onFeedbackSubmit) return;
+
+    // Build conversation history
+    const conversation = messages.map(msg => ({
+      role: msg.role,
+      content: msg.text,
+      message_id: msg.id
+    }));
+
+    const feedbackData: FeedbackSubmitData = {
+      sessionId,
+      feedbackType: type === 'up' ? 'thumbs_up' : 'thumbs_down',
+      messageId,
+      assistantMessage,
+      userQuery,
+      reason,
+      pageUrl,
+      conversation
+    };
+
+    try {
+      await onFeedbackSubmit(feedbackData);
+    } catch (error) {
+      console.error('[Feedback] Failed to submit:', error);
+    }
+  };
+
+  const handleFeedback = async (messageId: string, type: 'up' | 'down', messageIndex: number) => {
+    const message = messages.find(m => m.id === messageId);
+    const userQuery = findUserQuery(messageIndex);
+
     if (type === 'up') {
       // Positive feedback - submit immediately with animation
       setFeedbackState(prev => ({
         ...prev,
-        [messageId]: { type: 'up', submitted: true }
+        [messageId]: { type: 'up', submitted: false, submitting: true }
+      }));
+
+      // Submit to backend
+      await submitFeedbackToBackend(messageId, 'up', message?.text || '', userQuery);
+
+      setFeedbackState(prev => ({
+        ...prev,
+        [messageId]: { type: 'up', submitted: true, submitting: false }
       }));
     } else {
       // Negative feedback - show modal for reason selection
-      setFeedbackModal({ isOpen: true, messageId });
+      setFeedbackModal({
+        isOpen: true,
+        messageId,
+        assistantMessage: message?.text,
+        userQuery
+      });
     }
   };
 
-  const handleFeedbackReasonSelect = (reason: string) => {
+  const handleFeedbackReasonSelect = async (reason: string) => {
     if (feedbackModal.messageId) {
       setFeedbackState(prev => ({
         ...prev,
-        [feedbackModal.messageId!]: { type: 'down', reason, submitted: true }
+        [feedbackModal.messageId!]: { type: 'down', reason, submitted: false, submitting: true }
+      }));
+
+      // Submit to backend with reason
+      await submitFeedbackToBackend(
+        feedbackModal.messageId,
+        'down',
+        feedbackModal.assistantMessage || '',
+        feedbackModal.userQuery,
+        reason
+      );
+
+      setFeedbackState(prev => ({
+        ...prev,
+        [feedbackModal.messageId!]: { type: 'down', reason, submitted: true, submitting: false }
       }));
     }
-    setFeedbackModal({ isOpen: false, messageId: null });
+    setFeedbackModal({ isOpen: false, messageId: null, assistantMessage: undefined, userQuery: undefined });
   };
 
   const closeFeedbackModal = () => {
-    setFeedbackModal({ isOpen: false, messageId: null });
+    setFeedbackModal({ isOpen: false, messageId: null, assistantMessage: undefined, userQuery: undefined });
+  };
+
+  // =========================================================================
+  // DELAYED FEEDBACK (AWS-style "idle" feedback form)
+  // =========================================================================
+
+  // Reset inactivity timer
+  const resetInactivityTimer = useCallback(() => {
+    lastActivityRef.current = Date.now();
+
+    if (inactivityTimerRef.current) {
+      clearTimeout(inactivityTimerRef.current);
+    }
+
+    // Don't show if already shown or submitted, or if there are no messages
+    if (hasShownDelayedFeedbackRef.current || delayedFeedback.submitted || messages.length < 2) {
+      return;
+    }
+
+    inactivityTimerRef.current = setTimeout(() => {
+      // Only show if user has had at least one exchange
+      const hasAssistantResponse = messages.some(m => m.role === 'assistant' && m.text && m.text !== 'thinking...');
+      if (hasAssistantResponse && !hasShownDelayedFeedbackRef.current) {
+        setDelayedFeedback(prev => ({ ...prev, show: true }));
+        hasShownDelayedFeedbackRef.current = true;
+      }
+    }, INACTIVITY_TIMEOUT);
+  }, [messages, delayedFeedback.submitted]);
+
+  // Track user activity
+  useEffect(() => {
+    resetInactivityTimer();
+
+    // Listen for user interactions
+    const handleActivity = () => resetInactivityTimer();
+    const container = containerRef.current;
+
+    if (container) {
+      container.addEventListener('scroll', handleActivity);
+      container.addEventListener('click', handleActivity);
+      container.addEventListener('mousemove', handleActivity);
+    }
+
+    return () => {
+      if (inactivityTimerRef.current) {
+        clearTimeout(inactivityTimerRef.current);
+      }
+      if (container) {
+        container.removeEventListener('scroll', handleActivity);
+        container.removeEventListener('click', handleActivity);
+        container.removeEventListener('mousemove', handleActivity);
+      }
+    };
+  }, [resetInactivityTimer]);
+
+  // Reset timer when messages change (user is active)
+  useEffect(() => {
+    resetInactivityTimer();
+  }, [messages, resetInactivityTimer]);
+
+  // Handle star rating click
+  const handleStarClick = (star: number) => {
+    setDelayedFeedback(prev => ({ ...prev, rating: star }));
+  };
+
+  // Handle "what worked well" toggle
+  const toggleWorkedWell = (id: string) => {
+    setDelayedFeedback(prev => ({
+      ...prev,
+      workedWell: prev.workedWell.includes(id)
+        ? prev.workedWell.filter(w => w !== id)
+        : [...prev.workedWell, id]
+    }));
+  };
+
+  // Handle comment change
+  const handleCommentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setDelayedFeedback(prev => ({ ...prev, comment: e.target.value }));
+  };
+
+  // Cancel delayed feedback
+  const cancelDelayedFeedback = () => {
+    setDelayedFeedback(prev => ({ ...prev, show: false }));
+  };
+
+  // Submit delayed feedback
+  const submitDelayedFeedback = async () => {
+    if (delayedFeedback.rating === 0) return;
+
+    setDelayedFeedback(prev => ({ ...prev, submitting: true }));
+
+    if (onDelayedFeedbackSubmit) {
+      const conversation = messages.map(msg => ({
+        role: msg.role,
+        content: msg.text,
+        message_id: msg.id
+      }));
+
+      await onDelayedFeedbackSubmit({
+        sessionId,
+        feedbackType: 'rating',
+        rating: delayedFeedback.rating,
+        workedWell: delayedFeedback.workedWell,
+        comment: delayedFeedback.comment || undefined,
+        pageUrl,
+        conversation
+      });
+    }
+
+    setDelayedFeedback(prev => ({
+      ...prev,
+      show: false,
+      submitting: false,
+      submitted: true
+    }));
   };
 
   // Smooth auto-scroll to bottom when messages change
@@ -190,92 +454,49 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
         return (
           <div
             key={msg.id}
-            className={` ${
-              msg.role === "user" ? "justify-end flex" : "justify-start block"
-            } chat-bubble`}
+            className={`flex chat-bubble ${
+              msg.role === "user" ? "justify-start" : "justify-end"
+            }`}
           >
-            {/* Assistant avatar */}
-            {msg.role === "assistant" && (
+            {/* User avatar - shown on left for user messages */}
+            {msg.role === "user" && (
               <div className="flex-shrink-0 mr-2 mt-1">
-                <div className="h-7 w-7 rounded-full bg-gradient-to-br from-orange-500 to-orange-600 flex items-center justify-center">
+                <div className="h-7 w-7 rounded-full bg-gradient-to-br from-gray-500 to-gray-600 flex items-center justify-center">
                   <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                   </svg>
                 </div>
               </div>
             )}
 
-            <div className="flex-1">
+            <div className={`flex-1 ${msg.role === "assistant" ? "flex flex-col items-end" : ""}`}>
               <div
                 className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed overflow-hidden ${
                   msg.role === "user"
-                    ? "bg-chat-primary text-white rounded-br-md"
-                    : "bg-gray-100 text-chat-text rounded-bl-md"
+                    ? "bg-gray-100 text-chat-text rounded-bl-md"
+                    : "bg-gradient-to-br from-gray-700 to-gray-800 text-white rounded-br-md"
                 }`}
                 style={{ wordBreak: 'break-word', overflowWrap: 'break-word' }}
               >
                 {isTyping || isWaitingForStream ? (
                   <div className="flex items-center gap-1 py-1">
-                    <span className="typing-dot inline-block w-2 h-2 bg-orange-500 rounded-full"></span>
-                    <span className="typing-dot inline-block w-2 h-2 bg-orange-500 rounded-full"></span>
-                    <span className="typing-dot inline-block w-2 h-2 bg-orange-500 rounded-full"></span>
+                    <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
+                    <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
+                    <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
                   </div>
                 ) : (
                   <>
                     {renderMessageWithLinks(msg.text)}
                     {showStreamingCursor && (
-                      <span className="inline-block w-0.5 h-4 bg-orange-500 ml-0.5 animate-pulse" />
+                      <span className="inline-block w-0.5 h-4 bg-white ml-0.5 animate-pulse" />
                     )}
                   </>
                 )}
               </div>
 
-              {/* Feedback section for assistant messages */}
-              {msg.role === "assistant" && msg.text && !isTyping && !isWaitingForStream && (
-                <div className="mt-2 ml-1">
-                  {feedbackState[msg.id]?.submitted ? (
-                    // Thank you message after feedback
-                    <div className="feedback-thank-you flex items-center gap-2 py-1.5 px-3 rounded-lg bg-gradient-to-r from-gray-50 to-gray-100 border border-gray-200">
-                      <span className="text-lg">
-                        {feedbackState[msg.id]?.type === 'up' ? '🎉' : '🙏'}
-                      </span>
-                      <span className="text-xs text-gray-600 font-medium">
-                        Thanks for your feedback!
-                      </span>
-                    </div>
-                  ) : (
-                    // Feedback buttons
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs text-gray-400 mr-1">Was this helpful?</span>
-                      <button
-                        onClick={() => handleFeedback(msg.id, 'up')}
-                        className="feedback-btn group flex items-center gap-1 px-2 py-1 rounded-md transition-all duration-200 hover:bg-green-50 text-gray-400 hover:text-green-600"
-                        title="Yes, this was helpful"
-                      >
-                        <svg className="w-3.5 h-3.5 transition-transform group-hover:scale-110" fill="currentColor" viewBox="0 0 20 20">
-                          <path d="M2 10.5a1.5 1.5 0 113 0v6a1.5 1.5 0 01-3 0v-6zM6 10.333v5.43a2 2 0 001.106 1.79l.05.025A4 4 0 008.943 18h5.416a2 2 0 001.962-1.608l1.2-6A2 2 0 0015.56 8H12V4a2 2 0 00-2-2 1 1 0 00-1 1v.667a4 4 0 01-.8 2.4L6.8 7.933a4 4 0 00-.8 2.4z" />
-                        </svg>
-                        <span className="text-xs font-medium opacity-0 group-hover:opacity-100 transition-opacity">Yes</span>
-                      </button>
-                      <button
-                        onClick={() => handleFeedback(msg.id, 'down')}
-                        className="feedback-btn group flex items-center gap-1 px-2 py-1 rounded-md transition-all duration-200 hover:bg-red-50 text-gray-400 hover:text-red-500"
-                        title="No, this needs improvement"
-                      >
-                        <svg className="w-3.5 h-3.5 transition-transform group-hover:scale-110" fill="currentColor" viewBox="0 0 20 20">
-                          <path d="M18 9.5a1.5 1.5 0 11-3 0v-6a1.5 1.5 0 013 0v6zM14 9.667v-5.43a2 2 0 00-1.105-1.79l-.05-.025A4 4 0 0011.055 2H5.64a2 2 0 00-1.962 1.608l-1.2 6A2 2 0 004.44 12H8v4a2 2 0 002 2 1 1 0 001-1v-.667a4 4 0 01.8-2.4l1.4-1.866a4 4 0 00.8-2.4z" />
-                        </svg>
-                        <span className="text-xs font-medium opacity-0 group-hover:opacity-100 transition-opacity">No</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Action buttons for generic responses */}
-            {msg.role === "assistant" && msg.actions && msg.actions.length > 0 && (
-              <div className="flex flex-wrap gap-1 mt-2">
+              {/* Action buttons for generic responses - below the message */}
+              {msg.role === "assistant" && msg.actions && msg.actions.length > 0 && (
+                <div className="flex flex-wrap gap-2 mt-3 justify-end">
                 {msg.actions.map((action, actionIdx) => {
                   // Find the original user query (previous message)
                   const userQuery = index > 0 ? messages[index - 1]?.text : undefined;
@@ -350,22 +571,86 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
               </div>
             )}
 
-            {/* Suggestion pills from init response */}
-            {msg.role === "assistant" && msg.suggestions && msg.suggestions.length > 0 && (
-              <div className="flex flex-wrap gap-2 mt-3 ml-9 justify-end">
-                {msg.suggestions.map((suggestion, suggestionIdx) => (
-                  <button
-                    key={suggestionIdx}
-                    onClick={() => onActionClick?.("chat", suggestion)}
-                    className="px-3 py-1 rounded-2xl rounded-br-md text-sm font-medium
-                      bg-white border-2 border-orange-300 text-orange-700
-                      hover:bg-orange-50 hover:border-orange-500
-                      transition-all duration-200 transform hover:scale-105
-                      shadow-sm hover:shadow-md"
-                  >
-                    {suggestion}
-                  </button>
-                ))}
+              {/* Suggestion pills from init response */}
+              {msg.role === "assistant" && msg.suggestions && msg.suggestions.length > 0 && (
+                <div className="flex flex-wrap gap-2 mt-3 justify-end">
+                  {msg.suggestions.map((suggestion, suggestionIdx) => (
+                    <button
+                      key={suggestionIdx}
+                      onClick={() => onActionClick?.("chat", suggestion)}
+                      className="px-3 py-1 rounded-2xl rounded-br-md text-sm font-medium
+                        bg-white border-2 border-orange-300 text-orange-700
+                        hover:bg-orange-50 hover:border-orange-500
+                        transition-all duration-200 transform hover:scale-105
+                        shadow-sm hover:shadow-md"
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Feedback section for assistant messages */}
+              {msg.role === "assistant" && msg.text && !isTyping && !isWaitingForStream && (
+                <div className="mt-2 flex justify-end">
+                  {feedbackState[msg.id]?.submitted ? (
+                    // Thank you message after feedback
+                    <div className="feedback-thank-you flex items-center gap-2 py-1.5 px-3 rounded-lg bg-gradient-to-r from-gray-50 to-gray-100 border border-gray-200">
+                      <span className="text-lg">
+                        {feedbackState[msg.id]?.type === 'up' ? '🎉' : '🙏'}
+                      </span>
+                      <span className="text-xs text-gray-600 font-medium">
+                        Thanks for your feedback!
+                      </span>
+                    </div>
+                  ) : (
+                    // Feedback buttons
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-gray-400 mr-1">Was this helpful?</span>
+                      <button
+                        onClick={() => handleFeedback(msg.id, 'up', index)}
+                        disabled={feedbackState[msg.id]?.submitting}
+                        className="feedback-btn group flex items-center gap-1 px-2 py-1 rounded-md transition-all duration-200 hover:bg-green-50 text-gray-400 hover:text-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Yes, this was helpful"
+                      >
+                        {feedbackState[msg.id]?.submitting && feedbackState[msg.id]?.type === 'up' ? (
+                          <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                        ) : (
+                          <svg className="w-3.5 h-3.5 transition-transform group-hover:scale-110" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M2 10.5a1.5 1.5 0 113 0v6a1.5 1.5 0 01-3 0v-6zM6 10.333v5.43a2 2 0 001.106 1.79l.05.025A4 4 0 008.943 18h5.416a2 2 0 001.962-1.608l1.2-6A2 2 0 0015.56 8H12V4a2 2 0 00-2-2 1 1 0 00-1 1v.667a4 4 0 01-.8 2.4L6.8 7.933a4 4 0 00-.8 2.4z" />
+                          </svg>
+                        )}
+                        <span className="text-xs font-medium opacity-0 group-hover:opacity-100 transition-opacity">Yes</span>
+                      </button>
+                      <button
+                        onClick={() => handleFeedback(msg.id, 'down', index)}
+                        disabled={feedbackState[msg.id]?.submitting}
+                        className="feedback-btn group flex items-center gap-1 px-2 py-1 rounded-md transition-all duration-200 hover:bg-red-50 text-gray-400 hover:text-red-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="No, this needs improvement"
+                      >
+                        <svg className="w-3.5 h-3.5 transition-transform group-hover:scale-110" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M18 9.5a1.5 1.5 0 11-3 0v-6a1.5 1.5 0 013 0v6zM14 9.667v-5.43a2 2 0 00-1.105-1.79l-.05-.025A4 4 0 0011.055 2H5.64a2 2 0 00-1.962 1.608l-1.2 6A2 2 0 004.44 12H8v4a2 2 0 002 2 1 1 0 001-1v-.667a4 4 0 01.8-2.4l1.4-1.866a4 4 0 00.8-2.4z" />
+                        </svg>
+                        <span className="text-xs font-medium opacity-0 group-hover:opacity-100 transition-opacity">No</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* MI Assistant avatar - shown on right for assistant messages */}
+            {msg.role === "assistant" && (
+              <div className="flex-shrink-0 ml-2 mt-1">
+                <div className="h-7 w-7 rounded-full overflow-hidden">
+                  <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-full w-full">
+                    <rect width="28" height="28" rx="14" fill="#374151"/>
+                    <text x="50%" y="54%" dominantBaseline="middle" textAnchor="middle" fill="white" fontSize="9" fontWeight="bold" fontFamily="Inter, sans-serif">MI</text>
+                  </svg>
+                </div>
               </div>
             )}
           </div>
@@ -429,6 +714,118 @@ export function ChatMessages({ messages, isStreaming = false, onActionClick }: P
             {/* Footer */}
             <div className="px-5 py-3 bg-gray-50 border-t border-gray-100">
               <p className="text-xs text-gray-400 text-center">Your feedback helps us serve you better</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AWS-style Delayed Feedback Form */}
+      {delayedFeedback.show && (
+        <div className="delayed-feedback-card mx-2 my-4 animate-fade-in">
+          {/* Idle message bubble */}
+          <div className="flex items-center justify-center mb-3">
+            <div className="bg-gray-100 px-4 py-2 rounded-full text-sm text-gray-500 flex items-center gap-2">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              You've been idle for a while.
+            </div>
+          </div>
+
+          {/* Feedback Card */}
+          <div className="bg-white rounded-2xl shadow-lg border border-gray-200 overflow-hidden">
+            <div className="p-5 space-y-5">
+              {/* Star Rating */}
+              <div>
+                <p className="text-sm font-medium text-gray-700 mb-3">How would you rate this chat so far?</p>
+                <div className="flex gap-1">
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <button
+                      key={star}
+                      onClick={() => handleStarClick(star)}
+                      className="p-1 transition-all duration-200 hover:scale-110 focus:outline-none"
+                      aria-label={`Rate ${star} stars`}
+                    >
+                      <svg
+                        className={`w-8 h-8 transition-colors duration-200 ${
+                          star <= delayedFeedback.rating
+                            ? 'text-yellow-400 fill-current'
+                            : 'text-gray-300 hover:text-yellow-300'
+                        }`}
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={1.5}
+                        fill={star <= delayedFeedback.rating ? 'currentColor' : 'none'}
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                      </svg>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* What worked well */}
+              <div>
+                <p className="text-sm font-medium text-gray-700 mb-3">What worked well?</p>
+                <div className="flex flex-wrap gap-2">
+                  {WORKED_WELL_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      onClick={() => toggleWorkedWell(option.id)}
+                      className={`px-3 py-1.5 rounded-full text-sm font-medium border-2 transition-all duration-200 ${
+                        delayedFeedback.workedWell.includes(option.id)
+                          ? 'bg-orange-50 border-orange-400 text-orange-700'
+                          : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Comment textarea */}
+              <div>
+                <p className="text-sm font-medium text-gray-700 mb-2">Want to add any details?</p>
+                <textarea
+                  value={delayedFeedback.comment}
+                  onChange={handleCommentChange}
+                  placeholder="Please add details (avoid including personal info)"
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                  rows={3}
+                />
+              </div>
+            </div>
+
+            {/* Action buttons */}
+            <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex justify-end gap-3">
+              <button
+                onClick={cancelDelayedFeedback}
+                className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitDelayedFeedback}
+                disabled={delayedFeedback.rating === 0 || delayedFeedback.submitting}
+                className={`px-5 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+                  delayedFeedback.rating === 0
+                    ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                    : 'bg-orange-500 text-white hover:bg-orange-600 shadow-md hover:shadow-lg'
+                }`}
+              >
+                {delayedFeedback.submitting ? (
+                  <span className="flex items-center gap-2">
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Submitting...
+                  </span>
+                ) : (
+                  'Submit'
+                )}
+              </button>
             </div>
           </div>
         </div>

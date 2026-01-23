@@ -326,6 +326,40 @@ button:focus-visible {
   height: 60%;
 }
 
+/* Delayed Feedback (AWS-style idle feedback) */
+@keyframes delayedFeedbackIn {
+  0% {
+    opacity: 0;
+    transform: translateY(20px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.delayed-feedback-card {
+  animation: delayedFeedbackIn 0.4s ease-out forwards;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* Star rating hover effect */
+.delayed-feedback-card button:hover svg {
+  filter: drop-shadow(0 0 4px rgba(250, 204, 21, 0.5));
+}
+
+/* Worked well pills animation */
+.delayed-feedback-card .flex-wrap button {
+  transition: all 0.2s ease;
+}
+
+.delayed-feedback-card .flex-wrap button:hover {
+  transform: translateY(-1px);
+}
+
 @theme {
   --color-chat-primary: var(--chat-primary);
   --color-chat-primary-hover: var(--chat-primary-hover);

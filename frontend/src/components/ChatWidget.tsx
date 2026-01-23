@@ -269,10 +269,12 @@ export default function ChatWidget() {
   }, [suggestionsState]);
 
   const getApiBaseUrl = (): string => {
+    let url = "http://localhost:8003";
     if (typeof window !== "undefined" && (window as any).CHATBOT_CONFIG) {
-      return (window as any).CHATBOT_CONFIG.apiUrl || "http://localhost:8003";
+      url = (window as any).CHATBOT_CONFIG.apiUrl || url;
     }
-    return "http://localhost:8003";
+    // Remove trailing slash to prevent double slashes in API calls
+    return url.replace(/\/$/, '');
   };
 
   // Generic Q&A checker
@@ -439,6 +441,92 @@ export default function ChatWidget() {
     } else if (actionType === "chat" && originalQuery) {
       // Handle suggestion pill clicks - send the suggestion as a message
       void handleSend(originalQuery);
+    }
+  };
+
+  // Handle feedback submission
+  const handleFeedbackSubmit = async (feedbackData: {
+    sessionId: string;
+    feedbackType: 'thumbs_up' | 'thumbs_down';
+    messageId: string;
+    assistantMessage: string;
+    userQuery?: string;
+    reason?: string;
+    pageUrl?: string;
+    conversation: { role: string; content: string; message_id?: string }[];
+  }) => {
+    try {
+      const apiBaseUrl = getApiBaseUrl();
+      const response = await fetch(`${apiBaseUrl}/api/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: feedbackData.sessionId,
+          feedback_type: feedbackData.feedbackType,
+          message_id: feedbackData.messageId,
+          assistant_message: feedbackData.assistantMessage,
+          user_query: feedbackData.userQuery,
+          comment: feedbackData.reason,
+          page_url: feedbackData.pageUrl || currentUrl,
+          conversation: feedbackData.conversation.map(msg => ({
+            role: msg.role,
+            content: msg.content,
+            message_id: msg.message_id
+          }))
+        }),
+      });
+
+      if (!response.ok) {
+        console.error('[Feedback] API error:', response.status);
+      } else {
+        const result = await response.json();
+        console.log('[Feedback] Submitted successfully:', result);
+      }
+    } catch (error) {
+      console.error('[Feedback] Submit error:', error);
+      // Don't throw - feedback failure shouldn't break user experience
+    }
+  };
+
+  // Handle delayed (idle) feedback submission - AWS style
+  const handleDelayedFeedbackSubmit = async (feedbackData: {
+    sessionId: string;
+    feedbackType: 'rating';
+    rating: number;
+    workedWell: string[];
+    comment?: string;
+    pageUrl?: string;
+    conversation: { role: string; content: string; message_id?: string }[];
+  }) => {
+    try {
+      const apiBaseUrl = getApiBaseUrl();
+      const response = await fetch(`${apiBaseUrl}/api/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: feedbackData.sessionId,
+          feedback_type: feedbackData.feedbackType,
+          rating: feedbackData.rating,
+          comment: feedbackData.workedWell.length > 0
+            ? `Worked well: ${feedbackData.workedWell.join(', ')}${feedbackData.comment ? `. Additional: ${feedbackData.comment}` : ''}`
+            : feedbackData.comment,
+          page_url: feedbackData.pageUrl || currentUrl,
+          conversation: feedbackData.conversation.map(msg => ({
+            role: msg.role,
+            content: msg.content,
+            message_id: msg.message_id
+          }))
+        }),
+      });
+
+      if (!response.ok) {
+        console.error('[DelayedFeedback] API error:', response.status);
+      } else {
+        const result = await response.json();
+        console.log('[DelayedFeedback] Submitted successfully:', result);
+      }
+    } catch (error) {
+      console.error('[DelayedFeedback] Submit error:', error);
     }
   };
 
@@ -888,10 +976,14 @@ export default function ChatWidget() {
           )}
 
           {/* Messages Area - Scrollable */}
-          <ChatMessages 
-            messages={messages} 
-            isStreaming={isSending} 
+          <ChatMessages
+            messages={messages}
+            isStreaming={isSending}
             onActionClick={handleActionClick}
+            onFeedbackSubmit={handleFeedbackSubmit}
+            onDelayedFeedbackSubmit={handleDelayedFeedbackSubmit}
+            sessionId={sessionId}
+            pageUrl={currentUrl}
           />
 
           {/* Data Collection UI (if needed) */}

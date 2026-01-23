@@ -230,3 +230,87 @@ class LeadStatsResponse(BaseModel):
                 ]
             }
         }
+
+
+# ============================================================================
+# FEEDBACK MODELS
+# ============================================================================
+
+class ConversationMessageModel(BaseModel):
+    """Model for a single conversation message"""
+    role: str = Field(..., description="Message role: 'user' or 'assistant'")
+    content: str = Field(..., description="Message content")
+    message_id: Optional[str] = Field(None, description="Optional message ID")
+
+
+class FeedbackRequest(BaseModel):
+    """Request model for feedback endpoint"""
+    session_id: str = Field(..., description="Session identifier")
+    feedback_type: str = Field(..., description="Type: 'thumbs_up', 'thumbs_down', 'rating', 'comment'")
+    rating: Optional[int] = Field(None, description="1-5 rating (for rating type)", ge=1, le=5)
+    comment: Optional[str] = Field(None, description="Optional user comment")
+    message_id: Optional[str] = Field(None, description="ID of the message being rated")
+    assistant_message: Optional[str] = Field(None, description="The assistant response that was rated")
+    user_query: Optional[str] = Field(None, description="The user question that triggered the response")
+    page_url: Optional[str] = Field(None, description="Page URL where feedback was given")
+    conversation: Optional[List[ConversationMessageModel]] = Field(None, description="Full conversation history")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user123",
+                "feedback_type": "thumbs_down",
+                "comment": "The response was not accurate",
+                "message_id": "msg_456",
+                "assistant_message": "Market Inside is a platform...",
+                "user_query": "What is Market Inside?",
+                "page_url": "https://marketinsidedata.com/",
+                "conversation": [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "Hi! How can I help?"},
+                    {"role": "user", "content": "What is Market Inside?"},
+                    {"role": "assistant", "content": "Market Inside is a platform..."}
+                ]
+            }
+        }
+
+
+class FeedbackResponse(BaseModel):
+    """Response model for feedback endpoint"""
+    success: bool = Field(..., description="Whether feedback was stored successfully")
+    feedback_id: Optional[int] = Field(None, description="Database ID of the stored feedback")
+    message: str = Field(..., description="Response message")
+    storage: Optional[str] = Field(None, description="Storage type: 'mysql' or 'file'")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "feedback_id": 123,
+                "message": "Thank you for your feedback!",
+                "storage": "mysql"
+            }
+        }
+
+
+class FeedbackStatsResponse(BaseModel):
+    """Response model for feedback stats endpoint"""
+    period_days: int = Field(..., description="Number of days in the stats period")
+    total_feedback: int = Field(..., description="Total feedback entries")
+    by_type: Dict[str, int] = Field(..., description="Feedback count by type")
+    avg_rating: Optional[float] = Field(None, description="Average rating (if ratings exist)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "period_days": 30,
+                "total_feedback": 250,
+                "by_type": {
+                    "thumbs_up": 180,
+                    "thumbs_down": 45,
+                    "rating": 20,
+                    "comment": 5
+                },
+                "avg_rating": 4.2
+            }
+        }

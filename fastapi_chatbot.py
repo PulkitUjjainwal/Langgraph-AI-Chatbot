@@ -99,7 +99,14 @@ from chatbot.models.api_models import (
     RedisStatsResponse,
     LeadCaptureRequest, LeadCaptureResponse,
     LeadSkipRequest, LeadSkipResponse,
-    LeadStatsResponse
+    LeadStatsResponse,
+    FeedbackRequest, FeedbackResponse, FeedbackStatsResponse
+)
+
+# Import Feedback Service
+from chatbot.database.feedback_service import (
+    FeedbackService, FeedbackData, FeedbackType,
+    get_feedback_service, init_feedback_service
 )
 
 # Import Lead Manager
@@ -1943,6 +1950,27 @@ IMPORTANT
         if not isinstance(url, str):
             url = ""
 
+        # Fix HS code URLs missing direction - default to "import"
+        if intent == "hs_code" and url and "/chapter/" in url:
+            # Check if URL is missing import/export direction
+            url_lower = url.lower()
+            if "-import-" not in url_lower and "-export-" not in url_lower:
+                # Extract the last segment (e.g., "argentina-hs-code-83")
+                import re
+                match = re.search(r'/chapter/([^/]+)$', url)
+                if match:
+                    segment = match.group(1)
+                    # Insert "import" before "hs-code"
+                    if "-hs-code-" in segment.lower():
+                        fixed_segment = re.sub(
+                            r'-hs-code-',
+                            '-import-hs-code-',
+                            segment,
+                            flags=re.IGNORECASE
+                        )
+                        url = url.replace(segment, fixed_segment)
+                        print(f"  [INTENT] Fixed HS code URL (added default direction 'import'): {url}")
+
         return {"intent": intent, "confidence": confidence, "url": url}
 
     async def handle_dynamic_api_call(
@@ -2361,9 +2389,11 @@ CONVERSATIONAL RULES:
 [DO] Use conversational language ("you're", "let's", "I'll show you")
 [DO] Provide specific, concrete information from context
 [DO] Format large numbers with K/M/B (e.g., "$1.5M" instead of "$1,500,000")
+[DO] If  a Person asks data specific question and data not avaible then redirect to {Config.SITE_NAME}/data page 
 [DON'T] Use markdown (**, ###, __)
 [DON'T] Use emojis or special symbols
 [DON'T] Add excessive pleasantries or fluff
+
 
 # ### 1. API Products
 # We offer 7 specific APIs. If asked "what APIs do you have?", list these:
@@ -3325,6 +3355,135 @@ async def redis_stats():
             "status": "healthy"
         }
     )
+
+
+# ============================================================================
+# FEEDBACK ENDPOINTS
+# ============================================================================
+
+@router.post("/feedback", response_model=FeedbackResponse)
+async def submit_feedback(request: FeedbackRequest):
+    """
+    Submit user feedback with conversation context.
+
+    Stores feedback and the full conversation history for later analysis.
+    Supports thumbs up/down, ratings, and comments.
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        # Convert conversation messages
+        conversation = None
+        if request.conversation:
+            conversation = [
+                {"role": msg.role, "content": msg.content, "message_id": msg.message_id}
+                for msg in request.conversation
+            ]
+
+        # Create feedback data
+        feedback_data = FeedbackData(
+            session_id=request.session_id,
+            feedback_type=request.feedback_type,
+            rating=request.rating,
+            comment=request.comment,
+            message_id=request.message_id,
+            assistant_message=request.assistant_message,
+            user_query=request.user_query,
+            page_url=request.page_url,
+            conversation=conversation
+        )
+
+        # Store feedback
+        result = await feedback_service.store_feedback(feedback_data)
+
+        if result.get("success"):
+            # Friendly response based on feedback type
+            if request.feedback_type == "thumbs_up":
+                message = "Thanks for the positive feedback! Glad I could help."
+            elif request.feedback_type == "thumbs_down":
+                message = "Thanks for letting us know. We'll use this to improve!"
+            elif request.feedback_type == "rating":
+                message = f"Thank you for rating us {request.rating}/5!"
+            else:
+                message = "Thank you for your feedback!"
+
+            return FeedbackResponse(
+                success=True,
+                feedback_id=result.get("feedback_id"),
+                message=message,
+                storage=result.get("storage")
+            )
+        else:
+            return FeedbackResponse(
+                success=False,
+                feedback_id=None,
+                message="We couldn't save your feedback, but we appreciate it!",
+                storage=None
+            )
+
+    except Exception as e:
+        print(f"[Feedback] Error: {e}")
+        # Don't fail the request - feedback is non-critical
+        return FeedbackResponse(
+            success=False,
+            feedback_id=None,
+            message="Thanks for the feedback!",
+            storage=None
+        )
+
+
+@router.get("/feedback/stats", response_model=FeedbackStatsResponse)
+async def get_feedback_stats(days: int = 30):
+    """
+    Get feedback statistics for analysis.
+
+    Returns aggregated feedback data for the specified period.
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        stats = await feedback_service.get_feedback_stats(days=days)
+
+        if "error" in stats:
+            raise HTTPException(status_code=503, detail=stats["error"])
+
+        return FeedbackStatsResponse(
+            period_days=stats.get("period_days", days),
+            total_feedback=stats.get("total_feedback", 0),
+            by_type=stats.get("by_type", {}),
+            avg_rating=stats.get("avg_rating")
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Feedback] Stats error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get feedback stats")
+
+
+@router.get("/feedback/negative")
+async def get_negative_feedback(limit: int = 50):
+    """
+    Get recent negative feedback with conversation context for analysis.
+
+    Useful for identifying problematic responses and improving the chatbot.
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        feedbacks = await feedback_service.get_negative_feedback(limit=limit)
+
+        return JSONResponse(content={
+            "count": len(feedbacks),
+            "feedbacks": feedbacks
+        })
+
+    except Exception as e:
+        print(f"[Feedback] Get negative error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get negative feedback")
 
 
 @app.get("/")
