@@ -9,10 +9,12 @@ export type ChatMessage = {
   role: "assistant" | "user";
   text: string;
   actions?: {
-    type: "schedule_demo" | "whatsapp" | "call" | "hubspot_chat" | "chat" | "refresh";
+    type: "schedule_demo" | "whatsapp" | "call" | "hubspot_chat" | "chat_with_us" | "chat" | "refresh" | "continue_chat";
     label: string;
   }[];
   suggestions?: string[]; // For pill buttons from init
+  exploreUrl?: string; // Dynamic explore URL for data queries
+  isCreditExhausted?: boolean; // Marks credit exhaustion messages
 };
 
 type SlotValues = Record<string, string>;
@@ -57,6 +59,11 @@ type QuestionCard = {
 };
 
 const SESSION_STORAGE_KEY = "chat_session_id";
+const INITIAL_QUESTIONS = [
+  Object.keys(genericQA)[0],
+  Object.keys(genericQA)[1],
+  "I want to learn about your data"
+];
 
 function createSessionId(): string {
   if (
@@ -108,9 +115,7 @@ export default function ChatWidget() {
   const [isInitializing, setIsInitializing] = useState(false);
 
   // Initialize with generic questions from JSON
-  const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>(() => {
-    return Object.keys(genericQA);
-  });
+ const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>(INITIAL_QUESTIONS);
 
   // Lead capture state (keeping logic for future use)
   const [_showLeadForm, setShowLeadForm] = useState(false);
@@ -125,6 +130,10 @@ export default function ChatWidget() {
   const [leadCaptured, setLeadCaptured] = useState(false);
   // Suppress unused warnings
   void _showLeadForm; void _leadPrompt; void _leadFormError; void _isSubmittingLead;
+
+  // Credit exhaustion state
+  const [_creditExhausted, setCreditExhausted] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
 
   // Refs
   const currentUrlRef = useRef<string>("");
@@ -154,11 +163,41 @@ export default function ChatWidget() {
 
   // Track current URL for init calls
   useEffect(() => {
-    if (typeof window === "undefined") return;
+  if (typeof window === "undefined") return;
+
+  const updateUrl = () => {
     const url = window.location.href;
     currentUrlRef.current = url;
     setCurrentUrl(url);
-  }, []);
+  };
+
+  // Run once
+  updateUrl();
+
+  // Listen to navigation
+  window.addEventListener("popstate", updateUrl);
+
+  // Patch pushState / replaceState (important for SPAs)
+  const pushState = history.pushState;
+  const replaceState = history.replaceState;
+
+  history.pushState = function (...args) {
+    pushState.apply(this, args as any);
+    updateUrl();
+  };
+
+  history.replaceState = function (...args) {
+    replaceState.apply(this, args as any);
+    updateUrl();
+  };
+
+  return () => {
+    window.removeEventListener("popstate", updateUrl);
+    history.pushState = pushState;
+    history.replaceState = replaceState;
+  };
+}, []);
+
 
   // Show initial welcome message
   useEffect(() => {
@@ -185,6 +224,58 @@ export default function ChatWidget() {
       // ]);
     }
   }, [open, messages.length, sessionId]);
+
+  // Load chat history on mount (for page refresh recovery)
+  useEffect(() => {
+    if (!sessionId || historyLoaded) return;
+
+    const loadHistory = async () => {
+      try {
+        const apiBaseUrl = getApiBaseUrl();
+        const resp = await fetch(`${apiBaseUrl}/api/history/${sessionId}`);
+
+        if (resp.ok) {
+          const data = await resp.json();
+
+          if (data.messages && data.messages.length > 0) {
+            console.log('[History] Loaded', data.messages.length, 'messages');
+
+            const loadedMessages: ChatMessage[] = data.messages.map((m: any, idx: number) => ({
+              id: m.message_id || `history-${idx}`,
+              role: m.role as "user" | "assistant",
+              text: m.content,
+              exploreUrl: m.explore_url || undefined
+            }));
+
+            setMessages(loadedMessages);
+
+            // Also restore suggested questions if available
+            if (data.suggested_questions && data.suggested_questions.length > 0) {
+              setSuggestedQuestions(data.suggested_questions);
+            }
+          }
+
+          setHistoryLoaded(true);
+        }
+      } catch (error) {
+        console.error('[History] Failed to load:', error);
+        setHistoryLoaded(true);
+      }
+    };
+
+    loadHistory();
+  }, [sessionId, historyLoaded]);
+
+
+// const lastInitUrlRef = useRef<string>("");
+
+// useEffect(() => {
+//   if (!currentUrl) return;
+//   if (lastInitUrlRef.current === currentUrl) return;
+
+//   lastInitUrlRef.current = currentUrl;
+//   _initializeSession();
+// }, [currentUrl]);
 
   const {
     dataTypeButtonOptions,
@@ -366,6 +457,8 @@ export default function ChatWidget() {
         const data = await resp.json();
         console.log("Init response:", data);
 
+        setSuggestedQuestions(data.suggested_questions);
+
         if (data.suggested_questions && Array.isArray(data.suggested_questions)) {
           // Add assistant message with data info and pill buttons
           const assistantMsg: ChatMessage = {
@@ -425,6 +518,30 @@ export default function ChatWidget() {
     window.open(whatsappUrl, "_blank");
   };
 
+  // Handle continue chat after credit exhaustion
+  const handleContinueChat = async () => {
+    try {
+      const apiBaseUrl = getApiBaseUrl();
+      const resp = await fetch(`${apiBaseUrl}/api/continue-chat?session_id=${sessionId}`, {
+        method: 'POST'
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        setCreditExhausted(false);
+
+        // Add confirmation message
+        setMessages(prev => [...prev, {
+          id: `continue-${Date.now()}`,
+          role: 'assistant',
+          text: data.message || "I'm happy to continue helping you explore our trade data. What would you like to know?"
+        }]);
+      }
+    } catch (error) {
+      console.error('[ContinueChat] Error:', error);
+    }
+  };
+
   // Handle action button clicks
   const handleActionClick = (actionType: string, originalQuery?: string) => {
     if (actionType === "schedule_demo") {
@@ -433,7 +550,8 @@ export default function ChatWidget() {
       openWhatsApp();
     } else if (actionType === "call") {
       window.location.href = "tel:+4407727449124";
-    } else if (actionType === "hubspot_chat") {
+    } else if (actionType === "hubspot_chat" || actionType === "chat_with_us") {
+      // Open HubSpot chat widget
       window.open("https://app.hubspot.com/conversations-visitor/9059358/threads/utk/dd546325ff584de3b88068384373b5da?uuid=1ec6282844ac45a3aa07de865ae89692&mobile=false&mobileSafari=false&hideWelcomeMessage=false&hstc=261214162.419090d5d718c9aa1f7487e0db51436b.1762762601861.1768825743931.1768908425649.23&domain=marketinsidedata.com&inApp53=false&messagesUtk=dd546325ff584de3b88068384373b5da&url=https%3A%2F%2Fwww.marketinsidedata.com%2F&inline=false&isFullscreen=false&globalCookieOptOut=&isFirstVisitorSession=false&isAttachmentDisabled=false&isInitialInputFocusDisabled=false&enableWidgetCookieBanner=false&isInCMS=false&hideScrollToButton=true&isIOSMobile=false&hubspotUtk=419090d5d718c9aa1f7487e0db51436b", "_blank");
     } else if (actionType === "refresh") {
       // Call init API to show suggested questions
@@ -441,6 +559,9 @@ export default function ChatWidget() {
     } else if (actionType === "chat" && originalQuery) {
       // Handle suggestion pill clicks - send the suggestion as a message
       void handleSend(originalQuery);
+    } else if (actionType === "continue_chat") {
+      // Handle continue chat after credit exhaustion
+      void handleContinueChat();
     }
   };
 
@@ -686,18 +807,76 @@ export default function ChatWidget() {
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          console.log('[SSE] Stream done, breaking');
+          break;
+        }
 
         const chunk = decoder.decode(value, { stream: true });
+        console.log('[SSE] Raw chunk received:', chunk.substring(0, 200));
+
         const lines = chunk.split("\n");
+        console.log('[SSE] Split into', lines.length, 'lines');
 
         for (const line of lines) {
+          // Debug: log all SSE lines
+          if (line.trim()) {
+            console.log('[SSE] Line:', line.substring(0, 100));
+          }
+
           if (line.startsWith("data: ")) {
             try {
-              const data = JSON.parse(line.slice(6));
+              const jsonStr = line.slice(6);
+              console.log('[SSE] Parsing JSON:', jsonStr.substring(0, 100));
+              const data = JSON.parse(jsonStr);
 
               if (data.error) {
                 throw new Error(data.error);
+              }
+
+              // Handle credit exhaustion
+              if (data.credit_exhausted) {
+                console.log('[Stream] Credit exhausted - data:', data);
+                setCreditExhausted(true);
+
+                // Build actions for credit exhaustion
+                const actions: ChatMessage["actions"] = (data.actions || []).map((a: any) => ({
+                  type: a.type as any,
+                  label: a.label
+                }));
+
+                console.log('[Stream] Built actions:', actions);
+                console.log('[Stream] Message text:', data.message);
+
+                setMessages((prev) => {
+                  const updated = prev.map((m) =>
+                    m.id === assistantMsgId ? {
+                      ...m,
+                      text: data.message || "Ready to unlock more insights?",
+                      actions,
+                      isCreditExhausted: true
+                    } : m
+                  );
+                  console.log('[Stream] Updated messages:', updated.filter(m => m.id === assistantMsgId));
+                  return updated;
+                });
+                return data.message;
+              }
+
+              // Handle clarifying question
+              if (data.clarifying_question) {
+                console.log('[Stream] Clarifying question:', data.question);
+
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantMsgId ? {
+                      ...m,
+                      text: data.question,
+                      suggestions: data.suggestions || []
+                    } : m
+                  )
+                );
+                return data.question;
               }
 
               if (data.chunk) {
@@ -711,6 +890,16 @@ export default function ChatWidget() {
 
               if (data.done) {
                 console.log(`Streaming complete in ${data.processing_time?.toFixed(2)}s`);
+
+                // Handle explore URL if present
+                if (data.explore_url) {
+                  console.log('[Stream] Explore URL:', data.explore_url);
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === assistantMsgId ? { ...m, exploreUrl: data.explore_url } : m
+                    )
+                  );
+                }
               }
             } catch (parseError) {}
           }
@@ -759,7 +948,7 @@ export default function ChatWidget() {
           ...prev,
           { id: assistantId, role: "assistant" as const, text: "" },
         ]);
-        console.log('[handleSend] Added loader message, calling init');
+        console.log('[handleSend] Added loader message, calling f');
         // Call init and update the message
         await callInitAndShowQuestions(assistantId);
         setIsSending(false);
@@ -799,8 +988,8 @@ export default function ChatWidget() {
       checkLeadPrompt(text, currentMessageCount);
       
       // After API response, restore suggested questions
-      const genericQuestions = Object.keys(genericQA).slice(0, 3);
-      setSuggestedQuestions(genericQuestions);
+      // const genericQuestions = Object.keys(genericQA).slice(0, 3);
+      // setSuggestedQuestions(genericQuestions);
     } catch (err) {
       console.error("Chat error:", err);
       setMessages((prev) =>
@@ -823,6 +1012,82 @@ export default function ChatWidget() {
   const dismissTooltip = () => {
     setShowTooltip(false);
     setTooltipDismissed(true);
+  };
+
+  // Options menu state
+  const [showOptionsMenu, setShowOptionsMenu] = useState(false);
+
+  const handleOpenOptionsMenu = () => {
+    console.log('[ChatWidget] Opening options menu');
+    setShowOptionsMenu(true);
+  };
+
+  const handleCloseOptionsMenu = () => {
+    setShowOptionsMenu(false);
+  };
+
+  const handleChatWithUs = () => {
+    console.log('[ChatWidget] Chat with us clicked');
+    if ((window as any).HubSpotConversations) {
+      (window as any).HubSpotConversations.widget.open();
+    } else {
+      // Fallback: open HubSpot chat page directly
+      window.open("https://app.hubspot.com/conversations-visitor/9059358/threads/utk/dd546325ff584de3b88068384373b5da", "_blank");
+    }
+    setShowOptionsMenu(false);
+  };
+
+  const handleCallUs = () => {
+    console.log('[ChatWidget] Call us clicked');
+    window.location.href = "tel:+4407727449124";
+    setShowOptionsMenu(false);
+  };
+
+  const handleWhatsAppUs = () => {
+    console.log('[ChatWidget] WhatsApp clicked');
+    window.open("https://wa.me/4407727449124", "_blank");
+    setShowOptionsMenu(false);
+  };
+
+  // Reset conversation - clear messages and create new session
+  const handleResetConversation = async () => {
+    console.log('[ChatWidget] Reset conversation clicked');
+
+    // Call backend to reset session
+    const oldSessionId = sessionIdRef.current;
+    if (oldSessionId) {
+      try {
+        const apiBaseUrl = getApiBaseUrl();
+        await fetch(`${apiBaseUrl}/api/reset`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: oldSessionId }),
+        });
+        console.log('[ChatWidget] Backend session reset successful');
+      } catch (error) {
+        console.error('[ChatWidget] Failed to reset backend session:', error);
+        // Continue with frontend reset even if backend fails
+      }
+    }
+
+    // Clear messages
+    setMessages([]);
+    // Create new session
+    const newSessionId = createSessionId();
+    sessionIdRef.current = newSessionId;
+    setSessionId(newSessionId);
+    try {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, newSessionId);
+    } catch {}
+    // Reset suggested questions to initial
+    setSuggestedQuestions(INITIAL_QUESTIONS);
+    // Clear any collecting state
+    setSuggestionsState(null);
+    // Reset lead capture state
+    setLeadCaptured(false);
+    setLeadFormData({ email: "", phone: "", company_name: "" });
+    // Close options menu
+    setShowOptionsMenu(false);
   };
 
   return (
@@ -1085,7 +1350,7 @@ export default function ChatWidget() {
               )}
             </div>
           )}
-           <ChatFooter onSend={handleSend} isSending={isSending} position="bottom" />
+           <ChatFooter onSend={handleSend} isSending={isSending} position="bottom" onOpenOptionsMenu={handleOpenOptionsMenu} />
 
           {/* Disclaimer at bottom - AWS Style */}
           <div className="px-4 py-2 bg-white border-t border-gray-100">
@@ -1094,6 +1359,111 @@ export default function ChatWidget() {
               <a href="#" className="text-orange-600 hover:underline">disclaimer</a>.
             </p>
           </div>
+
+          {/* Options Menu Overlay */}
+          {showOptionsMenu && (
+            <div
+              className="fixed bottom-24 right-5 z-[2147483648] flex items-end justify-center rounded-2xl overflow-hidden"
+              style={{
+                width: '380px',
+                height: '580px',
+              }}
+            >
+              {/* Backdrop */}
+              <div
+                className="absolute inset-0 bg-black/30 rounded-2xl"
+                onClick={handleCloseOptionsMenu}
+              />
+              {/* Menu Panel */}
+              <div
+                className="relative w-full bg-white rounded-t-2xl shadow-xl"
+                style={{
+                  animation: 'slideUp 0.3s ease-out forwards'
+                }}
+              >
+                <div className="p-4">
+                  {/* Handle bar */}
+                  <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mb-4" />
+
+                  {/* Menu Title */}
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3 px-2">Support Options</h3>
+
+                  {/* Menu Items */}
+                  <div className="space-y-1">
+                    <button
+                      onClick={handleChatWithUs}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 rounded-xl transition-colors"
+                    >
+                      <div className="flex items-center justify-center w-10 h-10 rounded-full bg-orange-100">
+                        <svg className="h-5 w-5 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                        </svg>
+                      </div>
+                      <div className="text-left">
+                        <p className="font-medium">Chat with us</p>
+                        <p className="text-xs text-gray-500">Talk to our support team</p>
+                      </div>
+                    </button>
+
+                    <button
+                      onClick={handleCallUs}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 rounded-xl transition-colors"
+                    >
+                      <div className="flex items-center justify-center w-10 h-10 rounded-full bg-green-100">
+                        <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                        </svg>
+                      </div>
+                      <div className="text-left">
+                        <p className="font-medium">Call Us</p>
+                        <p className="text-xs text-gray-500">+44 07727 449124</p>
+                      </div>
+                    </button>
+
+                    <button
+                      onClick={handleWhatsAppUs}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 rounded-xl transition-colors"
+                    >
+                      <div className="flex items-center justify-center w-10 h-10 rounded-full bg-green-100">
+                        <svg className="h-5 w-5 text-green-600" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+                        </svg>
+                      </div>
+                      <div className="text-left">
+                        <p className="font-medium">WhatsApp Us</p>
+                        <p className="text-xs text-gray-500">Message us on WhatsApp</p>
+                      </div>
+                    </button>
+
+                    <div className="border-t border-gray-100 my-2" />
+
+                    <button
+                      onClick={handleResetConversation}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-red-50 rounded-xl transition-colors"
+                    >
+                      <div className="flex items-center justify-center w-10 h-10 rounded-full bg-red-100">
+                        <svg className="h-5 w-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                      </div>
+                      <div className="text-left">
+                        <p className="font-medium">Reset Conversation</p>
+                        <p className="text-xs text-gray-500">Start a new chat session</p>
+                      </div>
+                    </button>
+                  </div>
+
+                  {/* Cancel Button */}
+                  <button
+                    onClick={handleCloseOptionsMenu}
+                    className="w-full mt-3 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </>

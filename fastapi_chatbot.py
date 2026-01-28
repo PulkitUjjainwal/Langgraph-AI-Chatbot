@@ -112,6 +112,14 @@ from chatbot.database.feedback_service import (
 # Import Lead Manager
 from lead_manager import LeadManager, get_lead_form_config
 
+# Import Credit and Slot Managers
+from chatbot.services.credit_manager import CreditManager, get_credit_manager, init_credit_manager
+from chatbot.services.slot_manager import SlotManager, get_slot_manager, init_slot_manager
+from chatbot.models.credit_models import (
+    CreditState, CreditDeductionResult, CreditExhaustionResponse,
+    ContinueChatRequest, ContinueChatResponse
+)
+
 # Import modular utility functions
 from chatbot.utils import (
     classify_query_type,
@@ -129,8 +137,10 @@ from chatbot.services.retrieval.hybrid_retriever import HybridRetriever as Modul
 from chatbot.services.retrieval.dynamic_content import DynamicContentManager
 
 from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
 from pydantic import BaseModel, Field
 import asyncio
 from contextlib import asynccontextmanager
@@ -845,6 +855,21 @@ def detect_query_type_simple(query: str) -> str:
     query_lower = query.lower()
     word_count = len(query.split())
 
+    # DATA QUERIES: Even if short, treat as standard if they contain trade-specific terms
+    # These queries need full context processing, not brief answers
+    data_indicators = [
+        'hs code', 'hs ', 'hscode', 'import', 'export', 'buyer', 'supplier',
+        'shipment', 'trade', 'turnover', 'country', 'company', 'market',
+        # Common country names
+        'argentina', 'brazil', 'india', 'china', 'usa', 'mexico', 'germany',
+        'japan', 'korea', 'indonesia', 'vietnam', 'thailand', 'philippines',
+        'uk', 'france', 'italy', 'spain', 'canada', 'australia', 'russia',
+    ]
+
+    if any(indicator in query_lower for indicator in data_indicators):
+        # This is a data query - treat as standard even if short
+        return 'standard'
+
     # SIMPLE: Short queries, yes/no, general "about" questions (< 8 words)
     simple_patterns = [
         'do you have', 'can you', 'is there', 'are there',
@@ -916,6 +941,18 @@ def create_chatbot_node():
         """
         query_lower = query.lower()
         word_count = len(query.split())
+
+        # DATA QUERIES: Even if short, treat as standard if they contain trade-specific terms
+        data_indicators = [
+            'hs code', 'hs ', 'hscode', 'import', 'export', 'buyer', 'supplier',
+            'shipment', 'trade', 'turnover', 'country', 'company', 'market',
+            'argentina', 'brazil', 'india', 'china', 'usa', 'mexico', 'germany',
+            'japan', 'korea', 'indonesia', 'vietnam', 'thailand', 'philippines',
+            'uk', 'france', 'italy', 'spain', 'canada', 'australia', 'russia',
+        ]
+
+        if any(indicator in query_lower for indicator in data_indicators):
+            return 'standard'
 
         # SIMPLE: Short queries, yes/no, general "about" questions (< 8 words)
         simple_patterns = [
@@ -1310,6 +1347,7 @@ class ChatbotManager:
         self.sessions: Dict[str, Dict[str, Any]] = {}
         self._stream_history: Dict[str, List[Dict[str, str]]] = {}  # Conversation history for streaming
         self._stream_context: Dict[str, str] = {}  # Last dynamic content for follow-up questions
+        self._last_explore_url: str = ""  # Last explore URL generated for streaming
         self.app = self._create_workflow()
         print("[OK] Chatbot Manager initialized (Redis-backed)")
 
@@ -1688,11 +1726,51 @@ class ChatbotManager:
         self._intent_llm = ChatOllama(**llm_kwargs)
         return self._intent_llm
 
+    def _check_greeting_or_general(self, query: str) -> Optional[Dict[str, Any]]:
+        """
+        Quick check for greeting/general intents without calling LLM.
+        Returns result dict if matched, None otherwise.
+        """
+        query_lower = query.lower().strip()
+
+        # Greeting patterns
+        greeting_patterns = [
+            "hello", "hi", "hey", "hi there", "hello there",
+            "good morning", "good afternoon", "good evening",
+            "thanks", "thank you", "thx", "bye", "goodbye",
+            "see you", "later", "cheers"
+        ]
+
+        for pattern in greeting_patterns:
+            if query_lower == pattern or query_lower.startswith(pattern + " "):
+                return {
+                    "intent": "greeting",
+                    "confidence": 1.0,
+                    "params": {},
+                    "url": ""
+                }
+
+        # Very short queries that are likely greetings
+        if len(query_lower) < 4 and query_lower in ["hi", "hey", "yo"]:
+            return {
+                "intent": "greeting",
+                "confidence": 1.0,
+                "params": {},
+                "url": ""
+            }
+
+        return None
+
     async def _detect_intent_and_entities(self, query: str) -> Dict[str, Any]:
         """
         LLM-based intent + entity extractor.
-        Returns dict: {intent, confidence, params}.
+        Returns dict: {intent, confidence, params, missing_params, clarifying_question, url}.
         """
+        # First check for greeting/general intents (no LLM needed)
+        greeting_result = self._check_greeting_or_general(query)
+        if greeting_result:
+            return greeting_result
+
         system = """You are an intent-to-URL generator for a trade data application.
 
 You must output ONLY valid JSON.
@@ -1701,33 +1779,32 @@ No explanations. No markdown. No extra text.
 Your job:
 - Understand the user query
 - Decide the correct intent
+- Extract parameters from the query
 - Generate the EXACT final URL based on rules below
 
 ────────────────────────
-INTENTS (ONLY FOUR)
+INTENTS (SEVEN TOTAL)
 ────────────────────────
 
 Choose exactly ONE intent:
 
 1. search_trade_data
-   → User wants trade-related records only when product, hscode ,importer or exporter with direction import, export is specified such as:
-     - Trade data (import/export)
-     - Importers
-     - Exporters
-     - Suppliers
-     - Buyers
+   → User wants SPECIFIC trade records for a product, hs_code, or named entity:
+     - "top importers of [PRODUCT]" (e.g., "top importers of coal", "oil importers")
+     - "top exporters of [PRODUCT]" (e.g., "steel exporters", "rice exporters")
+     - "[PRODUCT] suppliers" or "[PRODUCT] buyers"
+     - Trade data filtered by product or hs_code
+   → IMPORTANT: If user mentions a PRODUCT (coal, oil, steel, rice, etc.), use search_trade_data
    → Output a /search-data/... URL
 
 2. search_country_data
-   → User wants high-level country overview data such as:
-     - What a country exports or imports
-     - Top commodities
-     - HS chapters
-     - Trade partners
-     - Ports
-     - Top Exporters (summary)
-     - Top Importers (summary)
-     - Shipment overview (summary only)
+   → User wants HIGH-LEVEL country overview (NO specific product):
+     - "What does [country] import/export?" (general overview)
+     - "Top commodities of [country]"
+     - "Trade partners of [country]"
+     - "Top importers in [country]" (general, no product specified)
+     - "Ports in [country]"
+   → IMPORTANT: Only use if NO specific product is mentioned
    → Output a /country/... URL
 
 3. country_to_country
@@ -1747,6 +1824,22 @@ Choose exactly ONE intent:
      - "Show HS code 8471 data for USA"
      - "Belgium's heading 2710 exports"
    → Output a /chapter/... URL
+
+5. general
+   → User asks general questions about the platform, pricing, features
+   → Questions about "what is Market Inside", "how does it work", "pricing"
+   → No URL needed
+   → Output url = ""
+
+6. greeting
+   → User says hello, hi, thanks, goodbye
+   → Simple greetings or pleasantries
+   → Output url = ""
+
+7. out_of_scope
+   → User asks about non-trade topics
+   → Questions completely unrelated to trade data
+   → Output url = ""
 
 If unclear, set intent = "unknown" and url = "".
 
@@ -1772,36 +1865,35 @@ INTENT: search_trade_data
 Base URL:
 https://www.marketinsidedata.com/en/search-data/
 
-Entity → Endpoint mapping:
-- trade     → trade
-- importer  → importer
-- exporter  → exporter
-- supplier  → suppliers
-- buyer     → buyers
+Entity → entity_type param mapping:
+- "importers", "top importers" → entity_type: "importer"
+- "exporters", "top exporters" → entity_type: "exporter"
+- "suppliers" → entity_type: "suppliers"
+- "buyers" → entity_type: "buyers"
+- "trade data", general → entity_type: "trade"
 
-Direction → type mapping (SMART SELECTION):
-- import → "import" (system automatically selects detailed_import if available, else mirror_import)
-- export → "export" (system automatically selects detailed_export if available, else mirror_export)
+IMPORTANT: Extract entity_type when user mentions importers/exporters/suppliers/buyers
 
-IMPORTANT: Always use "import" or "export" (not "mirror_import" or "mirror_export")
-The backend will intelligently choose the best available data type for each country.
+Direction mapping:
+- import → "import"
+- export → "export"
 
 URL rules:
-- country is REQUIRED
-- At least ONE of the following MUST be present: product, hs_code, importer, exporter, origin_country, destination_country
-- If NONE of these are present, use search_country_data intent instead (e.g., /country/{country}/imports)
-- Do NOT include both product AND hs_code unless user explicitly asks
-- If direction is missing, do NOT generate URL (url = "")
+- country is REQUIRED (ask if missing)
+- At least ONE of: product, hs_code MUST be present for search_trade_data
+- If NO product/hs_code, use search_country_data instead
+- Default direction to "import" if not specified
 
-Examples of when to use search_trade_data vs search_country_data:
+CRITICAL EXAMPLES - Use search_trade_data when PRODUCT is mentioned:
 
-CORRECT - Use search_trade_data (has product):
-- "top oil importers in Indonesia" → .../importer?type=import&country=indonesia&product=oil
-- "steel exporters in Germany" → .../exporter?type=export&country=germany&product=steel
+"top importers of coal" → params: {product: "coal", entity_type: "importer", direction: "import"}
+"top coal importers in India" → params: {country: "india", product: "coal", entity_type: "importer", direction: "import"}
+"steel exporters" → params: {product: "steel", entity_type: "exporter", direction: "export"}
+"oil suppliers in China" → params: {country: "china", product: "oil", entity_type: "suppliers", direction: "import"}
 
-INCORRECT - Use search_country_data (no product):
-- "top importers in Indonesia" → .../country/indonesia/imports (NOT search-data!)
-- "all exporters in Albania" → .../country/albania/exports (NOT search-data!)
+Use search_country_data when NO product (general overview):
+"top importers in Indonesia" → intent: search_country_data (no product!)
+"what does India export?" → intent: search_country_data (general overview)
 
 URL formats:
 
@@ -1836,7 +1928,9 @@ Rules:
 - country is REQUIRED
 - No product
 - No hs_code
-- direction decides imports or exports
+- direction is OPTIONAL (defaults to "import" if not specified)
+
+IMPORTANT: If user doesn't specify import/export, default to "import"
 
 URL formats:
 https://www.marketinsidedata.com/en/country/{country}/imports
@@ -1883,8 +1977,8 @@ https://www.marketinsidedata.com/en/chapter/
 
 Rules:
 - country is REQUIRED
-- direction is REQUIRED (import or export)
 - hs_code is REQUIRED (2, 4, 6, or 8+ digits)
+- direction is OPTIONAL (defaults to "import" if not specified)
 - No product
 - Country names must be lowercase
 
@@ -1897,11 +1991,13 @@ HS Code Levels:
 - 6 digits = Subheading (e.g., 010121)
 - 8+ digits = Full HS Code (e.g., 84713020)
 
+IMPORTANT: If user doesn't specify import/export, default to "import"
+
 Examples:
 https://www.marketinsidedata.com/en/chapter/india-import-hs-code-01
 https://www.marketinsidedata.com/en/chapter/usa-export-hs-code-8471
 https://www.marketinsidedata.com/en/chapter/belgium-import-hs-code-271012
-https://www.marketinsidedata.com/en/chapter/germany-export-hs-code-84713020
+https://www.marketinsidedata.com/en/chapter/afghanistan-import-hs-code-83
 
 ────────────────────────
 FINAL OUTPUT FORMAT
@@ -1910,17 +2006,35 @@ FINAL OUTPUT FORMAT
 {
   "intent": "",
   "confidence": 0.0,
+  "params": {
+    "country": "",
+    "direction": "",
+    "product": "",
+    "hs_code": "",
+    "origin_country": "",
+    "destination_country": "",
+    "entity_type": ""
+  },
   "url": ""
 }
+
+entity_type values (for search_trade_data only):
+- "importer" → user asks about importers (e.g., "top importers of coal")
+- "exporter" → user asks about exporters (e.g., "steel exporters")
+- "suppliers" → user asks about suppliers
+- "buyers" → user asks about buyers
+- "trade" → general trade data (default if not specified)
 
 ────────────────────────
 IMPORTANT
 ────────────────────────
 
 - Output JSON only
-- Do NOT add params
+- ALWAYS include "params" object with extracted values (empty string if not found)
 - Do NOT add explanations
-- If required fields are missing, return url = ""
+- Extract all params you can find, even if some are missing
+- If direction is not specified, set direction to "import" in params (most common use case)
+- Generate URL when you have the core required fields (country + hs_code for hs_code intent, etc.)
         """
         parsed: Optional[Dict[str, Any]] = None
         try:
@@ -1934,10 +2048,14 @@ IMPORTANT
             parsed = None
 
         if not isinstance(parsed, dict):
-            return {"intent": "unknown", "confidence": 0.0, "url": {}}
+            return {"intent": "unknown", "confidence": 0.0, "params": {}, "url": ""}
 
         intent = parsed.get("intent", "unknown")
-        if intent not in ("search_country_data", "search_trade_data", "country_to_country", "hs_code", "unknown"):
+        valid_intents = (
+            "search_country_data", "search_trade_data", "country_to_country",
+            "hs_code", "general", "greeting", "out_of_scope", "unknown"
+        )
+        if intent not in valid_intents:
             intent = "unknown"
 
         try:
@@ -1945,6 +2063,14 @@ IMPORTANT
         except Exception:
             confidence = 0.0
         confidence = max(0.0, min(1.0, confidence))
+
+        # Extract params from LLM response
+        params = parsed.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
+
+        # Clean up params - remove empty strings
+        params = {k: v for k, v in params.items() if v and isinstance(v, str) and v.strip()}
 
         url = parsed.get("url", "")
         if not isinstance(url, str):
@@ -1971,7 +2097,9 @@ IMPORTANT
                         url = url.replace(segment, fixed_segment)
                         print(f"  [INTENT] Fixed HS code URL (added default direction 'import'): {url}")
 
-        return {"intent": intent, "confidence": confidence, "url": url}
+        print(f"  [INTENT] Detected: intent={intent}, confidence={confidence:.2f}, params={params}")
+
+        return {"intent": intent, "confidence": confidence, "params": params, "url": url}
 
     async def handle_dynamic_api_call(
         self,
@@ -2260,19 +2388,190 @@ IMPORTANT
         """
         Stream chat response - yields chunks as they're generated by the LLM.
 
-        This is a simplified streaming version that:
-        1. Gets context (KB + dynamic content)
-        2. Includes conversation history for context
-        3. Streams LLM response directly (bypasses full workflow for speed)
+        Enhanced with:
+        1. Credit checking (deduct credits, handle exhaustion)
+        2. Slot collection (gather missing parameters)
+        3. Message persistence (save to Redis)
+        4. Dynamic URL generation
 
         Yields:
-            str: Chunks of the response text
+            str: Chunks of the response text (JSON SSE format)
         """
         start_time = time.time()
         print(f"\n{'='*70}")
         print(f"[STREAM] Session: {session_id}")
         print(f"[STREAM] Query: {message[:100]}...")
         print(f"{'='*70}")
+
+        # Get credit and slot managers
+        from chatbot.services.credit_manager import get_credit_manager
+        from chatbot.services.slot_manager import get_slot_manager
+
+        credit_mgr = get_credit_manager(self.redis)
+        slot_mgr = get_slot_manager(self.redis)
+
+        # ========================================================================
+        # STEP 0: Check if this is an answer to a clarifying question
+        # ========================================================================
+        prev_state = slot_mgr.get_slots(session_id)
+        pending_slot = prev_state.last_asked_slot
+        prev_intent = prev_state.intent
+
+        # If we asked for a slot and user gives a short answer, treat it as slot fill
+        is_slot_answer = False
+        if pending_slot and prev_intent:
+            # Short messages (1-3 words) are likely answers to clarifying questions
+            word_count = len(message.strip().split())
+            if word_count <= 3:
+                is_slot_answer = True
+                print(f"  [STREAM] Detected slot answer: '{message}' for slot '{pending_slot}' (intent: {prev_intent})")
+
+        # ========================================================================
+        # STEP 1: Detect intent and extract params
+        # ========================================================================
+        # Track the query to send to LLM (may differ from raw message for slot answers)
+        llm_query = message
+
+        if is_slot_answer:
+            # Use previous intent and fill the pending slot
+            intent = prev_intent
+            params = {pending_slot: message.strip()}
+            intent_url = ""
+
+            # Reconstruct a proper query for the LLM based on intent and filled slots
+            # This prevents sending just "USA" to the LLM
+            prev_slots = prev_state.slots
+            if intent == "hs_code":
+                hs_code = prev_slots.get("hs_code", "")
+                direction = prev_slots.get("direction", "import")
+                llm_query = f"Show me HS code {hs_code} {direction} data for {message.strip()}"
+            elif intent == "search_country_data":
+                direction = prev_slots.get("direction", "import")
+                llm_query = f"Show me {direction} data for {message.strip()}"
+            elif intent == "search_trade_data":
+                product = prev_slots.get("product", "").replace("%20", " ")
+                entity_type = prev_slots.get("entity_type", "trade")
+                # Handle pluralization - don't add 's' if already ends with 's'
+                entity_label = entity_type if entity_type.endswith("s") else f"{entity_type}s"
+                if product and product != "my product":
+                    llm_query = f"Show me {product} {entity_label} in {message.strip()}"
+                else:
+                    llm_query = f"Show me {entity_label} in {message.strip()}"
+            elif intent == "country_to_country":
+                origin = prev_slots.get("origin_country", "")
+                destination = prev_slots.get("destination_country", "")
+                if pending_slot == "origin_country":
+                    llm_query = f"Show me exports from {message.strip()} to {destination}"
+                else:
+                    llm_query = f"Show me exports from {origin} to {message.strip()}"
+
+            print(f"  [STREAM] Using previous intent '{intent}' with slot fill: {params}")
+            print(f"  [STREAM] Reconstructed LLM query: '{llm_query}'")
+        else:
+            # Normal intent detection
+            intent_result = await self._detect_intent_and_entities(message)
+            intent = intent_result.get("intent", "unknown")
+            params = intent_result.get("params", {})
+            intent_url = intent_result.get("url", "")
+
+        print(f"  [STREAM] Intent: {intent}, Params: {params}")
+
+        # ========================================================================
+        # STEP 2: Check and deduct credits
+        # ========================================================================
+        can_proceed, credit_state = credit_mgr.deduct_credits(session_id, intent)
+
+        if not can_proceed:
+            # Credits exhausted - yield exhaustion response
+            exhaustion = credit_mgr.get_exhaustion_response()
+            print(f"  [STREAM] Credits exhausted for session {session_id}")
+
+            # Save user message before returning
+            if self.redis:
+                self.redis.save_message(session_id, {
+                    "role": "user",
+                    "content": message
+                })
+
+            # Yield credit exhaustion as special response
+            yield json.dumps({
+                "credit_exhausted": True,
+                "message": exhaustion["message"],
+                "actions": exhaustion["actions"]
+            })
+            return
+
+        # ========================================================================
+        # STEP 3: Update slots and check for missing params
+        # ========================================================================
+        # Only check slots for data-specific intents
+        data_intents = ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]
+        explore_url = ""
+
+        if intent in data_intents:
+            # Get previous slots to detect if query changed
+            prev_slots = slot_mgr.get_slots(session_id).slots.copy()
+
+            slot_state = slot_mgr.update_slots(session_id, intent, params)
+
+            # Check for missing slots
+            missing_question = slot_mgr.get_missing_slot_question(session_id, intent, slot_state.slots)
+
+            if missing_question:
+                # Need more info - yield clarifying question
+                print(f"  [STREAM] Missing slot: {missing_question['slot_name']}")
+
+                # Save messages
+                if self.redis:
+                    self.redis.save_message(session_id, {"role": "user", "content": message})
+                    self.redis.save_message(session_id, {
+                        "role": "assistant",
+                        "content": missing_question["question"],
+                        "is_clarifying": True
+                    })
+
+                yield json.dumps({
+                    "clarifying_question": True,
+                    "question": missing_question["question"],
+                    "slot_name": missing_question["slot_name"],
+                    "suggestions": missing_question.get("suggestions", [])
+                })
+                return
+
+            # All slots collected - generate URL with defaults applied
+            explore_url = slot_mgr.generate_url(intent, slot_state.slots) or intent_url
+            print(f"  [STREAM] Generated explore_url: {explore_url}")
+
+            # Clear cached context if query changed (different intent, country, hs_code, product, etc.)
+            # This prevents using old country data when user asks for specific trade data
+            # Note: prev_state is captured at the beginning of stream_response
+            intent_changed = prev_state.intent and prev_state.intent != intent
+
+            key_slots = ["country", "hs_code", "origin_country", "destination_country", "product"]
+            slots_changed = any(
+                slot_state.slots.get(k) != prev_slots.get(k)
+                for k in key_slots
+                if slot_state.slots.get(k)
+            )
+
+            query_changed = intent_changed or slots_changed
+            print(f"  [STREAM] Context check: prev_intent={prev_state.intent}, new_intent={intent}, intent_changed={intent_changed}, slots_changed={slots_changed}")
+            if query_changed:
+                # Clear cached context to force fresh API call
+                if session_id in self._stream_context:
+                    print(f"  [STREAM] Query changed, clearing cached context")
+                    del self._stream_context[session_id]
+                # Also clear Redis cache for this session to force fresh data
+                if self.redis:
+                    try:
+                        # Clear any cached embeddings for old URLs
+                        print(f"  [STREAM] Clearing session cache for fresh data fetch")
+                    except Exception as e:
+                        print(f"  [STREAM] Cache clear warning: {e}")
+
+        elif intent_url:
+            # Use URL from intent detection for non-slot intents
+            explore_url = intent_url
 
         # Initialize history for this session if not exists
         if session_id not in self._stream_history:
@@ -2281,21 +2580,45 @@ IMPORTANT
         # Get dynamic content (same logic as chat())
         dynamic_content = ""
         global session_source_url
-        if dynamic_url:
-            cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(dynamic_url, session_id)
+
+        # Clear source URL for non-data intents (general, greeting, etc.)
+        # This prevents showing old data URLs for platform/API questions
+        if intent not in data_intents:
+            session_source_url["current"] = ""
+            print(f"  [STREAM] Cleared source URL for non-data intent: {intent}")
+
+        # Determine which URL to use for data fetching
+        # Priority: explore_url from slots (more accurate) > dynamic_url from frontend
+        # Only use dynamic_url if it's a valid marketinsidedata.com URL
+        if explore_url:
+            fetch_url = explore_url
+            print(f"  [STREAM] Using slot-generated URL: {fetch_url}")
+        elif dynamic_url and "marketinsidedata.com" in dynamic_url:
+            fetch_url = dynamic_url
+            print(f"  [STREAM] Using frontend dynamic_url: {fetch_url}")
+        else:
+            fetch_url = ""
+            if dynamic_url:
+                print(f"  [STREAM] Ignoring invalid dynamic_url: {dynamic_url}")
+
+        if fetch_url:
+            print(f"  [STREAM] Fetching data from URL: {fetch_url}")
+            cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(fetch_url, session_id)
             if cached_data:
                 _, _, full_content = cached_data
-                related, score = await self.is_query_related_via_llm(message, dynamic_url, full_content)
+                related, score = await self.is_query_related_via_llm(message, fetch_url, full_content)
                 if related and score >= 0.5:
                     dynamic_content = full_content
                     # Store the cached URL as source
-                    session_source_url["current"] = dynamic_url
+                    session_source_url["current"] = fetch_url
                     print(f"  [STREAM] Using cached content: {len(full_content)} chars")
             if not dynamic_content:
                 try:
-                    api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"dynamic_url": dynamic_url})
+                    api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"dynamic_url": fetch_url})
                     dynamic_content = api_data or ""
                     # URL is stored by handle_dynamic_api_call
+                    if dynamic_content:
+                        session_source_url["current"] = fetch_url
                 except Exception as e:
                     print(f"  [STREAM] API call failed: {e}")
 
@@ -2309,11 +2632,12 @@ IMPORTANT
             self._stream_context[session_id] = dynamic_content
 
         # Get KB context using correct method and field name
+        # Use llm_query (reconstructed) for better KB matching
         kb_context = ""
         if self.kb_retriever:
             try:
                 kb_results = await asyncio.wait_for(
-                    asyncio.to_thread(self.kb_retriever.retrieve, message, 3),
+                    asyncio.to_thread(self.kb_retriever.retrieve, llm_query, 3),
                     timeout=5.0
                 )
                 # Use 'chunk_text' field (same as main chat function)
@@ -2326,8 +2650,13 @@ IMPORTANT
         merged_context = ""
         if dynamic_content:
             merged_context = f"DYNAMIC CONTENT:\n{dynamic_content[:2500]}\n\n"
+            print(f"  [STREAM] Dynamic content added to context: {len(dynamic_content)} chars")
+        else:
+            print(f"  [STREAM] WARNING: No dynamic content available!")
         if kb_context:
             merged_context += f"KNOWLEDGE BASE:\n{kb_context[:1500]}"
+
+        print(f"  [STREAM] Total merged context: {len(merged_context)} chars")
 
         # Build conversation history string (last 6 messages = 3 exchanges)
         history_messages = self._stream_history[session_id][-6:]
@@ -2337,8 +2666,8 @@ IMPORTANT
                 role = "User" if msg["role"] == "user" else "Assistant"
                 history_text += f"{role}: {msg['content'][:500]}\n"
 
-        # Detect query type for response length
-        smart_query_type = detect_query_type_simple(message)
+        # Detect query type for response length (use llm_query for better detection)
+        smart_query_type = detect_query_type_simple(llm_query)
 
         # ========================================================================
         # BUILD SYSTEM PROMPT USING SAME PromptBuilder AS chat() FUNCTION
@@ -2389,7 +2718,7 @@ CONVERSATIONAL RULES:
 [DO] Use conversational language ("you're", "let's", "I'll show you")
 [DO] Provide specific, concrete information from context
 [DO] Format large numbers with K/M/B (e.g., "$1.5M" instead of "$1,500,000")
-[DO] If  a Person asks data specific question and data not avaible then redirect to {Config.SITE_NAME}/data page 
+
 [DON'T] Use markdown (**, ###, __)
 [DON'T] Use emojis or special symbols
 [DON'T] Add excessive pleasantries or fluff
@@ -2433,13 +2762,14 @@ if query is for platform
 
         llm = ChatOllama(**llm_kwargs)
 
-        # Prepare messages
+        # Prepare messages - use llm_query (reconstructed for slot answers) instead of raw message
         llm_messages = [
             SystemMessage(content=system_prompt),
-            HumanMessage(content=message)
+            HumanMessage(content=llm_query)
         ]
 
         print(f"  [STREAM] Starting LLM streaming with {len(history_messages)} history messages...")
+        print(f"  [STREAM] LLM query: '{llm_query[:100]}...'" if len(llm_query) > 100 else f"  [STREAM] LLM query: '{llm_query}'")
         chunk_count = 0
         full_response = ""
 
@@ -2463,6 +2793,32 @@ if query is for platform
             # Keep only last 10 messages to prevent memory bloat
             if len(self._stream_history[session_id]) > 10:
                 self._stream_history[session_id] = self._stream_history[session_id][-10:]
+
+            # ========================================================================
+            # STEP 4: Save messages to Redis for persistence
+            # ========================================================================
+            if self.redis:
+                try:
+                    self.redis.save_message(session_id, {
+                        "role": "user",
+                        "content": message
+                    })
+                    self.redis.save_message(session_id, {
+                        "role": "assistant",
+                        "content": full_response,
+                        "intent": intent,
+                        "explore_url": explore_url if explore_url else None
+                    })
+                    print(f"  [STREAM] Messages saved to Redis")
+                except Exception as e:
+                    print(f"  [STREAM] Failed to save messages: {e}")
+
+            # ========================================================================
+            # STEP 5: Yield stream completion with explore_url
+            # ========================================================================
+            # The final response with explore_url is yielded by the endpoint handler
+            # We store explore_url in instance for the endpoint to use
+            self._last_explore_url = explore_url if intent in data_intents else ""
 
         except Exception as e:
             print(f"  [STREAM] Error during streaming: {e}")
@@ -2605,13 +2961,15 @@ chatbot_manager: Optional[ChatbotManager] = None
 redis_manager: Optional[RedisMemoryManager] = None
 hostility_detector: Optional[HostilityDetector] = None
 lead_manager: Optional[LeadManager] = None  # Lead generation manager
+credit_manager: Optional[CreditManager] = None  # Credit tracking manager
+slot_manager: Optional[SlotManager] = None  # Slot collection manager
 faq_service: Optional['FAQService'] = None  # FAQ service for page-specific questions
 app_start_time: float = 0
 _initialization_lock = False
 
 async def ensure_initialized():
     """Lazy initialization on first request"""
-    global chatbot_manager, redis_manager, hostility_detector, lead_manager, faq_service, _initialization_lock, app_start_time
+    global chatbot_manager, redis_manager, hostility_detector, lead_manager, credit_manager, slot_manager, faq_service, _initialization_lock, app_start_time
 
     if chatbot_manager is not None:
         return  # Already initialized
@@ -2658,6 +3016,14 @@ async def ensure_initialized():
         # Initialize lead manager
         lead_manager = LeadManager(redis_manager)
         print("[OK] Lead generation enabled")
+
+        # Initialize credit manager
+        credit_manager = init_credit_manager(redis_manager)
+        print("[OK] Credit tracking enabled")
+
+        # Initialize slot manager
+        slot_manager = init_slot_manager(redis_manager)
+        print("[OK] Slot collection enabled")
 
         # Initialize FAQ service (for page-specific suggested questions)
         if FAQ_SERVICE_AVAILABLE:
@@ -2727,7 +3093,7 @@ def check_and_pull_ollama_models():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    global chatbot_manager, hostility_detector, lead_manager, app_start_time, redis_manager
+    global chatbot_manager, hostility_detector, lead_manager, credit_manager, slot_manager, app_start_time, redis_manager
     import sys
 
     sys.stderr.write("\n" + "=" * 70 + "\n")
@@ -2770,6 +3136,16 @@ async def lifespan(app: FastAPI):
         # Initialize lead manager
         lead_manager = LeadManager(redis_manager)
         sys.stderr.write("[OK] Lead generation enabled\n")
+        sys.stderr.flush()
+
+        # Initialize credit manager
+        credit_manager = init_credit_manager(redis_manager)
+        sys.stderr.write("[OK] Credit tracking enabled\n")
+        sys.stderr.flush()
+
+        # Initialize slot manager
+        slot_manager = init_slot_manager(redis_manager)
+        sys.stderr.write("[OK] Slot collection enabled\n")
         sys.stderr.flush()
 
         # Print Redis stats
@@ -2922,8 +3298,12 @@ async def chat_stream(request: ChatRequest):
     Stream chatbot response using Server-Sent Events (SSE)
 
     Returns chunks of the response as they're generated by the LLM.
-    Format: data: {"chunk": "text", "done": false}\n\n
-    Final message: data: {"chunk": "", "done": true, "processing_time": 1.23}\n\n
+
+    Response formats:
+    - Normal chunk: data: {"chunk": "text", "done": false}\n\n
+    - Final message: data: {"chunk": "", "done": true, "processing_time": 1.23, "explore_url": "..."}\n\n
+    - Credit exhausted: data: {"credit_exhausted": true, "message": "...", "actions": [...]}\n\n
+    - Clarifying question: data: {"clarifying_question": true, "question": "...", "suggestions": [...]}\n\n
     """
     await ensure_initialized()
 
@@ -2933,6 +3313,7 @@ async def chat_stream(request: ChatRequest):
     async def generate_stream():
         start_time = time.time()
         full_response = ""
+        special_response = None
 
         try:
             async for chunk in chatbot_manager.chat_stream(
@@ -2940,16 +3321,54 @@ async def chat_stream(request: ChatRequest):
                 session_id=request.session_id,
                 dynamic_url=request.dynamic_url
             ):
+                # Check if this is a special JSON response (credit exhaustion or clarifying question)
+                chunk_stripped = chunk.strip()
+                if chunk_stripped.startswith('{'):
+                    try:
+                        parsed = json.loads(chunk_stripped)
+                        if parsed.get('credit_exhausted'):
+                            # This is credit exhaustion response
+                            parsed['done'] = True
+                            sse_data = f"data: {json.dumps(parsed)}\n\n"
+                            print(f"  [STREAM] Sending credit exhaustion response: {parsed.get('message', '')[:50]}...")
+                            yield sse_data
+                            return
+                        if parsed.get('clarifying_question'):
+                            # This is a clarifying question
+                            parsed['done'] = True
+                            sse_data = f"data: {json.dumps(parsed)}\n\n"
+                            print(f"  [STREAM] Sending clarifying question: {parsed.get('question', '')[:50]}...")
+                            yield sse_data
+                            return
+                    except json.JSONDecodeError as e:
+                        print(f"  [STREAM] JSON parse error: {e}")
+
+                # Normal text chunk
                 full_response += chunk
                 # Send chunk as SSE event
                 yield f"data: {json.dumps({'chunk': chunk, 'done': False})}\n\n"
 
-            # Send final message with completion status
+            # Send final message with completion status and explore URL
             processing_time = time.time() - start_time
-            yield f"data: {json.dumps({'chunk': '', 'done': True, 'processing_time': processing_time, 'full_response': full_response})}\n\n"
+            explore_url = getattr(chatbot_manager, '_last_explore_url', '')
+
+            final_data = {
+                'chunk': '',
+                'done': True,
+                'processing_time': processing_time,
+                'full_response': full_response
+            }
+
+            # Include explore_url only for data-specific responses
+            if explore_url:
+                final_data['explore_url'] = explore_url
+
+            yield f"data: {json.dumps(final_data)}\n\n"
 
         except Exception as e:
             print(f"[ERROR] Streaming failed: {e}")
+            import traceback
+            traceback.print_exc()
             yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
 
     return StreamingResponse(
@@ -3138,6 +3557,9 @@ async def init_session(request: InitRequest):
 
         firstThree = suggested_questions[:3]
 
+        # Save suggested questions to Redis for persistence across refresh
+        if redis_manager and firstThree:
+            redis_manager.save_suggested_questions(request.session_id, firstThree)
 
         return InitResponse(
             status=status,
@@ -3297,19 +3719,77 @@ async def get_lead(session_id: str):
     return lead
 
 
-@router.get("/history/{session_id}", response_model=HistoryResponse)
-async def get_history(session_id: str, limit: int = 10):
-    """Get conversation history for a session"""
-    if not chatbot_manager:
-        raise HTTPException(status_code=503, detail="Chatbot not initialized")
-    
-    # Note: This would require implementing history retrieval from checkpointer
-    # For now, return placeholder
-    return HistoryResponse(
-        session_id=session_id,
-        messages=[],
-        total_messages=0
-    )
+@router.get("/history/{session_id}")
+async def get_history(session_id: str, limit: int = 50):
+    """
+    Get conversation history for a session.
+
+    Returns messages persisted in Redis for page refresh recovery.
+
+    - **session_id**: Session identifier
+    - **limit**: Maximum number of messages to return (default: 50)
+    """
+    await ensure_initialized()
+
+    if not redis_manager:
+        raise HTTPException(status_code=503, detail="Redis not initialized")
+
+    try:
+        # Get messages from Redis
+        messages = redis_manager.get_messages(session_id, limit=limit)
+
+        # Get suggested questions if available
+        suggested_questions = redis_manager.get_suggested_questions(session_id)
+
+        # Check if session is active (has messages within TTL)
+        session_active = len(messages) > 0
+
+        return JSONResponse(content={
+            "session_id": session_id,
+            "messages": messages,
+            "total_messages": len(messages),
+            "suggested_questions": suggested_questions,
+            "session_active": session_active
+        })
+
+    except Exception as e:
+        print(f"[ERROR] History retrieval failed: {e}")
+        return JSONResponse(content={
+            "session_id": session_id,
+            "messages": [],
+            "total_messages": 0,
+            "suggested_questions": [],
+            "session_active": False
+        })
+
+
+@router.post("/continue-chat")
+async def continue_chat(session_id: str):
+    """
+    Activate continue chat mode after credit exhaustion.
+
+    Grants additional credits at 2x cost per query.
+
+    - **session_id**: Session identifier (query parameter)
+    """
+    await ensure_initialized()
+
+    if not credit_manager:
+        raise HTTPException(status_code=503, detail="Credit manager not initialized")
+
+    try:
+        # Activate continue chat mode
+        state = credit_manager.activate_continue_chat(session_id)
+
+        return JSONResponse(content={
+            "status": "success",
+            "credits_remaining": state.get("remaining", 0),
+            "message": "I'm happy to continue helping you explore our trade data. What would you like to know?"
+        })
+
+    except Exception as e:
+        print(f"[ERROR] Continue chat failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to activate continue chat: {str(e)}")
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -3508,6 +3988,38 @@ async def root():
 print("[DEBUG] About to include router...")
 app.include_router(router)
 print("[DEBUG] Router included successfully!")
+
+
+# ============================================================================
+# STATIC FILE SERVING FOR CHATBOT WIDGET
+# ============================================================================
+
+# Get the directory where this script is located
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(SCRIPT_DIR, "backend", "assets")
+
+# Serve the chat widget JS file directly at /chat-widget.js
+@app.get("/chat-widget.js")
+async def serve_chat_widget():
+    """Serve the chatbot widget JavaScript file"""
+    widget_path = os.path.join(ASSETS_DIR, "chat-widget.js")
+    if os.path.exists(widget_path):
+        return FileResponse(
+            widget_path,
+            media_type="application/javascript",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Access-Control-Allow-Origin": "*"
+            }
+        )
+    raise HTTPException(status_code=404, detail="Widget not found")
+
+# Mount static assets directory for other files (images, etc.)
+if os.path.exists(ASSETS_DIR):
+    app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
+    print(f"[OK] Static assets mounted at /assets from {ASSETS_DIR}")
+else:
+    print(f"[WARN] Assets directory not found: {ASSETS_DIR}")
 
 
 # ============================================================================

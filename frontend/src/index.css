@@ -97,6 +97,17 @@
   }
 }
 
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @keyframes pulse-soft {
   0%, 100% {
     opacity: 1;
@@ -359,6 +370,62 @@ button:focus-visible {
 .delayed-feedback-card .flex-wrap button:hover {
   transform: translateY(-1px);
 }
+
+/* Credit Exhaustion Card Styles */
+@keyframes creditExhaustionIn {
+  0% {
+    opacity: 0;
+    transform: translateY(20px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.credit-exhaustion-card {
+  animation: creditExhaustionIn 0.4s ease-out forwards;
+}
+
+.credit-exhaustion-card button {
+  transition: all 0.2s ease;
+}
+
+.credit-exhaustion-card button:hover {
+  transform: translateY(-2px);
+}
+
+/* Explore More Button Styles */
+@keyframes exploreButtonIn {
+  0% {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.explore-more-button {
+  animation: exploreButtonIn 0.3s ease-out forwards;
+  animation-delay: 0.2s;
+}
+
+.explore-more-button:hover svg {
+  transform: translate(2px, -2px);
+  transition: transform 0.2s ease;
+}
+
+/* Clarifying Question Suggestion Pills */
+.clarifying-suggestion {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+.clarifying-suggestion:nth-child(1) { animation-delay: 0.1s; }
+.clarifying-suggestion:nth-child(2) { animation-delay: 0.15s; }
+.clarifying-suggestion:nth-child(3) { animation-delay: 0.2s; }
+.clarifying-suggestion:nth-child(4) { animation-delay: 0.25s; }
 
 @theme {
   --color-chat-primary: var(--chat-primary);

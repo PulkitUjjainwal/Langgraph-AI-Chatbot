@@ -2,6 +2,133 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import type { ReactNode } from "react";
 import type { ChatMessage } from "./ChatWidget";
 
+// Credit exhaustion card component
+function CreditExhaustionCard({
+  message,
+  actions,
+  onAction
+}: {
+  message: string;
+  actions: ChatMessage["actions"];
+  onAction: (type: string) => void;
+}) {
+  return (
+    <div className="credit-exhaustion-card bg-gradient-to-br from-orange-50 to-amber-50 rounded-2xl border border-orange-200 p-5 my-3 mx-2">
+      <div className="flex items-start gap-3 mb-4">
+        <div className="flex-shrink-0">
+          <div className="h-10 w-10 rounded-full bg-orange-100 flex items-center justify-center">
+            <svg className="h-5 w-5 text-orange-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+          </div>
+        </div>
+        <div>
+          <h3 className="text-sm font-semibold text-gray-800 mb-1">Ready to unlock more?</h3>
+          <p className="text-sm text-gray-600">{message}</p>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {actions?.map((action, idx) => {
+          let buttonStyle = "";
+          let icon = null;
+
+          if (action.type === "schedule_demo") {
+            buttonStyle = "bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white";
+            icon = (
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            );
+          } else if (action.type === "whatsapp") {
+            buttonStyle = "bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white";
+            icon = (
+              <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/>
+              </svg>
+            );
+          } else if (action.type === "chat_with_us") {
+            buttonStyle = "bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white";
+            icon = (
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+              </svg>
+            );
+          } else if (action.type === "continue_chat") {
+            buttonStyle = "bg-white border-2 border-orange-300 text-orange-700 hover:bg-orange-50 hover:border-orange-500";
+            icon = (
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+              </svg>
+            );
+          }
+
+          return (
+            <button
+              key={idx}
+              onClick={() => onAction(action.type)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 transform hover:scale-105 shadow-sm ${buttonStyle}`}
+            >
+              {icon}
+              <span>{action.label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Explore More button component
+function ExploreMoreButton({ url }: { url: string }) {
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="explore-more-button group relative inline-flex items-center gap-2.5 mt-4 px-6 py-3 rounded-xl text-sm font-bold
+        bg-gradient-to-br from-orange-50 via-orange-100 to-orange-200
+        hover:from-orange-100 hover:via-orange-200 hover:to-orange-300
+        text-orange-900
+        shadow-[0_2px_8px_0_rgba(249,115,22,0.2),inset_0_1px_0_0_rgba(255,255,255,0.5)] 
+        hover:shadow-[0_4px_16px_0_rgba(249,115,22,0.3),inset_0_1px_0_0_rgba(255,255,255,0.6)]
+        transition-all duration-300 transform hover:scale-[1.02] hover:-translate-y-0.5
+        border-2 border-orange-300/60 hover:border-orange-400/80
+        overflow-hidden"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {/* Animated gradient background on hover */}
+      <span className="absolute inset-0 bg-gradient-to-r from-orange-200/0 via-orange-300/40 to-orange-200/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700" />
+      
+      {/* Content wrapper */}
+      <span className="relative z-10 flex items-center gap-2.5">
+        {/* Icon */}
+        <svg 
+          className="h-4 w-4 text-orange-700 transition-transform duration-300 group-hover:rotate-12" 
+          fill="none" 
+          viewBox="0 0 24 24" 
+          stroke="currentColor"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+        </svg>
+        
+        {/* Text */}
+        <span className="text-orange-900 tracking-wide">Explore More Details</span>
+        
+        {/* Animated arrow */}
+        <svg 
+          className="h-4 w-4 text-orange-700 transition-transform duration-300 group-hover:translate-x-1.5" 
+          fill="none" 
+          viewBox="0 0 24 24" 
+          stroke="currentColor"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+        </svg>
+      </span>
+    </a>
+  );
+}
+
 type Props = {
   messages: ChatMessage[];
   isStreaming?: boolean;
@@ -74,8 +201,8 @@ const WORKED_WELL_OPTIONS = [
   { id: 'speed', label: 'Response speed' },
 ];
 
-// Inactivity timeout in milliseconds (60 seconds)
-const INACTIVITY_TIMEOUT = 10000;
+// Inactivity timeout in milliseconds (40 seconds)
+const INACTIVITY_TIMEOUT = 40000;
 
 /**
  * Parse message text and convert URLs and markdown links to clickable elements
@@ -470,32 +597,44 @@ export function ChatMessages({
             )}
 
             <div className={`flex-1 ${msg.role === "assistant" ? "flex flex-col items-end" : ""}`}>
-              <div
-                className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed overflow-hidden ${
-                  msg.role === "user"
-                    ? "bg-gray-100 text-chat-text rounded-bl-md"
-                    : "bg-gradient-to-br from-gray-700 to-gray-800 text-white rounded-br-md"
-                }`}
-                style={{ wordBreak: 'break-word', overflowWrap: 'break-word' }}
-              >
-                {isTyping || isWaitingForStream ? (
-                  <div className="flex items-center gap-1 py-1">
-                    <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
-                    <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
-                    <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
-                  </div>
-                ) : (
-                  <>
-                    {renderMessageWithLinks(msg.text)}
-                    {showStreamingCursor && (
-                      <span className="inline-block w-0.5 h-4 bg-white ml-0.5 animate-pulse" />
-                    )}
-                  </>
-                )}
-              </div>
+              {/* Don't show message bubble for credit exhaustion (CreditExhaustionCard handles it) */}
+              {!msg.isCreditExhausted && (
+                <div
+                  className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed overflow-hidden ${
+                    msg.role === "user"
+                      ? "bg-gray-100 text-chat-text rounded-bl-md"
+                      : "bg-gradient-to-br from-gray-700 to-gray-800 text-white rounded-br-md"
+                  }`}
+                  style={{ wordBreak: 'break-word', overflowWrap: 'break-word' }}
+                >
+                  {isTyping || isWaitingForStream ? (
+                    <div className="flex items-center gap-1 py-1">
+                      <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
+                      <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
+                      <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
+                    </div>
+                  ) : (
+                    <>
+                      {renderMessageWithLinks(msg.text)}
+                      {showStreamingCursor && (
+                        <span className="inline-block w-0.5 h-4 bg-white ml-0.5 animate-pulse" />
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
 
-              {/* Action buttons for generic responses - below the message */}
-              {msg.role === "assistant" && msg.actions && msg.actions.length > 0 && (
+              {/* Credit exhaustion card - special UI */}
+              {msg.role === "assistant" && msg.isCreditExhausted && msg.actions && msg.actions.length > 0 && (
+                <CreditExhaustionCard
+                  message={msg.text}
+                  actions={msg.actions}
+                  onAction={(type) => onActionClick?.(type)}
+                />
+              )}
+
+              {/* Action buttons for generic responses - below the message (not for credit exhaustion) */}
+              {msg.role === "assistant" && msg.actions && msg.actions.length > 0 && !msg.isCreditExhausted && (
                 <div className="flex flex-wrap gap-2 mt-3 justify-end">
                 {msg.actions.map((action, actionIdx) => {
                   // Find the original user query (previous message)
@@ -571,7 +710,7 @@ export function ChatMessages({
               </div>
             )}
 
-              {/* Suggestion pills from init response */}
+              {/* Suggestion pills from init response or clarifying questions */}
               {msg.role === "assistant" && msg.suggestions && msg.suggestions.length > 0 && (
                 <div className="flex flex-wrap gap-2 mt-3 justify-end">
                   {msg.suggestions.map((suggestion, suggestionIdx) => (
@@ -587,6 +726,13 @@ export function ChatMessages({
                       {suggestion}
                     </button>
                   ))}
+                </div>
+              )}
+
+              {/* Explore More button for data-specific responses */}
+              {msg.role === "assistant" && msg.exploreUrl && (
+                <div className="flex justify-end mt-2">
+                  <ExploreMoreButton url={msg.exploreUrl} />
                 </div>
               )}
 

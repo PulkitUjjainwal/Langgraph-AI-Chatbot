@@ -4,10 +4,12 @@ type Props = {
   onSend: (text: string) => void;
   isSending?: boolean;
   position?: "top" | "bottom";
+  onOpenOptionsMenu?: () => void;
 };
 
-export function ChatFooter({ onSend, isSending = false, position = "bottom" }: Props) {
+export function ChatFooter({ onSend, isSending = false, position = "bottom", onOpenOptionsMenu }: Props) {
   const [message, setMessage] = useState("");
+
   function handleSend() {
     if (isSending) return;
     if (!message.trim()) return;
@@ -21,6 +23,17 @@ export function ChatFooter({ onSend, isSending = false, position = "bottom" }: P
     <div className={`px-4 py-3 ${isTop ? "bg-gray-50 border-b border-gray-200" : "border-t border-gray-200 bg-white"}`}>
       {/* Input Container */}
       <div className="flex items-center gap-2">
+        {/* Options Menu Button */}
+        <button
+          onClick={onOpenOptionsMenu}
+          className="flex items-center justify-center h-10 w-10 rounded-full bg-gray-100 hover:bg-gray-200 transition-all duration-200"
+          aria-label="More options"
+        >
+          <svg className="h-5 w-5 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+          </svg>
+        </button>
+
         <div className="flex-1 relative">
           <input
             type="text"

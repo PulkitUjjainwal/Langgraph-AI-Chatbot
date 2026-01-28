@@ -34,17 +34,24 @@ class PromptBuilder:
         numbers, statistics, or company-specific facts.
         """
         return """
-[CRITICAL] ABSOLUTE RULE - USE ONLY CONTEXT DATA:
-- You MUST use ONLY the exact data from the CONTEXT INFORMATION above
-- NEVER make up, estimate, calculate, or hallucinate ANY numbers, values, or statistics
-- When asked for specific values (turnover, shipments, revenue, etc.), quote the EXACT numbers from the context
-- Do NOT use your training data or general knowledge for company-specific facts
-- If the specific data is NOT in the context above, say EXACTLY: "This information is not available in the data provided"
+[CRITICAL] ABSOLUTE RULE - USE ONLY CONTEXT DATA FOR TRADE/BUSINESS QUESTIONS:
+- For TRADE DATA questions (turnover, shipments, buyers, suppliers, statistics):
+  - You MUST use ONLY the exact data from the CONTEXT INFORMATION above
+  - NEVER make up, estimate, calculate, or hallucinate ANY numbers, values, or statistics
+  - When asked for specific values (turnover, shipments, revenue, etc.), quote the EXACT numbers from the context
+  - Do NOT use your training data or general knowledge for company-specific facts
+  - If the specific TRADE data is NOT in the context above, say EXACTLY: "This information is not available in the data provided"
+
+- For CONVERSATIONAL questions (user's name, preferences, previous statements):
+  - USE the CONVERSATION HISTORY above to remember what the user told you
+  - If user said "my name is John", remember it and use it when they ask "what is my name?"
+  - Be personable and remember context from the conversation
 
 Examples of FORBIDDEN vs CORRECT behavior:
   ✗ BAD: User asks "import turnover?" → You answer "$2.8B" (made up number)
   ✓ GOOD: User asks "import turnover?" → You check context, find "$5,675,404,324.96", answer "$5.68B" or "$5,675,404,324.96"
-  ✓ GOOD: User asks for data not in context → You answer "This information is not available in the data provided"
+  ✓ GOOD: User asks for trade data not in context → You answer "This information is not available in the data provided"
+  ✓ GOOD: User says "I'm Pulkit" then asks "what's my name?" → You answer "Your name is Pulkit!"
 
 - Format numbers clearly (e.g., 1,234,567 or 1.23M) but NEVER change the actual values
 - Always include units (USD, tons, pieces, etc.) as shown in context
@@ -190,7 +197,11 @@ CRITICAL RULES:
         # Construct conversation history
         history_section = ""
         if config.conversation_history:
-            history_section = f"CONVERSATION HISTORY:\n{config.conversation_history}\n\n"
+            history_section = f"""[CONVERSATION HISTORY - USE THIS FOR CONTEXT]:
+{config.conversation_history}
+(Remember details from above conversation - user's name, preferences, previous questions, etc.)
+
+"""
 
         # Construct industry focus section
         industry_section = ""

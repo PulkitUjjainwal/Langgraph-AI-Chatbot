@@ -481,6 +481,164 @@ class RedisMemoryManager:
         return deleted_count
 
     # ========================================================================
+    # MESSAGE PERSISTENCE (Chat History)
+    # ========================================================================
+
+    def save_message(self, session_id: str, message: Dict[str, Any]) -> bool:
+        """
+        Save a single message to the session's message history.
+
+        Messages are stored in a Redis list for ordered retrieval.
+        Each message includes: role, content, timestamp, message_id
+
+        Args:
+            session_id: Session identifier
+            message: Message dict with role, content, and optional metadata
+
+        Returns:
+            True if saved successfully
+        """
+        key = f"session:{session_id}:messages"
+
+        # Ensure message has required fields
+        msg_data = {
+            "role": message.get("role", "unknown"),
+            "content": message.get("content", ""),
+            "timestamp": message.get("timestamp", datetime.now().isoformat()),
+            "message_id": message.get("message_id", f"msg-{datetime.now().timestamp()}")
+        }
+
+        # Add any additional metadata
+        for k, v in message.items():
+            if k not in msg_data:
+                msg_data[k] = v
+
+        try:
+            # Push to end of list (newest last)
+            self.client.rpush(key, json.dumps(msg_data))
+            # Trim to keep only last 100 messages per session
+            self.client.ltrim(key, -100, -1)
+            # Set/refresh TTL
+            self.client.expire(key, self.ttl_seconds)
+            return True
+        except Exception as e:
+            print(f"[MESSAGES] Error saving message: {e}")
+            return False
+
+    def get_messages(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Retrieve message history for a session.
+
+        Args:
+            session_id: Session identifier
+            limit: Maximum number of messages to return (default: 50)
+
+        Returns:
+            List of message dicts in chronological order
+        """
+        key = f"session:{session_id}:messages"
+
+        try:
+            # Get last N messages
+            raw_messages = self.client.lrange(key, -limit, -1)
+
+            messages = []
+            for raw in raw_messages:
+                try:
+                    msg = json.loads(raw)
+                    messages.append(msg)
+                except json.JSONDecodeError:
+                    continue
+
+            return messages
+        except Exception as e:
+            print(f"[MESSAGES] Error getting messages: {e}")
+            return []
+
+    def clear_messages(self, session_id: str) -> bool:
+        """
+        Clear all messages for a session.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            True if cleared successfully
+        """
+        key = f"session:{session_id}:messages"
+
+        try:
+            self.client.delete(key)
+            print(f"[MESSAGES] Cleared messages for session: {session_id}")
+            return True
+        except Exception as e:
+            print(f"[MESSAGES] Error clearing messages: {e}")
+            return False
+
+    def get_message_count(self, session_id: str) -> int:
+        """
+        Get the number of messages in a session.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            Number of messages
+        """
+        key = f"session:{session_id}:messages"
+
+        try:
+            return self.client.llen(key)
+        except Exception as e:
+            print(f"[MESSAGES] Error getting message count: {e}")
+            return 0
+
+    def save_suggested_questions(self, session_id: str, questions: List[str]) -> bool:
+        """
+        Save suggested questions for a session (for persistence across refresh).
+
+        Args:
+            session_id: Session identifier
+            questions: List of suggested question strings
+
+        Returns:
+            True if saved successfully
+        """
+        key = f"session:{session_id}:suggested_questions"
+
+        try:
+            self.client.setex(
+                key,
+                self.ttl_seconds,
+                json.dumps(questions)
+            )
+            return True
+        except Exception as e:
+            print(f"[MESSAGES] Error saving suggested questions: {e}")
+            return False
+
+    def get_suggested_questions(self, session_id: str) -> List[str]:
+        """
+        Get suggested questions for a session.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            List of suggested question strings
+        """
+        key = f"session:{session_id}:suggested_questions"
+
+        try:
+            data = self.client.get(key)
+            if data:
+                return json.loads(data)
+        except Exception as e:
+            print(f"[MESSAGES] Error getting suggested questions: {e}")
+
+        return []
+
+    # ========================================================================
     # SESSION MANAGEMENT
     # ========================================================================
 
