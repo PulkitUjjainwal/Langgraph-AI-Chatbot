@@ -2106,18 +2106,28 @@ IMPORTANT
         message: str,
         session_id: str,
         extra_data: Optional[Dict[str, Any]] = None,
+        intent_result: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Classify message intent + entities and (optionally) call external API.
         Returns a compact JSON string for downstream handling.
+
+        Args:
+            intent_result: Pre-computed intent result to avoid duplicate LLM calls.
+                          If None, intent detection will be performed.
         """
         # Prefer explicit extra_data, else session meta
         dynamic_url_from_extra = ""
         if extra_data and isinstance(extra_data, dict):
             dynamic_url_from_extra = (extra_data.get("dynamic_url") or "").strip()
 
-        # 1) Detect intent and entities
-        intent_result = await self._detect_intent_and_entities(message)
+        # 1) Use pre-computed intent or detect (AVOID DUPLICATE CALLS)
+        if intent_result is None:
+            intent_result = await self._detect_intent_and_entities(message)
+            print(f"  [INTENT] Detected intent (new call)")
+        else:
+            print(f"  [INTENT] Using pre-computed intent (skipped LLM call)")
+
         intent = intent_result["intent"]
         confidence = intent_result["confidence"]
         url = intent_result["url"]
@@ -2193,6 +2203,10 @@ IMPORTANT
 
         print(f"  [DEBUG] dynamic_url parameter: {dynamic_url}")
 
+        # OPTIMIZATION: Detect intent ONCE upfront and reuse throughout
+        intent_result = await self._detect_intent_and_entities(message)
+        print(f"  [INTENT] Detected once: {intent_result['intent']} (confidence: {intent_result['confidence']:.2f})")
+
         # if dynamic_url:
         print(f"  [DEBUG] [OK] dynamic_url provided in chat()")
         # print(f"  [DEBUG] Looking up cached data for URL: {dynamic_url[:100] if len(dynamic_url) > 100 else dynamic_url}...")
@@ -2220,7 +2234,7 @@ IMPORTANT
                     print(f"  [URL] Stored cached URL for response: {dynamic_url[:80]}...")
                 print(f"  [DEBUG] Using cached content: {len(full_content)} chars")
             else:
-                api_data = await self.handle_dynamic_api_call(message, session_id,extra_data={"data_type": dataType})
+                api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"data_type": dataType}, intent_result=intent_result)
                 dynamic_content = api_data
                 sources_used.append("Dynamic Content")
                 # URL is stored by handle_dynamic_api_call
@@ -2235,11 +2249,11 @@ IMPORTANT
             # ALWAYS use intent detection for cache misses to generate the correct URL
             # Don't blindly use the provided dynamic_url (could be invalid, truncated, or wrong country)
             try:
-                print(f"  [DEBUG] Running intent detection to determine correct URL...")
-                api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"dynamic_url": dynamic_url})
+                print(f"  [DEBUG] Running API call with pre-computed intent...")
+                api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"dynamic_url": dynamic_url}, intent_result=intent_result)
                 fetched = api_data or None
                 if fetched:
-                    print(f"  [DEBUG] Intent detection generated valid URL, fetched: {len(fetched)} chars")
+                    print(f"  [DEBUG] API call with pre-computed intent fetched: {len(fetched)} chars")
                 else:
                     print(f"  [DEBUG] Intent detection returned no data")
             except DynamicContentError as e:
@@ -2268,6 +2282,7 @@ IMPORTANT
                         message,
                         session_id,
                         extra_data={"data_type": dataType} if dataType else None,
+                        intent_result=intent_result,
                     )
                     dynamic_content = api_data
                     sources_used.append("Dynamic Content")
@@ -2614,7 +2629,12 @@ IMPORTANT
                     print(f"  [STREAM] Using cached content: {len(full_content)} chars")
             if not dynamic_content:
                 try:
-                    api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"dynamic_url": fetch_url})
+                    # Pass pre-computed intent to avoid duplicate LLM call
+                    api_data = await self.handle_dynamic_api_call(
+                        message, session_id,
+                        extra_data={"dynamic_url": fetch_url},
+                        intent_result={"intent": intent, "confidence": 1.0, "url": intent_url, "params": params}
+                    )
                     dynamic_content = api_data or ""
                     # URL is stored by handle_dynamic_api_call
                     if dynamic_content:
