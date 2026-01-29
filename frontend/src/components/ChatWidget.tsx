@@ -59,11 +59,30 @@ type QuestionCard = {
 };
 
 const SESSION_STORAGE_KEY = "chat_session_id";
-const INITIAL_QUESTIONS = [
-  Object.keys(genericQA)[0],
-  Object.keys(genericQA)[1],
-  "I want to learn about your data"
+
+// CTA questions to randomize for the 2nd slot
+const CTA_QUESTIONS = [
+  "I want to schedule a product demo",
+  "I want to find new customers",
+  "I need to consult with an expert"
 ];
+
+// Get a random CTA question
+function getRandomCTAQuestion(): string {
+  const randomIndex = Math.floor(Math.random() * CTA_QUESTIONS.length);
+  return CTA_QUESTIONS[randomIndex];
+}
+
+// Generate initial questions with randomized CTA
+function getInitialQuestions(): string[] {
+  return [
+    "I want to know about your products and services",
+    getRandomCTAQuestion(),
+    "I want to learn about your data"
+  ];
+}
+
+const INITIAL_QUESTIONS = getInitialQuestions();
 
 function createSessionId(): string {
   if (
@@ -360,7 +379,7 @@ export default function ChatWidget() {
   }, [suggestionsState]);
 
   const getApiBaseUrl = (): string => {
-    let url = "http://localhost:8003";
+    let url = "http://localhost:8000";
     if (typeof window !== "undefined" && (window as any).CHATBOT_CONFIG) {
       url = (window as any).CHATBOT_CONFIG.apiUrl || url;
     }
@@ -419,6 +438,12 @@ export default function ChatWidget() {
           label: "Schedule a Demo"
         });
       }
+    } else if (qaEntry.type === "precached") {
+      // Precached static KB response - add schedule demo option
+      actions.push({
+        type: "schedule_demo",
+        label: "Schedule a Demo"
+      });
     }
 
     return {

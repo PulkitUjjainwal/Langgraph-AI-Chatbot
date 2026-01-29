@@ -2606,7 +2606,7 @@ IMPORTANT
             cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(fetch_url, session_id)
             if cached_data:
                 _, _, full_content = cached_data
-                related, score = await self.is_query_related_via_llm(message, fetch_url, full_content)
+                related, score, _ = await self.is_query_related_via_llm(message, fetch_url, full_content)
                 if related and score >= 0.5:
                     dynamic_content = full_content
                     # Store the cached URL as source
@@ -3998,11 +3998,17 @@ print("[DEBUG] Router included successfully!")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(SCRIPT_DIR, "backend", "assets")
 
-# Serve the chat widget JS file directly at /chat-widget.js
-@app.get("/chat-widget.js")
+# Log paths at startup for debugging
+print(f"[WIDGET] Script directory: {SCRIPT_DIR}")
+print(f"[WIDGET] Assets directory: {ASSETS_DIR}")
+print(f"[WIDGET] Assets exists: {os.path.exists(ASSETS_DIR)}")
+
+# Serve the chat widget JS file at /api/chat-widget.js
+@app.get("/api/chat-widget.js")
 async def serve_chat_widget():
     """Serve the chatbot widget JavaScript file"""
     widget_path = os.path.join(ASSETS_DIR, "chat-widget.js")
+    print(f"[WIDGET] Requested chat-widget.js, path: {widget_path}, exists: {os.path.exists(widget_path)}")
     if os.path.exists(widget_path):
         return FileResponse(
             widget_path,
@@ -4012,7 +4018,29 @@ async def serve_chat_widget():
                 "Access-Control-Allow-Origin": "*"
             }
         )
-    raise HTTPException(status_code=404, detail="Widget not found")
+    # Better error message with path info
+    raise HTTPException(status_code=404, detail=f"Widget not found at {widget_path}")
+
+# Also serve at /chat-widget.js for backwards compatibility
+@app.get("/chat-widget.js")
+async def serve_chat_widget_legacy():
+    """Serve the chatbot widget JavaScript file (legacy path)"""
+    return await serve_chat_widget()
+
+# Debug endpoint to check file paths
+@app.get("/debug/paths")
+async def debug_paths():
+    """Debug endpoint to check file paths on server"""
+    widget_path = os.path.join(ASSETS_DIR, "chat-widget.js")
+    return {
+        "script_dir": SCRIPT_DIR,
+        "assets_dir": ASSETS_DIR,
+        "assets_exists": os.path.exists(ASSETS_DIR),
+        "widget_path": widget_path,
+        "widget_exists": os.path.exists(widget_path),
+        "assets_contents": os.listdir(ASSETS_DIR) if os.path.exists(ASSETS_DIR) else [],
+        "cwd": os.getcwd()
+    }
 
 # Mount static assets directory for other files (images, etc.)
 if os.path.exists(ASSETS_DIR):
