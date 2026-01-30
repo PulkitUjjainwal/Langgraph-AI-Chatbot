@@ -387,19 +387,97 @@ export default function ChatWidget() {
     return url.replace(/\/$/, '');
   };
 
+  // Check if query matches connect/help intent
+  const isConnectHelpIntent = (query: string): boolean => {
+    const normalizedQuery = query.toLowerCase().trim();
+
+    // Direct keyword checks for better reliability
+    const connectKeywords = [
+      'connect me',
+      'connect with',
+      'connect to',
+      'talk to someone',
+      'talk to a person',
+      'talk to support',
+      'talk to agent',
+      'talk to an agent',
+      'talk to a agent',
+      'talk to human',
+      'speak to someone',
+      'speak to a person',
+      'speak to support',
+      'speak to agent',
+      'speak with someone',
+      'speak with support',
+      'human agent',
+      'real person',
+      'customer support',
+      'customer service',
+      'contact support',
+      'contact team',
+      'contact someone',
+      'get help',
+      'need help',
+      'need assistance',
+      'need support',
+      'i need assistance',
+      'i need support',
+      'help me connect',
+      'can you help',
+      'could you help',
+      'can you connect',
+      'could you connect',
+      'can i talk',
+      'can i speak',
+      'can i connect',
+      'get in touch',
+      'reach out',
+      'want to connect',
+      'looking to connect',
+    ];
+
+    // Check if any keyword is present in the query
+    const hasConnectKeyword = connectKeywords.some(keyword =>
+      normalizedQuery.includes(keyword)
+    );
+
+    if (hasConnectKeyword) {
+      console.log('[ChatWidget] Connect/help intent detected:', normalizedQuery);
+      return true;
+    }
+
+    return false;
+  };
+
   // Generic Q&A checker
   const checkGenericQA = async (userQuery: string): Promise<ChatMessage | null | 'INIT_CALL'> => {
     const normalizedQuery = userQuery.trim();
-    
+
     // Special case: "I want to learn about your data" should call init
     if (normalizedQuery === "I want to learn about your data") {
       // Return special marker to indicate init call is needed
       return 'INIT_CALL';
     }
-    
+
+    // Check for connect/help intent - show support options card
+    if (isConnectHelpIntent(normalizedQuery)) {
+      return {
+        id: `connect-support-${Date.now()}`,
+        role: "assistant",
+        text: "I'd be happy to connect you with our team! Choose the option that works best for you:",
+        actions: [
+          { type: "schedule_demo", label: "Schedule a Demo" },
+          { type: "chat_with_us", label: "Chat" },
+          { type: "whatsapp", label: "WhatsApp" },
+          { type: "continue_chat", label: "Continue Chat" }
+        ],
+        isCreditExhausted: true // Reuse the credit exhaustion card UI
+      };
+    }
+
     // Check if query matches any generic question
     const qaEntry = (genericQA as Record<string, any>)[normalizedQuery];
-    
+
     if (!qaEntry) return null;
 
     const actions: ChatMessage["actions"] = [];

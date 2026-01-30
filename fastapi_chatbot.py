@@ -3312,6 +3312,76 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 
+def is_connect_help_intent(message: str) -> bool:
+    """
+    Check if the user message indicates they want to connect with support/team.
+    Returns True if connect/help intent is detected.
+    """
+    normalized = message.lower().strip()
+
+    connect_keywords = [
+        'connect me',
+        'connect with',
+        'connect to',
+        'talk to someone',
+        'talk to a person',
+        'talk to support',
+        'talk to agent',
+        'talk to an agent',
+        'talk to a agent',
+        'talk to human',
+        'speak to someone',
+        'speak to a person',
+        'speak to support',
+        'speak to agent',
+        'speak with someone',
+        'speak with support',
+        'human agent',
+        'real person',
+        'customer support',
+        'customer service',
+        'contact support',
+        'contact team',
+        'contact someone',
+        'get help',
+        'need help',
+        'need assistance',
+        'need support',
+        'i need assistance',
+        'i need support',
+        'help me connect',
+        'can you help',
+        'could you help',
+        'can you connect',
+        'could you connect',
+        'would you connect',
+        'can i talk',
+        'can i speak',
+        'can i connect',
+        'get in touch',
+        'reach out',
+        'want to connect',
+        'looking to connect',
+        'connect me with',
+        'put me through',
+        'transfer me',
+        'live agent',
+        'live support',
+        'live chat',
+        'talk to your team',
+        'speak to your team',
+        'connect with your team',
+        'connect me to your team',
+    ]
+
+    for keyword in connect_keywords:
+        if keyword in normalized:
+            print(f"[CONNECT INTENT] Detected keyword '{keyword}' in message: {message}")
+            return True
+
+    return False
+
+
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     """
@@ -3324,8 +3394,36 @@ async def chat_stream(request: ChatRequest):
     - Final message: data: {"chunk": "", "done": true, "processing_time": 1.23, "explore_url": "..."}\n\n
     - Credit exhausted: data: {"credit_exhausted": true, "message": "...", "actions": [...]}\n\n
     - Clarifying question: data: {"clarifying_question": true, "question": "...", "suggestions": [...]}\n\n
+    - Connect support: data: {"credit_exhausted": true, "message": "...", "actions": [...]}\n\n (same format as credit exhausted)
     """
     await ensure_initialized()
+
+    # Check for connect/help intent FIRST - before any LLM processing
+    if is_connect_help_intent(request.message):
+        print(f"[CHAT STREAM] Connect/help intent detected - returning support options")
+        async def connect_support_response():
+            response_data = {
+                "credit_exhausted": True,  # Reuse the same UI component
+                "message": "I'd be happy to connect you with our team! Choose the option that works best for you:",
+                "actions": [
+                    {"type": "schedule_demo", "label": "Schedule a Demo"},
+                    {"type": "chat_with_us", "label": "Chat"},
+                    {"type": "whatsapp", "label": "WhatsApp"},
+                    {"type": "continue_chat", "label": "Continue Chat"}
+                ],
+                "done": True
+            }
+            yield f"data: {json.dumps(response_data)}\n\n"
+
+        return StreamingResponse(
+            connect_support_response(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
 
     if not chatbot_manager:
         raise HTTPException(status_code=503, detail="Chatbot not initialized")

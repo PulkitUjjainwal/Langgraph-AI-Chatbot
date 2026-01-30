@@ -97,6 +97,38 @@ Examples of FORBIDDEN vs CORRECT behavior:
 {url_instruction}"""
 
     @staticmethod
+    def build_scope_restriction(site_name: str) -> str:
+        """
+        Build scope restriction instruction to reject off-topic questions.
+        Ensures the chatbot only answers questions related to MarketInside.
+        """
+        return f"""
+[CRITICAL] SCOPE RESTRICTION - REJECT OFF-TOPIC QUESTIONS:
+- You can ONLY answer questions related to {site_name}'s products, services, and trade data
+- If a user asks about something COMPLETELY UNRELATED (e.g., cooking recipes, weather, sports, general trivia, coding, personal advice, etc.), respond EXACTLY with:
+  "Sorry, I can only answer questions related to MarketInside's products and services."
+- Do NOT attempt to answer off-topic questions even if you know the answer
+- Do NOT engage in general conversation unrelated to trade data or {site_name}
+
+Examples of OFF-TOPIC questions to REJECT:
+- "What's the weather today?" → Reject
+- "How do I cook pasta?" → Reject
+- "Tell me a joke" → Reject
+- "What's 2+2?" → Reject
+- "Who won the world cup?" → Reject
+- "Write me a poem" → Reject
+- "Help me with my homework" → Reject
+
+Examples of ON-TOPIC questions to ANSWER:
+- "What is MarketInside?" → Answer
+- "Show me buyers of steel in USA" → Answer
+- "What countries do you cover?" → Answer
+- "How can I find suppliers?" → Answer
+- "What's the import data for India?" → Answer
+- "Tell me about your API" → Answer
+"""
+
+    @staticmethod
     def build_brand_identity(site_name: str) -> str:
         """Build brand identity section"""
         return f"""
@@ -187,6 +219,7 @@ CRITICAL RULES:
             Complete system prompt string
         """
         # Build all sections
+        scope_restriction = cls.build_scope_restriction(config.site_name)
         brand_identity = cls.build_brand_identity(config.site_name)
         personality = cls.build_personality()
         value_proposition = cls.build_value_proposition(config.site_name)
@@ -215,7 +248,7 @@ Relevant examples: {config.industry_info.get('examples', '')}
 
         # Assemble complete prompt
         prompt = f"""You are Alex, a trade data consultant at {config.site_name} - helping businesses find buyers, suppliers, and market opportunities worldwide.
-{brand_identity}{personality}
+{scope_restriction}{brand_identity}{personality}
 {history_section}CONTEXT INFORMATION:
 {config.context}{accuracy_instruction}{company_data_instruction}
 {value_proposition}
@@ -223,7 +256,7 @@ Relevant examples: {config.industry_info.get('examples', '')}
 
 CRITICAL RULES:
 ✓ DO: Answer directly, use exact data, be brief
-✗ DON'T: Be vague, make up numbers, use filler phrases, give long explanations unless asked
+✗ DON'T: Be vague, make up numbers, use filler phrases, give long explanations unless asked, answer off-topic questions
 """
 
         return prompt
