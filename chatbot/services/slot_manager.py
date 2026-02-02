@@ -43,6 +43,13 @@ class SlotState:
 class SlotConfig:
     """Configuration for slot requirements by intent"""
 
+    # List of continents (not countries) - these should use KB data, not API
+    CONTINENTS = {
+        "africa", "asia", "europe", "north america", "south america",
+        "oceania", "oceania australia", "antarctica", "america",
+        "asia pacific", "global"
+    }
+
     # Required slots for each intent type
     # NOTE: direction is NOT required - we default to "import" as most common use case
     REQUIRED_SLOTS: Dict[str, List[str]] = {
@@ -298,6 +305,38 @@ class SlotManager:
         # Use hyphens instead of %20 for URL paths (API client expects this format)
         return value.lower().strip().replace(" ", "-")
 
+    def is_continent(self, value: str) -> bool:
+        """
+        Check if the value is a continent (not a country).
+        Continents should use KB data, not API calls.
+        """
+        if not value:
+            return False
+        normalized = value.lower().strip().replace("-", " ")
+        return normalized in self.config.CONTINENTS
+
+    def get_continent_name(self, value: str) -> str:
+        """Get properly formatted continent name for display"""
+        if not value:
+            return ""
+        normalized = value.lower().strip().replace("-", " ")
+
+        # Map to proper display names
+        continent_display = {
+            "africa": "Africa",
+            "asia": "Asia",
+            "europe": "Europe",
+            "north america": "North America",
+            "south america": "South America",
+            "oceania": "Oceania",
+            "oceania australia": "Oceania Australia",
+            "antarctica": "Antarctica",
+            "america": "America",
+            "asia pacific": "Asia Pacific",
+            "global": "Global"
+        }
+        return continent_display.get(normalized, value.title())
+
     def _get_missing_slots(self, intent: str, slots: Dict[str, Any]) -> List[str]:
         """
         Get list of missing required slots for an intent.
@@ -436,7 +475,8 @@ class SlotManager:
             slots: Collected slots
 
         Returns:
-            URL string or None if slots incomplete
+            URL string, special marker for continents, or None if slots incomplete
+            Returns "CONTINENT:{name}" for continent queries (use KB data instead of API)
         """
         if not self.has_all_required_slots(intent, slots):
             return None
@@ -448,6 +488,13 @@ class SlotManager:
 
         if intent == "search_country_data":
             country = slots.get("country", "")
+
+            # Check if this is a continent query (use KB data, not API)
+            if self.is_continent(country):
+                continent_name = self.get_continent_name(country)
+                print(f"  [SLOTS] Detected continent query: {continent_name} - will use KB data")
+                return f"CONTINENT:{continent_name}"
+
             direction = slots.get("direction", "import")
             direction_suffix = "imports" if direction == "import" else "exports"
             return f"{base_url}/country/{country}/{direction_suffix}"

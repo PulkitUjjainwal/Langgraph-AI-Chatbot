@@ -2522,6 +2522,8 @@ IMPORTANT
         # Only check slots for data-specific intents
         data_intents = ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]
         explore_url = ""
+        is_continent_query = False  # Flag for continent queries (use KB, not API)
+        continent_name = ""
 
         if intent in data_intents:
             # Get previous slots to detect if query changed
@@ -2556,6 +2558,14 @@ IMPORTANT
             # All slots collected - generate URL with defaults applied
             explore_url = slot_mgr.generate_url(intent, slot_state.slots) or intent_url
             print(f"  [STREAM] Generated explore_url: {explore_url}")
+
+            # Check if this is a CONTINENT query (use KB data, not API)
+            is_continent_query = explore_url and explore_url.startswith("CONTINENT:")
+            if is_continent_query:
+                continent_name = explore_url.replace("CONTINENT:", "")
+                print(f"  [STREAM] Continent query detected: {continent_name} - using KB data only")
+                # Set explore_url to search-data page for the final link
+                explore_url = "https://www.marketinsidedata.com/en/search-data"
 
             # Clear cached context if query changed (different intent, country, hs_code, product, etc.)
             # This prevents using old country data when user asks for specific trade data
@@ -2605,7 +2615,11 @@ IMPORTANT
         # Determine which URL to use for data fetching
         # Priority: explore_url from slots (more accurate) > dynamic_url from frontend
         # Only use dynamic_url if it's a valid marketinsidedata.com URL
-        if explore_url:
+        # SKIP API calls for continent queries - use KB data instead
+        if is_continent_query:
+            fetch_url = ""
+            print(f"  [STREAM] Continent query - skipping API call, using KB data")
+        elif explore_url and not explore_url.startswith("CONTINENT:"):
             fetch_url = explore_url
             print(f"  [STREAM] Using slot-generated URL: {fetch_url}")
         elif dynamic_url and "marketinsidedata.com" in dynamic_url:

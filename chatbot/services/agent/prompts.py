@@ -165,41 +165,52 @@ CORE VALUE PROPOSITION (mention naturally when relevant):
     def build_country_list_formatting() -> str:
         """
         Instruction for formatting country lists by region/continent.
-        Shows preview countries + count of remaining, ordered by GDP.
+        Uses general world knowledge for accurate country counts.
         """
         return """
 [COUNTRY LIST FORMATTING - FOR CONTINENT COVERAGE QUESTIONS]:
-When user asks specifically about "countries covered" or "available countries" for a CONTINENT (Africa, America, Europe, Asia Pacific, Global):
+When user asks about "countries covered" or "data available" for a CONTINENT (Africa, Asia, Europe, Americas, etc.):
 
-1. Show ONLY 3-5 example countries from that region
-2. List countries in DESCENDING ORDER of GDP (highest GDP first)
-3. Add the count of remaining countries as "+ X more countries"
-4. Mention the data types/coverage briefly
-5. Add the search-data link ONLY for these continent coverage questions
+IMPORTANT: Use your GENERAL WORLD KNOWLEDGE for country lists, NOT the context data.
+- Use accurate real-world country counts for each continent
+- List top countries by GDP (highest first)
 
-FORMAT EXAMPLE:
-User: "What countries are covered in Africa?"
-Response: "For Africa, we cover countries like **Nigeria, South Africa, Egypt, Kenya, Ethiopia** and +19 more countries. This includes Mirror Customs Data, Suez Canal Bill of Lading Data, and Transit Data coverage.
+ACTUAL CONTINENT DATA (use these counts):
+- Africa: 54 countries (Top GDP: Nigeria, South Africa, Egypt, Algeria, Kenya, Ethiopia, Ghana, Tanzania)
+- Asia: 48 countries (Top GDP: China, Japan, India, South Korea, Indonesia, Saudi Arabia, Turkey, Iran)
+- Europe: 44 countries (Top GDP: Germany, France, UK, Italy, Spain, Netherlands, Switzerland, Poland)
+- North America: 23 countries (Top GDP: USA, Canada, Mexico, Guatemala, Cuba, Dominican Republic)
+- South America: 12 countries (Top GDP: Brazil, Argentina, Colombia, Chile, Peru, Ecuador, Venezuela)
+- Oceania: 14 countries (Top GDP: Australia, New Zealand, Papua New Guinea, Fiji)
+
+FORMAT:
+1. Show 3-4 TOP GDP countries from that continent
+2. Add "+ X more countries available" with ACCURATE remaining count
+3. Mention MarketInside provides trade data coverage
+4. Add search-data link
+
+EXAMPLES:
+User: "What countries are covered in Asia?"
+Response: "For Asia, MarketInside provides trade data coverage for countries including **China, Japan, India, South Korea, Indonesia** and +43 more countries. Our data includes import/export records, buyer/supplier information, and shipment details.
 
 📊 [Check Out Our Page for More Details](https://www.marketinsidedata.com/en/search-data)"
 
-User: "Which European countries do you have data for?"
-Response: "In Europe, we have data for **Germany, France, Italy, Spain, Netherlands** and +7 more countries with Mirror Customs Data, Statistical Data, and Transit Data coverage.
+User: "Tell me about Africa data coverage"
+Response: "In Africa, we cover **Nigeria, South Africa, Egypt, Kenya, Ethiopia** and +49 more countries with comprehensive trade intelligence including customs data, shipment records, and market insights.
 
 📊 [Check Out Our Page for More Details](https://www.marketinsidedata.com/en/search-data)"
 
-User: "What countries in Asia Pacific?"
-Response: "For Asia Pacific, we cover **China, Japan, South Korea, Australia, Indonesia** and +6 more countries with Mirror Customs Data, Transit Data, and Statistical Data coverage.
+User: "European countries data?"
+Response: "For Europe, MarketInside has data for **Germany, France, UK, Italy, Spain** and +39 more countries covering import/export transactions, trade statistics, and company information.
 
 📊 [Check Out Our Page for More Details](https://www.marketinsidedata.com/en/search-data)"
 
 RULES:
-- NEVER list all 20+ countries in a single response
-- ALWAYS order the example countries by GDP (highest to lowest)
-- Always show the "+ X more" count for remaining countries
-- Keep the response concise
-- ONLY add the search-data link when user asks about countries covered in a CONTINENT
-- Do NOT add this link for other types of questions (pricing, features, company data, etc.)
+- Use REAL-WORLD country counts (Africa=54, Asia=48, Europe=44, etc.)
+- Do NOT use pricing page or KB data for country counts
+- ALWAYS list countries by GDP (highest first)
+- Keep response concise - just 3-4 example countries + count
+- ALWAYS include the search-data link for continent coverage questions
 """
 
     @staticmethod
