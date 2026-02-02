@@ -2529,43 +2529,55 @@ IMPORTANT
             # Get previous slots to detect if query changed
             prev_slots = slot_mgr.get_slots(session_id).slots.copy()
 
-            slot_state = slot_mgr.update_slots(session_id, intent, params)
-
-            # Check for missing slots
-            missing_question = slot_mgr.get_missing_slot_question(session_id, intent, slot_state.slots)
-
-            if missing_question:
-                # Need more info - yield clarifying question
-                print(f"  [STREAM] Missing slot: {missing_question['slot_name']}")
-
-                # Save messages
-                if self.redis:
-                    self.redis.save_message(session_id, {"role": "user", "content": message})
-                    self.redis.save_message(session_id, {
-                        "role": "assistant",
-                        "content": missing_question["question"],
-                        "is_clarifying": True
-                    })
-
-                yield json.dumps({
-                    "clarifying_question": True,
-                    "question": missing_question["question"],
-                    "slot_name": missing_question["slot_name"],
-                    "suggestions": missing_question.get("suggestions", [])
-                })
-                return
-
-            # All slots collected - generate URL with defaults applied
-            explore_url = slot_mgr.generate_url(intent, slot_state.slots) or intent_url
-            print(f"  [STREAM] Generated explore_url: {explore_url}")
-
-            # Check if this is a CONTINENT query (use KB data, not API)
-            is_continent_query = explore_url and explore_url.startswith("CONTINENT:")
-            if is_continent_query:
-                continent_name = explore_url.replace("CONTINENT:", "")
-                print(f"  [STREAM] Continent query detected: {continent_name} - using KB data only")
-                # Set explore_url to search-data page for the final link
+            # Check if query mentions a continent BEFORE slot processing
+            # Continents should use KB data, not trigger slot questions
+            country_param = params.get("country", "")
+            if country_param and slot_mgr.is_continent(country_param):
+                is_continent_query = True
+                continent_name = slot_mgr.get_continent_name(country_param)
                 explore_url = "https://www.marketinsidedata.com/en/search-data"
+                print(f"  [STREAM] Continent detected early: {continent_name} - skipping slot processing, using KB data")
+                # Don't process slots for continent queries - let KB handle it
+                slot_state = slot_mgr.get_slots(session_id)  # Get existing state without updating
+            else:
+                # Normal country query - process slots
+                slot_state = slot_mgr.update_slots(session_id, intent, params)
+
+                # Check for missing slots
+                missing_question = slot_mgr.get_missing_slot_question(session_id, intent, slot_state.slots)
+
+                if missing_question:
+                    # Need more info - yield clarifying question
+                    print(f"  [STREAM] Missing slot: {missing_question['slot_name']}")
+
+                    # Save messages
+                    if self.redis:
+                        self.redis.save_message(session_id, {"role": "user", "content": message})
+                        self.redis.save_message(session_id, {
+                            "role": "assistant",
+                            "content": missing_question["question"],
+                            "is_clarifying": True
+                        })
+
+                    yield json.dumps({
+                        "clarifying_question": True,
+                        "question": missing_question["question"],
+                        "slot_name": missing_question["slot_name"],
+                        "suggestions": missing_question.get("suggestions", [])
+                    })
+                    return
+
+                # All slots collected - generate URL with defaults applied
+                explore_url = slot_mgr.generate_url(intent, slot_state.slots) or intent_url
+                print(f"  [STREAM] Generated explore_url: {explore_url}")
+
+                # Check if this is a CONTINENT query (use KB data, not API)
+                if explore_url and explore_url.startswith("CONTINENT:"):
+                    is_continent_query = True
+                    continent_name = explore_url.replace("CONTINENT:", "")
+                    print(f"  [STREAM] Continent query detected: {continent_name} - using KB data only")
+                    # Set explore_url to search-data page for the final link
+                    explore_url = "https://www.marketinsidedata.com/en/search-data"
 
             # Clear cached context if query changed (different intent, country, hs_code, product, etc.)
             # This prevents using old country data when user asks for specific trade data

@@ -165,52 +165,59 @@ CORE VALUE PROPOSITION (mention naturally when relevant):
     def build_country_list_formatting() -> str:
         """
         Instruction for formatting country lists by region/continent.
-        Uses general world knowledge for accurate country counts.
+        Handles both general questions and specific data availability questions.
         """
         return """
-[COUNTRY LIST FORMATTING - FOR CONTINENT COVERAGE QUESTIONS]:
-When user asks about "countries covered" or "data available" for a CONTINENT (Africa, Asia, Europe, Americas, etc.):
+[COUNTRY LIST FORMATTING - FOR CONTINENT QUESTIONS]:
 
-IMPORTANT: Use your GENERAL WORLD KNOWLEDGE for country lists, NOT the context data.
-- Use accurate real-world country counts for each continent
-- List top countries by GDP (highest first)
+There are TWO types of continent questions - handle them differently:
 
-ACTUAL CONTINENT DATA (use these counts):
-- Africa: 54 countries (Top GDP: Nigeria, South Africa, Egypt, Algeria, Kenya, Ethiopia, Ghana, Tanzania)
-- Asia: 48 countries (Top GDP: China, Japan, India, South Korea, Indonesia, Saudi Arabia, Turkey, Iran)
-- Europe: 44 countries (Top GDP: Germany, France, UK, Italy, Spain, Netherlands, Switzerland, Poland)
-- North America: 23 countries (Top GDP: USA, Canada, Mexico, Guatemala, Cuba, Dominican Republic)
-- South America: 12 countries (Top GDP: Brazil, Argentina, Colombia, Chile, Peru, Ecuador, Venezuela)
-- Oceania: 14 countries (Top GDP: Australia, New Zealand, Papua New Guinea, Fiji)
+=== TYPE 1: GENERAL CONTINENT OVERVIEW ===
+Questions like: "Tell me about Africa", "Asia data coverage?", "What about Europe?"
+→ Use GENERAL WORLD KNOWLEDGE for country counts and top economies
 
-FORMAT:
-1. Show 3-4 TOP GDP countries from that continent
-2. Add "+ X more countries available" with ACCURATE remaining count
-3. Mention MarketInside provides trade data coverage
-4. Add search-data link
+WORLD KNOWLEDGE (use these for general questions):
+- Africa: 54 countries (Top GDP: Nigeria, South Africa, Egypt, Algeria, Kenya)
+- Asia: 48 countries (Top GDP: China, Japan, India, South Korea, Indonesia)
+- Europe: 44 countries (Top GDP: Germany, France, UK, Italy, Spain)
+- North America: 23 countries (Top GDP: USA, Canada, Mexico)
+- South America: 12 countries (Top GDP: Brazil, Argentina, Colombia, Chile)
+- Oceania: 14 countries (Top GDP: Australia, New Zealand)
 
-EXAMPLES:
-User: "What countries are covered in Asia?"
-Response: "For Asia, MarketInside provides trade data coverage for countries including **China, Japan, India, South Korea, Indonesia** and +43 more countries. Our data includes import/export records, buyer/supplier information, and shipment details.
+FORMAT for general questions:
+"For [Continent], MarketInside provides trade data coverage for countries including **[Top 4-5 GDP countries]** and +[remaining] more countries."
+
+=== TYPE 2: SPECIFIC DATA AVAILABILITY ===
+Questions like: "Which countries available in Africa?", "List countries for Asia", "Show me available countries"
+→ Use the CONTEXT DATA from "Data Availability - [Continent]" chunks
+
+When context contains "Data Availability - [Continent]" information:
+- List the ACTUAL countries mentioned in that context
+- Show 4-5 countries from the list + count of remaining
+- These are the countries MarketInside ACTUALLY has data for
+
+FORMAT for specific availability:
+"MarketInside has trade data available for these [Continent] countries: **[4-5 actual countries from context]** and +[X] more. [Brief mention of data types]."
+
+=== EXAMPLES ===
+
+General question - "Tell me about Africa data coverage":
+"For Africa, MarketInside provides trade data coverage for countries including **Nigeria, South Africa, Egypt, Kenya, Ethiopia** and +49 more countries. Our data includes import/export records, buyer/supplier information, and shipment details.
 
 📊 [Check Out Our Page for More Details](https://www.marketinsidedata.com/en/search-data)"
 
-User: "Tell me about Africa data coverage"
-Response: "In Africa, we cover **Nigeria, South Africa, Egypt, Kenya, Ethiopia** and +49 more countries with comprehensive trade intelligence including customs data, shipment records, and market insights.
+Specific question - "Which countries available for Africa?":
+(Using context: "Countries covered in Africa: Algeria, Angola, Benin, Botswana...")
+"MarketInside has trade data available for these African countries: **Nigeria, South Africa, Egypt, Algeria, Angola** and +51 more including Benin, Botswana, Cameroon, etc. Data includes detailed import/export records and mirror customs data.
 
 📊 [Check Out Our Page for More Details](https://www.marketinsidedata.com/en/search-data)"
 
-User: "European countries data?"
-Response: "For Europe, MarketInside has data for **Germany, France, UK, Italy, Spain** and +39 more countries covering import/export transactions, trade statistics, and company information.
-
-📊 [Check Out Our Page for More Details](https://www.marketinsidedata.com/en/search-data)"
-
-RULES:
-- Use REAL-WORLD country counts (Africa=54, Asia=48, Europe=44, etc.)
-- Do NOT use pricing page or KB data for country counts
-- ALWAYS list countries by GDP (highest first)
-- Keep response concise - just 3-4 example countries + count
-- ALWAYS include the search-data link for continent coverage questions
+=== RULES ===
+- For GENERAL questions: Use world knowledge counts
+- For SPECIFIC "available/list" questions: Use CONTEXT data if available
+- ALWAYS order countries by GDP (highest first) when listing examples
+- ALWAYS include the search-data link
+- Keep responses concise
 """
 
     @staticmethod
