@@ -10,6 +10,8 @@ This script follows the EXACT same pattern as your existing KB:
 Usage:
     python scripts/kb_builder.py                    # Scrape all default pages & build index
     python scripts/kb_builder.py --url URL          # Add single URL to existing KB
+    python scripts/kb_builder.py --rescrape URL     # Rescrape a URL (removes old chunks first)
+    python scripts/kb_builder.py --rescrape-pricing # Rescrape pricing page with improved extraction
     python scripts/kb_builder.py --add-homepage     # Add homepage to existing KB
     python scripts/kb_builder.py --rebuild          # Rebuild entire KB from scratch
     python scripts/kb_builder.py --index-only       # Regenerate FAISS index from existing chunks
@@ -185,6 +187,72 @@ class MarketInsideKBBuilder:
 
         return headings_content
 
+    def _extract_card_sections(self, soup: BeautifulSoup) -> List[Tuple[str, str]]:
+        """
+        Extract content from card-based layouts (like pricing page regions).
+        Looks for parent containers that hold both heading and content together.
+        """
+        card_content = []
+
+        # Find all headings and look at their parent containers
+        for heading in soup.find_all(['h2', 'h3', 'h4']):
+            heading_text = self._clean_text(heading.get_text())
+            if not heading_text or len(heading_text) < 3:
+                continue
+
+            # Find the nearest parent container (div, section, article)
+            parent = heading.find_parent(['div', 'section', 'article'])
+            if not parent:
+                continue
+
+            # Get all text content from this parent container
+            parent_text = self._clean_text(parent.get_text())
+
+            # Remove the heading text from the content to avoid duplication
+            content = parent_text.replace(heading_text, '', 1).strip()
+
+            if content and len(content) > 20:
+                card_content.append((heading_text, content))
+
+        return card_content
+
+    def _extract_pricing_regions(self, soup: BeautifulSoup) -> List[Tuple[str, str]]:
+        """
+        Special extraction for pricing page region cards.
+        Each region (America, Global, Africa, Europe, Asia Pacific) is in its own card.
+        """
+        regions = []
+        region_names = ['America', 'Global', 'Africa', 'Europe', 'Asia Pacific']
+
+        for heading in soup.find_all(['h2', 'h3', 'h4']):
+            heading_text = self._clean_text(heading.get_text())
+
+            # Check if this is a region heading
+            if heading_text not in region_names:
+                continue
+
+            # Find the card container - go up to find a meaningful parent
+            card = None
+            for parent in heading.parents:
+                if parent.name in ['div', 'section', 'article']:
+                    # Check if this parent contains enough content (countries list)
+                    parent_text = parent.get_text()
+                    # Region cards typically have country lists and feature bullets
+                    if len(parent_text) > 100 and ('Countries' in parent_text or 'Data' in parent_text):
+                        card = parent
+                        break
+
+            if card:
+                # Extract all text from this card
+                card_text = self._clean_text(card.get_text())
+
+                # The content should include the country list and features
+                if card_text and len(card_text) > 50:
+                    regions.append((heading_text, card_text))
+                    logger.info(f"  Extracted region '{heading_text}': {len(card_text)} chars")
+
+        return regions
+
     def _chunk_text(self, text: str, max_chunk_size: int = 8000, overlap: int = 200) -> List[str]:
         """Split text into chunks with overlap"""
         if len(text) <= max_chunk_size:
@@ -241,8 +309,16 @@ class MarketInsideKBBuilder:
             # Get full text
             full_text = self._clean_text(main_content.get_text())
 
-            # Extract headings with content
-            headings_content = self._extract_headings(main_content)
+            # Use special extraction for pricing page (has card-based regions)
+            if 'plan-and-pricing' in url:
+                logger.info("  Using pricing page extraction for region cards...")
+                headings_content = self._extract_pricing_regions(main_content)
+                # Also try card sections as fallback
+                if len(headings_content) < 3:
+                    headings_content.extend(self._extract_card_sections(main_content))
+            else:
+                # Standard heading extraction for other pages
+                headings_content = self._extract_headings(main_content)
 
             return {
                 'url': url,
@@ -461,6 +537,59 @@ class MarketInsideKBBuilder:
         """Add a single URL to the existing KB"""
         self.build_kb(urls=[url], append=True)
 
+    def rescrape_url(self, url: str):
+        """
+        Rescrape a specific URL - removes old chunks and re-scrapes.
+        Useful for updating pages that have changed or were scraped incorrectly.
+        """
+        if not PLAYWRIGHT_AVAILABLE:
+            logger.error("Playwright not available")
+            return
+
+        # Load existing chunks
+        if not self.load_existing_chunks():
+            logger.warning("No existing chunks found, will create new KB")
+            self.chunks = []
+
+        # Remove existing chunks for this URL
+        old_count = len(self.chunks)
+        self.chunks = [c for c in self.chunks if c.page_url != url]
+        removed = old_count - len(self.chunks)
+        if removed > 0:
+            logger.info(f"Removed {removed} existing chunks for {url}")
+
+        # Rescrape the URL
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            )
+            page = context.new_page()
+
+            page_data = self.scrape_page(url, page)
+            if page_data:
+                new_chunks = self.create_chunks_from_page(page_data)
+                self.chunks.extend(new_chunks)
+                logger.info(f"Created {len(new_chunks)} new chunks from {url}")
+
+            browser.close()
+
+        # Reassign chunk IDs to be sequential
+        for i, chunk in enumerate(self.chunks):
+            chunk.chunk_id = i
+        self.chunk_id_counter = len(self.chunks)
+
+        # Save chunks
+        self.save_chunks()
+
+        # Rebuild FAISS index
+        if FAISS_AVAILABLE and OLLAMA_AVAILABLE:
+            logger.info("Rebuilding FAISS index...")
+            index = self.build_faiss_index(self.chunks)
+            self.save_faiss_index(index)
+
+        self._print_summary()
+
     def _print_summary(self):
         """Print KB summary"""
         unique_urls = set(c.page_url for c in self.chunks)
@@ -476,6 +605,8 @@ class MarketInsideKBBuilder:
 def main():
     parser = argparse.ArgumentParser(description='Build Knowledge Base for Market Inside Data')
     parser.add_argument('--url', type=str, help='Single URL to scrape and add')
+    parser.add_argument('--rescrape', type=str, help='Rescrape a specific URL (removes old chunks first)')
+    parser.add_argument('--rescrape-pricing', action='store_true', help='Rescrape the pricing page with improved extraction')
     parser.add_argument('--add-homepage', action='store_true', help='Add homepage to existing KB')
     parser.add_argument('--rebuild', action='store_true', help='Rebuild entire KB from scratch')
     parser.add_argument('--index-only', action='store_true', help='Regenerate FAISS index from existing chunks')
@@ -489,7 +620,13 @@ def main():
         data_dir=args.data_dir
     )
 
-    if args.url:
+    if args.rescrape:
+        logger.info(f"Rescraping URL: {args.rescrape}")
+        builder.rescrape_url(args.rescrape)
+    elif args.rescrape_pricing:
+        logger.info("Rescraping pricing page with improved region extraction...")
+        builder.rescrape_url("https://www.marketinsidedata.com/en/plan-and-pricing")
+    elif args.url:
         logger.info(f"Adding single URL: {args.url}")
         builder.add_single_url(args.url)
     elif args.add_homepage:

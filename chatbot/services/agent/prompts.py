@@ -162,6 +162,47 @@ CORE VALUE PROPOSITION (mention naturally when relevant):
 """
 
     @staticmethod
+    def build_country_list_formatting() -> str:
+        """
+        Instruction for formatting country lists by region/continent.
+        Shows preview countries + count of remaining, ordered by GDP.
+        """
+        return """
+[COUNTRY LIST FORMATTING - FOR CONTINENT COVERAGE QUESTIONS]:
+When user asks specifically about "countries covered" or "available countries" for a CONTINENT (Africa, America, Europe, Asia Pacific, Global):
+
+1. Show ONLY 3-5 example countries from that region
+2. List countries in DESCENDING ORDER of GDP (highest GDP first)
+3. Add the count of remaining countries as "+ X more countries"
+4. Mention the data types/coverage briefly
+5. Add the search-data link ONLY for these continent coverage questions
+
+FORMAT EXAMPLE:
+User: "What countries are covered in Africa?"
+Response: "For Africa, we cover countries like **Nigeria, South Africa, Egypt, Kenya, Ethiopia** and +19 more countries. This includes Mirror Customs Data, Suez Canal Bill of Lading Data, and Transit Data coverage.
+
+📊 [Check Out Our Page for More Details](https://www.marketinsidedata.com/en/search-data)"
+
+User: "Which European countries do you have data for?"
+Response: "In Europe, we have data for **Germany, France, Italy, Spain, Netherlands** and +7 more countries with Mirror Customs Data, Statistical Data, and Transit Data coverage.
+
+📊 [Check Out Our Page for More Details](https://www.marketinsidedata.com/en/search-data)"
+
+User: "What countries in Asia Pacific?"
+Response: "For Asia Pacific, we cover **China, Japan, South Korea, Australia, Indonesia** and +6 more countries with Mirror Customs Data, Transit Data, and Statistical Data coverage.
+
+📊 [Check Out Our Page for More Details](https://www.marketinsidedata.com/en/search-data)"
+
+RULES:
+- NEVER list all 20+ countries in a single response
+- ALWAYS order the example countries by GDP (highest to lowest)
+- Always show the "+ X more" count for remaining countries
+- Keep the response concise
+- ONLY add the search-data link when user asks about countries covered in a CONTINENT
+- Do NOT add this link for other types of questions (pricing, features, company data, etc.)
+"""
+
+    @staticmethod
     def build_response_structure(query_type: str = "standard") -> str:
         """Build response structure guidelines"""
 
@@ -226,6 +267,7 @@ CRITICAL RULES:
         accuracy_instruction = cls.build_accuracy_instruction()
         company_data_instruction = cls.build_company_data_instruction(config.source_url) if config.has_dynamic_content else ""
         response_structure = cls.build_response_structure(config.query_type)
+        country_list_formatting = cls.build_country_list_formatting()
 
         # Construct conversation history
         history_section = ""
@@ -252,6 +294,7 @@ Relevant examples: {config.industry_info.get('examples', '')}
 {history_section}CONTEXT INFORMATION:
 {config.context}{accuracy_instruction}{company_data_instruction}
 {value_proposition}
+{country_list_formatting}
 {industry_section}{response_structure}
 
 CRITICAL RULES:
