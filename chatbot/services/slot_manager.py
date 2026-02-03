@@ -7,6 +7,7 @@ when required parameters are missing.
 """
 
 import json
+import re
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -48,6 +49,41 @@ class SlotConfig:
         "africa", "asia", "europe", "north america", "south america",
         "oceania", "oceania australia", "antarctica", "america",
         "asia pacific", "global"
+    }
+
+    # Restricted countries - don't show data, redirect to support/demo
+    # These countries require users to schedule a demo or contact support
+    RESTRICTED_COUNTRIES = {
+        "india"
+    }
+
+    # Complex query patterns - queries needing multiple API calls
+    # These should redirect to support/dashboard instead of partial answers
+    # NOTE: Only detect queries that ACTUALLY need 2+ specific country API calls
+    COMPLEX_QUERY_PATTERNS = {
+        # Comparison keywords (need 2+ specific countries to be complex)
+        "comparison_keywords": [
+            " vs ", " vs. ", " versus ", " compared to ", " compare ",
+            " comparison between ", " difference between ", " differences between "
+        ],
+        # Exclusion patterns (e.g., "from usa but not from china")
+        "exclusion_patterns": [
+            " but not from ", " but not in ", " excluding ", " except from "
+        ]
+    }
+
+    # Known countries list for multi-country detection
+    KNOWN_COUNTRIES = {
+        "usa", "united states", "america", "china", "india", "germany",
+        "japan", "uk", "united kingdom", "france", "italy", "spain",
+        "canada", "mexico", "brazil", "russia", "australia", "south korea",
+        "indonesia", "turkey", "saudi arabia", "netherlands", "switzerland",
+        "poland", "sweden", "belgium", "argentina", "thailand", "vietnam",
+        "malaysia", "singapore", "philippines", "pakistan", "bangladesh",
+        "egypt", "nigeria", "south africa", "kenya", "uae", "dubai",
+        "taiwan", "hong kong", "ireland", "austria", "norway", "denmark",
+        "finland", "portugal", "greece", "czech republic", "romania",
+        "colombia", "chile", "peru", "venezuela", "ecuador"
     }
 
     # Required slots for each intent type
@@ -337,6 +373,120 @@ class SlotManager:
         }
         return continent_display.get(normalized, value.title())
 
+    def is_restricted_country(self, value: str) -> bool:
+        """
+        Check if the country is restricted (requires demo/support).
+        Restricted countries should not show data via API.
+        """
+        if not value:
+            return False
+        normalized = value.lower().strip().replace("-", " ")
+        return normalized in self.config.RESTRICTED_COUNTRIES
+
+    def get_restricted_country_name(self, value: str) -> str:
+        """Get properly formatted restricted country name for display"""
+        if not value:
+            return ""
+        return value.strip().replace("-", " ").title()
+
+    def is_complex_query(self, message: str, params: Dict[str, Any] = None) -> Tuple[bool, str]:
+        """
+        Detect if the query is complex and requires multiple API calls.
+
+        Complex = needs data from 2+ specific countries (multiple API calls).
+        NOT complex = general questions, single country queries, time ranges for one country.
+
+        Args:
+            message: User's query message
+            params: Extracted parameters from intent detection
+
+        Returns:
+            Tuple of (is_complex: bool, reason: str)
+        """
+        if not message:
+            return False, ""
+
+        message_lower = message.lower()
+
+        # 1. Find all specific countries mentioned in the query
+        countries_found = []
+        for country in self.config.KNOWN_COUNTRIES:
+            # Check for whole word match to avoid false positives
+            pattern = r'\b' + re.escape(country) + r'\b'
+            if re.search(pattern, message_lower):
+                countries_found.append(country)
+
+        # Only complex if 2+ specific countries are mentioned
+        if len(countries_found) < 2:
+            return False, ""
+
+        # 2. Check for comparison keywords with multiple countries
+        for keyword in self.config.COMPLEX_QUERY_PATTERNS["comparison_keywords"]:
+            if keyword in message_lower:
+                return True, f"comparing {' and '.join(countries_found[:2])}"
+
+        # 3. Check for exclusion patterns with multiple countries
+        for pattern in self.config.COMPLEX_QUERY_PATTERNS["exclusion_patterns"]:
+            if pattern in message_lower:
+                return True, f"comparing {' and '.join(countries_found[:2])}"
+
+        # 4. Multiple countries mentioned = complex (needs 2+ API calls)
+        return True, f"multi-country analysis: {', '.join(countries_found[:3])}"
+
+    def get_complex_query_response(self, reason: str, query: str = "") -> Dict[str, Any]:
+        """
+        Generate response for complex queries that need dashboard access.
+
+        Args:
+            reason: Reason why the query is complex (e.g., "comparing usa and china")
+            query: Original user query for context
+
+        Returns:
+            Response dict with message and actions
+        """
+        # Extract additional context from query
+        query_lower = query.lower() if query else ""
+        extra_context = []
+
+        # Extract HS code if mentioned
+        hs_match = re.search(r'hs\s*code\s*(\d+)', query_lower)
+        if hs_match:
+            extra_context.append(f"HS code {hs_match.group(1)}")
+
+        # Extract product if mentioned
+        product_keywords = ["copper", "steel", "electronics", "battery", "energy", "auto", "textile", "chemical", "pharmaceutical", "machinery", "plastic", "oil", "gas"]
+        for product in product_keywords:
+            if product in query_lower:
+                extra_context.append(f"{product} products")
+                break
+
+        # Extract time range if mentioned
+        time_match = re.search(r'(20\d{2})\s*[-–]\s*(20\d{2})', query_lower)
+        if time_match:
+            extra_context.append(f"{time_match.group(1)}-{time_match.group(2)} trends")
+
+        # Build context string
+        context_str = ""
+        if extra_context:
+            context_str = f" including {', '.join(extra_context)}"
+
+        # Build message with query context
+        message = (
+            f"Great question! We have comprehensive data for {reason}{context_str}. "
+            f"Our dashboard provides the detailed multi-country analysis you need. "
+            f"Connect with our team to get full access:"
+        )
+
+        return {
+            "message": message,
+            "actions": [
+                {"type": "schedule_demo", "label": "Schedule a Demo"},
+                {"type": "chat_with_us", "label": "Chat"},
+                {"type": "whatsapp", "label": "WhatsApp"},
+                {"type": "continue_chat", "label": "Continue Chat"}
+            ]
+        }
+
     def _get_missing_slots(self, intent: str, slots: Dict[str, Any]) -> List[str]:
         """
         Get list of missing required slots for an intent.
@@ -494,6 +644,12 @@ class SlotManager:
                 continent_name = self.get_continent_name(country)
                 print(f"  [SLOTS] Detected continent query: {continent_name} - will use KB data")
                 return f"CONTINENT:{continent_name}"
+
+            # Check if this is a restricted country (redirect to support/demo)
+            if self.is_restricted_country(country):
+                country_name = self.get_restricted_country_name(country)
+                print(f"  [SLOTS] Detected restricted country: {country_name} - redirect to support")
+                return f"RESTRICTED:{country_name}"
 
             direction = slots.get("direction", "import")
             direction_suffix = "imports" if direction == "import" else "exports"

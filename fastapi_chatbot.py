@@ -2523,16 +2523,86 @@ IMPORTANT
         data_intents = ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]
         explore_url = ""
         is_continent_query = False  # Flag for continent queries (use KB, not API)
+        is_restricted_country = False  # Flag for restricted countries (redirect to support)
         continent_name = ""
+        restricted_country_name = ""
 
         if intent in data_intents:
             # Get previous slots to detect if query changed
             prev_slots = slot_mgr.get_slots(session_id).slots.copy()
 
+            # ================================================================
+            # COMPLEX QUERY DETECTION - Check FIRST before any other processing
+            # Complex queries (comparisons, multiple countries, trend analysis)
+            # should redirect to support/dashboard instead of partial answers
+            # ================================================================
+            is_complex, complex_reason = slot_mgr.is_complex_query(message, params)
+            if is_complex:
+                print(f"  [STREAM] Complex query detected: {complex_reason} - redirecting to dashboard/support")
+
+                # Save messages
+                if self.redis:
+                    self.redis.save_message(session_id, {"role": "user", "content": message})
+
+                # Get response for complex queries (include original query for context)
+                complex_response = slot_mgr.get_complex_query_response(complex_reason, message)
+
+                # Save assistant response
+                if self.redis:
+                    self.redis.save_message(session_id, {
+                        "role": "assistant",
+                        "content": complex_response["message"]
+                    })
+
+                # Use credit_exhausted format to reuse the same UI component
+                yield json.dumps({
+                    "credit_exhausted": True,  # Reuse the same UI component as connect/support
+                    "message": complex_response["message"],
+                    "actions": complex_response["actions"],
+                    "done": True
+                })
+                return
+
             # Check if query mentions a continent BEFORE slot processing
             # Continents should use KB data, not trigger slot questions
             country_param = params.get("country", "")
-            if country_param and slot_mgr.is_continent(country_param):
+
+            # Check for RESTRICTED COUNTRIES (e.g., India)
+            if country_param and slot_mgr.is_restricted_country(country_param):
+                is_restricted_country = True
+                restricted_country_name = slot_mgr.get_restricted_country_name(country_param)
+                print(f"  [STREAM] Restricted country detected: {restricted_country_name} - redirecting to support")
+
+                # Save messages
+                if self.redis:
+                    self.redis.save_message(session_id, {"role": "user", "content": message})
+
+                # Response message
+                restricted_message = f"We have comprehensive {restricted_country_name} trade data available on our dashboard! To access {restricted_country_name} import/export data, buyer/supplier information, and detailed shipment records, please connect with our team:"
+
+                # Save assistant response
+                if self.redis:
+                    self.redis.save_message(session_id, {
+                        "role": "assistant",
+                        "content": restricted_message
+                    })
+
+                # Use credit_exhausted format to reuse the same UI component
+                yield json.dumps({
+                    "credit_exhausted": True,  # Reuse the same UI component as connect/support
+                    "message": restricted_message,
+                    "actions": [
+                        {"type": "schedule_demo", "label": "Schedule a Demo"},
+                        {"type": "chat_with_us", "label": "Chat"},
+                        {"type": "whatsapp", "label": "WhatsApp"},
+                        {"type": "continue_chat", "label": "Continue Chat"}
+                    ],
+                    "done": True
+                })
+                return
+
+            # Check for CONTINENTS
+            elif country_param and slot_mgr.is_continent(country_param):
                 is_continent_query = True
                 continent_name = slot_mgr.get_continent_name(country_param)
                 explore_url = "https://www.marketinsidedata.com/en/search-data"
@@ -2570,6 +2640,39 @@ IMPORTANT
                 # All slots collected - generate URL with defaults applied
                 explore_url = slot_mgr.generate_url(intent, slot_state.slots) or intent_url
                 print(f"  [STREAM] Generated explore_url: {explore_url}")
+
+                # Check if this is a RESTRICTED COUNTRY (redirect to support)
+                if explore_url and explore_url.startswith("RESTRICTED:"):
+                    restricted_country_name = explore_url.replace("RESTRICTED:", "")
+                    print(f"  [STREAM] Restricted country detected: {restricted_country_name} - redirecting to support")
+
+                    # Save messages
+                    if self.redis:
+                        self.redis.save_message(session_id, {"role": "user", "content": message})
+
+                    # Response message
+                    restricted_message = f"We have comprehensive {restricted_country_name} trade data available on our dashboard! To access {restricted_country_name} import/export data, buyer/supplier information, and detailed shipment records, please connect with our team:"
+
+                    # Save assistant response
+                    if self.redis:
+                        self.redis.save_message(session_id, {
+                            "role": "assistant",
+                            "content": restricted_message
+                        })
+
+                    # Use credit_exhausted format to reuse the same UI component
+                    yield json.dumps({
+                        "credit_exhausted": True,  # Reuse the same UI component as connect/support
+                        "message": restricted_message,
+                        "actions": [
+                            {"type": "schedule_demo", "label": "Schedule a Demo"},
+                            {"type": "chat_with_us", "label": "Chat"},
+                            {"type": "whatsapp", "label": "WhatsApp"},
+                            {"type": "continue_chat", "label": "Continue Chat"}
+                        ],
+                        "done": True
+                    })
+                    return
 
                 # Check if this is a CONTINENT query (use KB data, not API)
                 if explore_url and explore_url.startswith("CONTINENT:"):
