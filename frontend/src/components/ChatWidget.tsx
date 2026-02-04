@@ -654,8 +654,12 @@ export default function ChatWidget() {
     } else if (actionType === "call") {
       window.location.href = "tel:+4407727449124";
     } else if (actionType === "hubspot_chat" || actionType === "chat_with_us") {
-      // Open HubSpot chat widget
-      window.open("https://app.hubspot.com/conversations-visitor/9059358/threads/utk/dd546325ff584de3b88068384373b5da?uuid=1ec6282844ac45a3aa07de865ae89692&mobile=false&mobileSafari=false&hideWelcomeMessage=false&hstc=261214162.419090d5d718c9aa1f7487e0db51436b.1762762601861.1768825743931.1768908425649.23&domain=marketinsidedata.com&inApp53=false&messagesUtk=dd546325ff584de3b88068384373b5da&url=https%3A%2F%2Fwww.marketinsidedata.com%2F&inline=false&isFullscreen=false&globalCookieOptOut=&isFirstVisitorSession=false&isAttachmentDisabled=false&isInitialInputFocusDisabled=false&enableWidgetCookieBanner=false&isInCMS=false&hideScrollToButton=true&isIOSMobile=false&hubspotUtk=419090d5d718c9aa1f7487e0db51436b", "_blank");
+      // Open Tawk.to chat widget
+      if (typeof (window as any).Tawk_API !== 'undefined') {
+        (window as any).Tawk_API.maximize();
+      } else {
+        console.error('Tawk.to widget not loaded yet');
+      }
     } else if (actionType === "refresh") {
       // Call init API to show suggested questions
       void callInitAndShowQuestions();
@@ -1131,11 +1135,13 @@ export default function ChatWidget() {
 
   const handleChatWithUs = () => {
     console.log('[ChatWidget] Chat with us clicked');
-    if ((window as any).HubSpotConversations) {
-      (window as any).HubSpotConversations.widget.open();
+    // Open Tawk.to chat widget
+    if (typeof (window as any).Tawk_API !== 'undefined') {
+      (window as any).Tawk_API.maximize();
     } else {
-      // Fallback: open HubSpot chat page directly
-      window.open("https://app.hubspot.com/conversations-visitor/9059358/threads/utk/dd546325ff584de3b88068384373b5da", "_blank");
+      console.error('Tawk.to widget not loaded yet');
+      // Fallback: try to load Tawk manually
+      alert('Chat widget is loading. Please try again in a moment.');
     }
     setShowOptionsMenu(false);
   };
