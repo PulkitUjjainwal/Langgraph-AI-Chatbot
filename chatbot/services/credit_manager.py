@@ -20,7 +20,7 @@ except ImportError:
 @dataclass
 class CreditConfig:
     """Configuration for credit system"""
-    INITIAL_CREDITS: int = 15  # Starting credits for new sessions (increased for better UX)
+    INITIAL_CREDITS: int = 50  # Starting credits for new sessions (increased for better UX)
 
     # Credit costs by intent type - LOW for general, HIGH for data queries
     CREDIT_COSTS: Dict[str, int] = None
