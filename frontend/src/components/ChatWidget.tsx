@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatHeader } from "./ChatHeader";
 import { ChatMessages } from "./ChatMessages";
-import { ChatFooter } from "./ChatFooter";
+import { ChatFooter, type ChatFooterHandle } from "./ChatFooter";
 import genericQA from "../data/genericQA.json";
 
 export type ChatMessage = {
@@ -157,6 +157,7 @@ export default function ChatWidget() {
   // Refs
   const currentUrlRef = useRef<string>("");
   const sessionIdRef = useRef<string>(sessionId);
+  const footerRef = useRef<ChatFooterHandle | null>(null);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -1111,6 +1112,157 @@ export default function ChatWidget() {
     }
   }
 
+  // Host integration: expose global API and listen for host events/postMessage
+  useEffect(() => {
+    let sendTimer: any = null;
+
+    function openChatFromHost() {
+      setShowTooltip(false);
+      setOpen(true);
+    }
+
+    function setChatInputTextFromHost(text: string) {
+      if (footerRef.current && typeof footerRef.current.setMessage === 'function') {
+        footerRef.current.setMessage(text);
+        return;
+      }
+      // If footer not mounted yet, open and retry
+      openChatFromHost();
+      setTimeout(() => footerRef.current?.setMessage(text), 120);
+    }
+
+    function triggerSendFromHost() {
+      if (footerRef.current && typeof footerRef.current.send === 'function') {
+        footerRef.current.send();
+        return;
+      }
+      setTimeout(() => footerRef.current?.send(), 150);
+    }
+
+    // Attach stable API
+    (window as any).chatWidget = (window as any).chatWidget || {};
+    (window as any).chatWidget.sendMessage = (text: string, opts?: { autoSend?: boolean; debounceMs?: number }) => {
+      openChatFromHost();
+      setChatInputTextFromHost(text);
+      if (opts?.autoSend === false) return;
+      const ms = typeof opts?.debounceMs === 'number' ? opts!.debounceMs : 350;
+      if (sendTimer) clearTimeout(sendTimer);
+      sendTimer = setTimeout(() => triggerSendFromHost(), ms);
+    };
+    (window as any).chatWidget.setMessage = (text: string) => {
+      openChatFromHost();
+      setChatInputTextFromHost(text);
+    };
+
+    // Backwards-compatible globals
+    (window as any).openChatWithMessage = (window as any).openChatWithMessage || function (text?: string) {
+      openChatFromHost();
+      if (typeof text === 'string') setChatInputTextFromHost(text);
+    };
+    (window as any).openLiveChat = (window as any).openLiveChat || function () { openChatFromHost(); };
+
+    const onAction = (e: any) => {
+      try {
+        const detail = e?.detail || {};
+        const action = detail.action;
+        const message = detail.message;
+
+        // Open the chat UI
+        if (action === 'open') {
+          openChatFromHost();
+          return;
+        }
+
+        // Prefill input only
+        if (action === 'prefill' && typeof message === 'string') {
+          openChatFromHost();
+          setChatInputTextFromHost(message);
+          return;
+        }
+
+        // Prefill and auto-send
+        if (action === 'sendMessage' && typeof message === 'string') {
+          openChatFromHost();
+          setChatInputTextFromHost(message);
+          triggerSendFromHost();
+          return;
+        }
+
+        // Host asked widget to open Schedule Demo on the main site
+        if (action === 'openScheduleDemo') {
+          try {
+            if (typeof (window as any).openScheduleDemo === 'function') {
+              (window as any).openScheduleDemo();
+            } else {
+              window.dispatchEvent(new CustomEvent('chatWidget:request', { detail: { action: 'openScheduleDemo' } }));
+            }
+          } catch (err) {
+            console.warn('[chatWidget] openScheduleDemo failed', err);
+          }
+          return;
+        }
+
+        // Open Tawk.to / live chat on host
+        if (action === 'openLiveChat' || action === 'openTawk' || action === 'openTawkTo') {
+          try {
+            if ((window as any).Tawk_API && typeof (window as any).Tawk_API.maximize === 'function') {
+              (window as any).Tawk_API.maximize();
+            } else if (typeof (window as any).openLiveChat === 'function') {
+              (window as any).openLiveChat();
+            } else {
+              console.warn('[chatWidget] Tawk API not available to open live chat');
+            }
+          } catch (err) {
+            console.warn('[chatWidget] openLiveChat handler error', err);
+          }
+          return;
+        }
+      } catch (err) {
+        console.warn('chatWidget:action handler error', err);
+      }
+    };
+
+    const onMessage = (ev: MessageEvent) => {
+      try {
+        const data = ev.data;
+
+        // Legacy: simple chat message payload
+        if (data && data.type === 'chat_message' && typeof data.text === 'string') {
+          openChatFromHost();
+          setChatInputTextFromHost(data.text);
+          triggerSendFromHost();
+          return;
+        }
+
+        // Support action-style postMessage payloads as fallback
+        if (data && (data.type === 'chat_action' || data.action) ) {
+          const action = data.action || data.type;
+          const message = data.message || data.text;
+          // Build a small event-like object and delegate to onAction logic
+          try {
+            const fakeEvent = { detail: { action, message } };
+            onAction(fakeEvent);
+          } catch (err) { /* ignore */ }
+        }
+      } catch (err) { /* ignore */ }
+    };
+
+    window.addEventListener('chatWidget:action', onAction);
+    window.addEventListener('message', onMessage);
+
+    console.log('chatWidget host API installed (frontend)');
+
+    return () => {
+      window.removeEventListener('chatWidget:action', onAction);
+      window.removeEventListener('message', onMessage);
+      if ((window as any).chatWidget) {
+        try { delete (window as any).chatWidget.sendMessage; delete (window as any).chatWidget.setMessage; } catch {}
+      }
+    };
+    // run once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleTooltipClick = () => {
     setShowTooltip(false);
     setOpen(true);
@@ -1459,7 +1611,7 @@ export default function ChatWidget() {
               )}
             </div>
           )}
-           <ChatFooter onSend={handleSend} isSending={isSending} position="bottom" onOpenOptionsMenu={handleOpenOptionsMenu} />
+           <ChatFooter ref={footerRef} onSend={handleSend} isSending={isSending} position="bottom" onOpenOptionsMenu={handleOpenOptionsMenu} />
 
           {/* Disclaimer at bottom - AWS Style */}
           <div className="px-4 py-2 bg-white border-t border-gray-100">

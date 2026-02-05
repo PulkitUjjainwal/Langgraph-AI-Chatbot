@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, forwardRef, useImperativeHandle } from "react";
 
 type Props = {
   onSend: (text: string) => void;
@@ -7,7 +7,15 @@ type Props = {
   onOpenOptionsMenu?: () => void;
 };
 
-export function ChatFooter({ onSend, isSending = false, position = "bottom", onOpenOptionsMenu }: Props) {
+export type ChatFooterHandle = {
+  setMessage: (text: string) => void;
+  send: () => void;
+};
+
+export const ChatFooter = forwardRef<ChatFooterHandle, Props>(function ChatFooter(
+  { onSend, isSending = false, position = "bottom", onOpenOptionsMenu },
+  ref
+) {
   const [message, setMessage] = useState("");
 
   function handleSend() {
@@ -16,6 +24,12 @@ export function ChatFooter({ onSend, isSending = false, position = "bottom", onO
     onSend(message);
     setMessage("");
   }
+
+  // Expose imperative methods so host integration can programmatically set/send
+  useImperativeHandle(ref, () => ({
+    setMessage: (text: string) => setMessage(text),
+    send: () => handleSend(),
+  }), [message, isSending]);
 
   const isTop = position === "bottom";
 
@@ -95,4 +109,4 @@ export function ChatFooter({ onSend, isSending = false, position = "bottom", onO
       )}
     </div>
   );
-}
+});
