@@ -3,6 +3,7 @@ import { ChatHeader } from "./ChatHeader";
 import { ChatMessages } from "./ChatMessages";
 import { ChatFooter, type ChatFooterHandle } from "./ChatFooter";
 import genericQA from "../data/genericQA.json";
+import WhatsAppDropdown from "./WhatsAppDropdown";
 
 export type ChatMessage = {
   id: string;
@@ -617,10 +618,31 @@ export default function ChatWidget() {
   };
 
   // Open WhatsApp
-  const openWhatsApp = () => {
-    const whatsappUrl = "https://api.whatsapp.com/send/?phone=4407727449124&text&type=phone_number&app_absent=0";
-    window.open(whatsappUrl, "_blank");
-  };
+  // const openWhatsApp = (option?: 'qr' | 'link') => {
+  //   const waLink = "https://wa.me/447727449124";
+  //   const qrPath = "/assets/whatsapp-qr.png";
+
+  //   // If no option provided, ask the user (replace this prompt with a dropdown UI if you want)
+  //   if (typeof window !== "undefined" && !option) {
+  //     const choice = window
+  //       .prompt('Enter "qr" to view the QR code or "link" to open WhatsApp', 'link')
+  //       ?.toLowerCase();
+  //     option = choice === "qr" ? "qr" : "link";
+  //   }
+
+  //   if (option === "qr") {
+  //     // Open QR image in a new tab (or implement an in-widget modal instead)
+  //     if (typeof window !== "undefined") {
+  //       const qrUrl = `${window.location.origin}${qrPath}`;
+  //       window.open(qrUrl, "_blank");
+  //     }
+  //   } else {
+  //     // Open wa.me link
+  //     window.open(waLink, "_blank");
+  //   }
+  // };
+
+  
 
   // Handle continue chat after credit exhaustion
   const handleContinueChat = async () => {
@@ -651,7 +673,10 @@ export default function ChatWidget() {
     if (actionType === "schedule_demo") {
       openScheduleDemo();
     } else if (actionType === "whatsapp") {
-      openWhatsApp();
+      // Open the options menu and show the WhatsApp submenu so users can choose QR or link
+      setShowOptionsMenu(true);
+      // small timeout to ensure menu container is visible before showing submenu
+      setTimeout(() => setShowWhatsAppSubmenu(true), 80);
     } else if (actionType === "call") {
       window.location.href = "tel:+4407727449124";
     } else if (actionType === "hubspot_chat" || actionType === "chat_with_us") {
@@ -1275,6 +1300,10 @@ export default function ChatWidget() {
 
   // Options menu state
   const [showOptionsMenu, setShowOptionsMenu] = useState(false);
+  const [showWhatsAppSubmenu, setShowWhatsAppSubmenu] = useState(false);
+  const [showWhatsAppQR, setShowWhatsAppQR] = useState(false);
+  const [showWhatsAppDropdown, setShowWhatsAppDropdown] = useState(false);
+  const [waDropdownRect, setWaDropdownRect] = useState<DOMRect | null>(null);
 
   const handleOpenOptionsMenu = () => {
     console.log('[ChatWidget] Opening options menu');
@@ -1283,6 +1312,7 @@ export default function ChatWidget() {
 
   const handleCloseOptionsMenu = () => {
     setShowOptionsMenu(false);
+    setShowWhatsAppSubmenu(false);
   };
 
   const handleChatWithUs = () => {
@@ -1306,8 +1336,44 @@ export default function ChatWidget() {
 
   const handleWhatsAppUs = () => {
     console.log('[ChatWidget] WhatsApp clicked');
-    window.open("https://wa.me/4407727449124", "_blank");
+    // Toggle a small submenu with QR / Link options
+    setShowWhatsAppSubmenu((s) => !s);
+  };
+
+  const openWhatsAppLink = () => {
+    const wa = "https://wa.me/447727449124";
+    try {
+      window.open(wa, "_blank");
+    } catch (err) {
+      window.location.href = wa;
+    }
     setShowOptionsMenu(false);
+    setShowWhatsAppSubmenu(false);
+    setShowWhatsAppDropdown(false);
+  };
+
+  const openWhatsAppQRInChat = () => {
+    // Close menus and show QR overlay inside chat
+    setShowWhatsAppQR(true);
+    setShowWhatsAppSubmenu(false);
+    setShowOptionsMenu(false);
+    setShowWhatsAppDropdown(false);
+  };
+
+  const openWhatsAppDropdown = (anchorEl: HTMLElement) => {
+    try {
+      const rect = anchorEl.getBoundingClientRect();
+      console.log('[ChatWidget] openWhatsAppDropdown rect:', rect);
+      setWaDropdownRect(rect);
+      setShowWhatsAppDropdown(true);
+    } catch (err) {
+      console.error('[WhatsAppDropdown] failed to open anchored dropdown', err);
+    }
+  };
+
+  const closeWhatsAppDropdown = () => {
+    setShowWhatsAppDropdown(false);
+    setWaDropdownRect(null);
   };
 
   // Reset conversation - clear messages and create new session
@@ -1506,6 +1572,7 @@ export default function ChatWidget() {
             messages={messages}
             isStreaming={isSending}
             onActionClick={handleActionClick}
+            onOpenWhatsAppDropdown={openWhatsAppDropdown}
             onFeedbackSubmit={handleFeedbackSubmit}
             onDelayedFeedbackSubmit={handleDelayedFeedbackSubmit}
             sessionId={sessionId}
@@ -1681,20 +1748,45 @@ export default function ChatWidget() {
                       </div>
                     </button>
 
-                    <button
-                      onClick={handleWhatsAppUs}
-                      className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 rounded-xl transition-colors"
-                    >
-                      <div className="flex items-center justify-center w-10 h-10 rounded-full bg-green-100">
-                        <svg className="h-5 w-5 text-green-600" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-                        </svg>
-                      </div>
-                      <div className="text-left">
-                        <p className="font-medium">WhatsApp Us</p>
-                        <p className="text-xs text-gray-500">Message us on WhatsApp</p>
-                      </div>
-                    </button>
+                    <div className="relative">
+                      <button
+                        onClick={handleWhatsAppUs}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 rounded-xl transition-colors"
+                      >
+                        <div className="flex items-center justify-center w-10 h-10 rounded-full bg-green-100">
+                          <svg className="h-5 w-5 text-green-600" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+                          </svg>
+                        </div>
+                        <div className="text-left">
+                          <p className="font-medium">WhatsApp Us</p>
+                          <p className="text-xs text-gray-500">Message us on WhatsApp</p>
+                        </div>
+                      </button>
+
+                      {showWhatsAppSubmenu && (
+                        <div className="absolute right-3 top-full mt-2 w-56 bg-white rounded-lg shadow-lg border p-2 z-50">
+                          <button
+                            onClick={openWhatsAppQRInChat}
+                            className="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-50 text-sm text-gray-700 flex items-center gap-2"
+                          >
+                            <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h2M4 8h12m4 0h2M4 16h4m12 0h2M4 20h4" />
+                            </svg>
+                            Show QR
+                          </button>
+                          <button
+                            onClick={openWhatsAppLink}
+                            className="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-50 text-sm text-gray-700 flex items-center gap-2 mt-1"
+                          >
+                            <svg className="w-4 h-4 text-[#25D366]" fill="currentColor" viewBox="0 0 24 24">
+                              <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+                            </svg>
+                            Open WhatsApp
+                          </button>
+                        </div>
+                      )}
+                    </div>
 
                     <div className="border-t border-gray-100 my-2" />
 
@@ -1721,6 +1813,42 @@ export default function ChatWidget() {
                   >
                     Cancel
                   </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {showWhatsAppDropdown && waDropdownRect && (
+            <WhatsAppDropdown
+              rect={waDropdownRect}
+              onClose={closeWhatsAppDropdown}
+              onShowQR={() => { openWhatsAppQRInChat(); closeWhatsAppDropdown(); }}
+              onOpenLink={() => { openWhatsAppLink(); closeWhatsAppDropdown(); }}
+            />
+          )}
+          {/* WhatsApp QR Overlay (in-chat) */}
+          {showWhatsAppQR && (
+            <div className="fixed inset-0 z-[2147483649] flex items-center justify-center">
+              <div className="absolute inset-0 bg-black/40" onClick={() => setShowWhatsAppQR(false)} />
+              <div className="relative bg-white rounded-3xl p-6 w-[90vw] max-w-md shadow-2xl z-50">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-lg font-semibold text-slate-900">Scan to WhatsApp</h3>
+                  <button onClick={() => setShowWhatsAppQR(false)} className="p-2 hover:bg-slate-100 rounded-full">
+                    <svg className="w-5 h-5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+
+                <div className="bg-slate-50 p-4 rounded-2xl border-2 border-slate-100">
+                  <div className="w-64 h-64 bg-white rounded-xl shadow-sm flex items-center justify-center border border-slate-200 overflow-hidden mx-auto">
+                    <img src="/assets/whatsapp-qr.png" alt="WhatsApp QR Code" className="w-full h-full p-4 object-contain" />
+                  </div>
+
+                  <p className="mt-4 text-center text-sm text-slate-600">Open WhatsApp on your phone and scan this code to start chatting with us.</p>
+                </div>
+
+                <div className="mt-6">
+                  <button onClick={openWhatsAppLink} className="w-full bg-[#25D366] text-white py-3 rounded-xl font-semibold hover:bg-[#20bd5c] transition-colors">Open WhatsApp Directly</button>
                 </div>
               </div>
             </div>
