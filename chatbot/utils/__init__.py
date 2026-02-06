@@ -20,6 +20,12 @@ from .context_helpers import (
 
 from .monitoring import PerformanceMonitor
 
+from .conversation_history_manager import (
+    ConversationHistoryManager,
+    build_conversation_history,
+    build_conversation_history_from_settings
+)
+
 __all__ = [
     # Query helpers
     "classify_query_type",
@@ -30,4 +36,8 @@ __all__ = [
     "score_response_quality",
     # Monitoring
     "PerformanceMonitor",
+    # Conversation history
+    "ConversationHistoryManager",
+    "build_conversation_history",
+    "build_conversation_history_from_settings",
 ]

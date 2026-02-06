@@ -314,3 +314,107 @@ class FeedbackStatsResponse(BaseModel):
                 "avg_rating": 4.2
             }
         }
+
+
+# ============================================================================
+# FEEDBACK MANAGEMENT MODELS (Admin/Dashboard)
+# ============================================================================
+
+class FeedbackListItem(BaseModel):
+    """Single feedback item for list view"""
+    id: int
+    session_id: str
+    feedback_type: str
+    rating: Optional[int] = None
+    comment: Optional[str] = None
+    user_query: Optional[str] = None
+    assistant_message: Optional[str] = None
+    page_url: Optional[str] = None
+    created_at: str
+    conversation_length: Optional[int] = None
+
+
+class FeedbackListResponse(BaseModel):
+    """Paginated list of feedbacks"""
+    feedbacks: List[FeedbackListItem]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    filters_applied: Dict[str, Any]
+
+
+class FeedbackDetailConversation(BaseModel):
+    """Conversation message in feedback detail"""
+    role: str
+    content: str
+    message_order: int
+    message_id: Optional[str] = None
+
+
+class FeedbackDetailResponse(BaseModel):
+    """Full feedback details with conversation"""
+    id: int
+    session_id: str
+    feedback_type: str
+    rating: Optional[int] = None
+    comment: Optional[str] = None
+    message_id: Optional[str] = None
+    user_query: Optional[str] = None
+    assistant_message: Optional[str] = None
+    page_url: Optional[str] = None
+    user_agent: Optional[str] = None
+    ip_address: Optional[str] = None
+    created_at: str
+    conversation: List[FeedbackDetailConversation]
+
+
+class FeedbackDashboardStats(BaseModel):
+    """Dashboard statistics"""
+    total_feedback: int
+    thumbs_up_count: int
+    thumbs_down_count: int
+    rating_count: int
+    comment_count: int
+    avg_rating: Optional[float] = None
+    satisfaction_rate: Optional[float] = None  # thumbs_up / (thumbs_up + thumbs_down) * 100
+    period_days: int
+
+
+class FeedbackDailyStats(BaseModel):
+    """Daily feedback statistics"""
+    date: str
+    thumbs_up: int = 0
+    thumbs_down: int = 0
+    rating: int = 0
+    comment: int = 0
+    total: int = 0
+    avg_rating: Optional[float] = None
+
+
+class FeedbackTimeSeriesResponse(BaseModel):
+    """Time series data for charts"""
+    data: List[FeedbackDailyStats]
+    period_days: int
+    start_date: str
+    end_date: str
+
+
+class FeedbackTopPagesResponse(BaseModel):
+    """Top pages with feedback"""
+    pages: List[Dict[str, Any]]
+    period_days: int
+
+
+class SessionFeedbackResponse(BaseModel):
+    """All feedback from a specific session"""
+    session_id: str
+    feedbacks: List[FeedbackDetailResponse]
+    total: int
+
+
+class FeedbackExportResponse(BaseModel):
+    """Export response with data"""
+    format: str
+    total_records: int
+    data: List[Dict[str, Any]]

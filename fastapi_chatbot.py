@@ -109,6 +109,14 @@ from chatbot.database.feedback_service import (
     get_feedback_service, init_feedback_service
 )
 
+# Import Authentication
+from chatbot.auth.dependencies import require_auth, require_super_admin, get_auth_db_service
+from chatbot.auth.service import AuthService
+from chatbot.auth.models import (
+    LoginRequest, TokenResponse, RefreshTokenRequest, LogoutRequest,
+    CreateUserRequest, UpdateUserRequest, UserResponse, UserListResponse
+)
+
 # Import Lead Manager
 from lead_manager import LeadManager, get_lead_form_config
 
@@ -136,10 +144,31 @@ from chatbot.services.retrieval.kb_retriever import KnowledgeBaseRetriever as Mo
 from chatbot.services.retrieval.hybrid_retriever import HybridRetriever as ModularHybridRetriever
 from chatbot.services.retrieval.dynamic_content import DynamicContentManager
 
-from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks
+from decimal import Decimal
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Response, Depends
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+import json as json_module
+
+
+class _DecimalEncoder(json_module.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super().default(obj)
+
+
+class DecimalJSONResponse(JSONResponse):
+    def render(self, content: Any) -> bytes:
+        return json_module.dumps(
+            content,
+            cls=_DecimalEncoder,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
 import os
 from pydantic import BaseModel, Field
 import asyncio
@@ -1056,6 +1085,9 @@ def create_chatbot_node():
         kb_context = state["retrieved_context"]
         messages = state.get("messages", [])
 
+        # DEBUG: Log message count for troubleshooting
+        print(f"  [HISTORY] Chatbot node received {len(messages)} messages from state")
+
         print(f"\n[CHAT] Chatbot processing...")
 
         # FEATURE 1: Context-Aware Greetings (100x faster for greetings)
@@ -1137,15 +1169,9 @@ def create_chatbot_node():
 
         print(f"  [DATA] FINAL CONTEXT SIZE: {len(context)} chars (~{len(context)//4} tokens)")
 
-        # Get conversation history
-        conversation_history = []
-        for msg in messages:
-            if isinstance(msg, HumanMessage):
-                conversation_history.append(f"User: {msg.content}")
-            elif isinstance(msg, AIMessage):
-                conversation_history.append(f"Assistant: {msg.content}")
-
-        history_text = "\n".join(conversation_history[-4:]) if conversation_history else ""
+        # Get conversation history using smart history manager
+        from chatbot.utils.conversation_history_manager import build_conversation_history
+        history_text = build_conversation_history(messages)
 
         # ========================================================================
         # BUILD SYSTEM PROMPT USING MODULAR PromptBuilder
@@ -2807,13 +2833,18 @@ IMPORTANT
 
         print(f"  [STREAM] Total merged context: {len(merged_context)} chars")
 
-        # Build conversation history string (last 6 messages = 3 exchanges)
-        history_messages = self._stream_history[session_id][-6:]
-        history_text = ""
-        if history_messages:
-            for msg in history_messages:
-                role = "User" if msg["role"] == "user" else "Assistant"
-                history_text += f"{role}: {msg['content'][:500]}\n"
+        # Build conversation history using smart history manager
+        from chatbot.utils.conversation_history_manager import build_conversation_history
+        history_messages = self._stream_history[session_id]
+        history_text = build_conversation_history(history_messages)
+
+        # DEBUG: Log history context being used
+        print(f"  [HISTORY] Building context from {len(history_messages)} messages")
+        print(f"  [HISTORY] Generated history: {len(history_text)} chars")
+        if history_text:
+            # Show first 200 chars of history for debugging
+            preview = history_text[:200].replace('\n', ' | ')
+            print(f"  [HISTORY] Preview: {preview}...")
 
         # Detect query type for response length (use llm_query for better detection)
         smart_query_type = detect_query_type_simple(llm_query)
@@ -2939,9 +2970,14 @@ if query is for platform
             self._stream_history[session_id].append({"role": "user", "content": message})
             self._stream_history[session_id].append({"role": "assistant", "content": full_response})
 
-            # Keep only last 10 messages to prevent memory bloat
-            if len(self._stream_history[session_id]) > 10:
-                self._stream_history[session_id] = self._stream_history[session_id][-10:]
+            # Keep only last 40 messages (20 exchanges) to prevent memory bloat
+            # This matches our history manager configuration
+            history_count = len(self._stream_history[session_id])
+            if history_count > 40:
+                self._stream_history[session_id] = self._stream_history[session_id][-40:]
+                print(f"  [HISTORY] Trimmed history: {history_count} -> 40 messages")
+            else:
+                print(f"  [HISTORY] Stored in history: {history_count} total messages for session {session_id}")
 
             # ========================================================================
             # STEP 4: Save messages to Redis for persistence
@@ -3333,7 +3369,8 @@ print("[DEBUG] Creating FastAPI app...")
 app = FastAPI(
     title="Export Genius AI Chatbot API",
     description="LangGraph-powered chatbot with RAG and dynamic content fetching",
-    version="1.0.0"
+    version="1.0.0",
+    default_response_class=DecimalJSONResponse
     # Lifespan temporarily disabled for debugging
     # lifespan=lifespan
 )
@@ -3851,7 +3888,7 @@ async def reset_session(request: ResetRequest):
 
     chatbot_manager.reset_session(request.session_id)
 
-    return JSONResponse(
+    return DecimalJSONResponse(
         content={
             "status": "success",
             "message": f"Session {request.session_id} reset successfully"
@@ -3991,7 +4028,7 @@ async def get_history(session_id: str, limit: int = 50):
         # Check if session is active (has messages within TTL)
         session_active = len(messages) > 0
 
-        return JSONResponse(content={
+        return DecimalJSONResponse(content={
             "session_id": session_id,
             "messages": messages,
             "total_messages": len(messages),
@@ -4001,7 +4038,7 @@ async def get_history(session_id: str, limit: int = 50):
 
     except Exception as e:
         print(f"[ERROR] History retrieval failed: {e}")
-        return JSONResponse(content={
+        return DecimalJSONResponse(content={
             "session_id": session_id,
             "messages": [],
             "total_messages": 0,
@@ -4028,7 +4065,7 @@ async def continue_chat(session_id: str):
         # Activate continue chat mode
         state = credit_manager.activate_continue_chat(session_id)
 
-        return JSONResponse(content={
+        return DecimalJSONResponse(content={
             "status": "success",
             "credits_remaining": state.get("remaining", 0),
             "message": "I'm happy to continue helping you explore our trade data. What would you like to know?"
@@ -4076,7 +4113,7 @@ async def redis_stats():
 
     stats = redis_manager.get_stats()
 
-    return JSONResponse(
+    return DecimalJSONResponse(
         content={
             "redis_stats": stats,
             "status": "healthy"
@@ -4203,7 +4240,7 @@ async def get_negative_feedback(limit: int = 50):
 
         feedbacks = await feedback_service.get_negative_feedback(limit=limit)
 
-        return JSONResponse(content={
+        return DecimalJSONResponse(content={
             "count": len(feedbacks),
             "feedbacks": feedbacks
         })
@@ -4211,6 +4248,605 @@ async def get_negative_feedback(limit: int = 50):
     except Exception as e:
         print(f"[Feedback] Get negative error: {e}")
         raise HTTPException(status_code=500, detail="Failed to get negative feedback")
+
+
+# ============================================================================
+# AUTHENTICATION ENDPOINTS
+# ============================================================================
+
+@router.post("/auth/login", response_model=TokenResponse)
+async def login(request: LoginRequest):
+    """
+    Authenticate user and return access + refresh tokens.
+
+    - **email**: User email address
+    - **password**: User password
+
+    Returns JWT access token (60min) and refresh token (30 days)
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Authenticate user
+        user = await auth_service.authenticate_user(request.email, request.password)
+
+        if not user:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid email or password"
+            )
+
+        # Generate tokens
+        tokens = await auth_service.generate_tokens(user)
+
+        # Remove password_hash from user object
+        user_safe = {k: v for k, v in user.items() if k != "password_hash"}
+
+        return TokenResponse(
+            access_token=tokens["access_token"],
+            refresh_token=tokens["refresh_token"],
+            token_type="bearer",
+            user=user_safe
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Login error: {e}")
+        raise HTTPException(status_code=500, detail="Login failed")
+
+
+@router.post("/auth/refresh")
+async def refresh_token(request: RefreshTokenRequest):
+    """
+    Refresh access token using refresh token.
+
+    - **refresh_token**: Valid refresh token from login
+
+    Returns new access token
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Refresh access token
+        access_token = await auth_service.refresh_access_token(request.refresh_token)
+
+        if not access_token:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired refresh token"
+            )
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Token refresh error: {e}")
+        raise HTTPException(status_code=500, detail="Token refresh failed")
+
+
+@router.post("/auth/logout")
+async def logout(request: LogoutRequest, current_user = Depends(require_auth)):
+    """
+    Logout user by revoking refresh token.
+
+    Requires authentication. Revokes the provided refresh token.
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Revoke refresh token
+        success = await auth_service.logout(request.refresh_token)
+
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to logout"
+            )
+
+        return {
+            "message": "Logged out successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Logout error: {e}")
+        raise HTTPException(status_code=500, detail="Logout failed")
+
+
+@router.get("/auth/me", response_model=UserResponse)
+async def get_current_user_info(current_user = Depends(require_auth)):
+    """
+    Get current authenticated user information.
+
+    Requires authentication. Returns user profile.
+    """
+    return UserResponse(**current_user)
+
+
+# ============================================================================
+# USER MANAGEMENT ENDPOINTS (Super Admin Only)
+# ============================================================================
+
+@router.post("/admin/users/create", response_model=UserResponse)
+async def create_user(
+    request: CreateUserRequest,
+    current_user = Depends(require_super_admin)
+):
+    """
+    Create a new user (super_admin only).
+
+    - **username**: Unique username
+    - **email**: User email address
+    - **password**: Password (must meet security requirements)
+    - **full_name**: Full name
+    - **role**: User role (admin or user, cannot create super_admin)
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Create user
+        user = await auth_service.create_user(
+            username=request.username,
+            email=request.email,
+            password=request.password,
+            full_name=request.full_name,
+            role=request.role,
+            creator_role=current_user["role"]
+        )
+
+        if not user:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to create user. Email may already exist."
+            )
+
+        return UserResponse(**user)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Create user error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/users/list", response_model=UserListResponse)
+async def list_users(
+    page: int = 1,
+    page_size: int = 20,
+    role: Optional[str] = None,
+    current_user = Depends(require_super_admin)
+):
+    """
+    List all users with pagination (super_admin only).
+
+    - **page**: Page number (default: 1)
+    - **page_size**: Items per page (default: 20)
+    - **role**: Filter by role (optional)
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Get paginated users
+        result = await auth_db.list_users(page=page, page_size=page_size, role=role)
+
+        # Convert users to UserResponse objects
+        users = [UserResponse(**user) for user in result["users"]]
+
+        return UserListResponse(
+            users=users,
+            total=result["total"],
+            page=result["page"],
+            page_size=result["page_size"],
+            total_pages=result["total_pages"]
+        )
+
+    except Exception as e:
+        print(f"[Auth] List users error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list users")
+
+
+@router.patch("/admin/users/{user_id}", response_model=UserResponse)
+async def update_user(
+    user_id: int,
+    request: UpdateUserRequest,
+    current_user = Depends(require_super_admin)
+):
+    """
+    Update user information (super_admin only).
+
+    - **user_id**: ID of user to update
+    - **full_name**: New full name (optional)
+    - **role**: New role (optional, cannot set to super_admin)
+    - **is_active**: Active status (optional, cannot deactivate super_admin)
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Update user
+        success = await auth_service.update_user(
+            user_id=user_id,
+            full_name=request.full_name,
+            role=request.role,
+            is_active=request.is_active,
+            updater_role=current_user["role"]
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to update user"
+            )
+
+        # Get updated user
+        updated_user = await auth_db.get_user_by_id(user_id)
+
+        if not updated_user:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+
+        return UserResponse(**updated_user)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Update user error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/admin/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    current_user = Depends(require_super_admin)
+):
+    """
+    Delete (deactivate) user (super_admin only).
+
+    Soft deletes user by setting is_active = False.
+    Cannot delete super_admin users.
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Delete user
+        success = await auth_service.delete_user(
+            user_id=user_id,
+            deleter_role=current_user["role"]
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to delete user. Cannot delete super_admin users."
+            )
+
+        return {
+            "message": f"User {user_id} deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Delete user error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# FEEDBACK MANAGEMENT ENDPOINTS (Admin/Dashboard)
+# ============================================================================
+
+@router.get("/admin/feedback/list")
+async def get_feedback_list(
+    current_user = Depends(require_auth),
+    page: int = 1,
+    page_size: int = 20,
+    feedback_type: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    session_id: Optional[str] = None,
+    min_rating: Optional[int] = None,
+    max_rating: Optional[int] = None,
+    search: Optional[str] = None,
+    sort_by: str = "created_at",
+    sort_order: str = "desc"
+):
+    """
+    Get paginated list of all feedbacks with filters.
+
+    Query Parameters:
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 20, max: 100)
+    - feedback_type: Filter by type (thumbs_up, thumbs_down, rating, comment)
+    - start_date: Filter by start date (YYYY-MM-DD)
+    - end_date: Filter by end date (YYYY-MM-DD)
+    - session_id: Filter by session ID
+    - min_rating: Minimum rating (1-5)
+    - max_rating: Maximum rating (1-5)
+    - search: Search in user_query and assistant_message
+    - sort_by: Sort field (created_at, rating, feedback_type)
+    - sort_order: Sort order (asc, desc)
+    """
+    try:
+        # Validate page_size
+        page_size = min(page_size, 100)
+
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        result = await feedback_service.get_feedback_list(
+            page=page,
+            page_size=page_size,
+            feedback_type=feedback_type,
+            start_date=start_date,
+            end_date=end_date,
+            session_id=session_id,
+            min_rating=min_rating,
+            max_rating=max_rating,
+            search=search,
+            sort_by=sort_by,
+            sort_order=sort_order
+        )
+
+        return DecimalJSONResponse(content=result)
+
+    except Exception as e:
+        print(f"[Feedback Admin] List error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/dashboard/stats")
+async def get_dashboard_stats(
+    current_user = Depends(require_auth),
+    days: int = 30
+):
+    """
+    Get comprehensive dashboard statistics.
+
+    Query Parameters:
+    - days: Number of days to include (default: 30)
+
+    Returns:
+    - total_feedback: Total feedback count
+    - thumbs_up_count: Positive feedback count
+    - thumbs_down_count: Negative feedback count
+    - rating_count: Star rating count
+    - comment_count: Comment count
+    - avg_rating: Average star rating
+    - satisfaction_rate: Percentage of positive vs negative feedback
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        stats = await feedback_service.get_dashboard_stats(days=days)
+
+        return DecimalJSONResponse(content=stats)
+
+    except Exception as e:
+        print(f"[Feedback Admin] Dashboard stats error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/dashboard/timeseries")
+async def get_feedback_timeseries(
+    current_user = Depends(require_auth),
+    days: int = 30
+):
+    """
+    Get daily feedback data for time series charts.
+
+    Query Parameters:
+    - days: Number of days to include (default: 30)
+
+    Returns:
+    - data: Array of daily statistics
+    - period_days: Number of days
+    - start_date: Start of period
+    - end_date: End of period
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        result = await feedback_service.get_time_series(days=days)
+
+        return DecimalJSONResponse(content=result)
+
+    except Exception as e:
+        print(f"[Feedback Admin] Timeseries error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/dashboard/top-pages")
+async def get_top_pages(
+    current_user = Depends(require_auth),
+    days: int = 30,
+    limit: int = 10,
+    feedback_type: Optional[str] = None
+):
+    """
+    Get top pages by feedback count.
+
+    Query Parameters:
+    - days: Number of days to include (default: 30)
+    - limit: Maximum pages to return (default: 10)
+    - feedback_type: Optional filter (e.g., 'thumbs_down' for problem pages)
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        result = await feedback_service.get_top_pages(
+            days=days,
+            limit=limit,
+            feedback_type=feedback_type
+        )
+
+        return DecimalJSONResponse(content=result)
+
+    except Exception as e:
+        print(f"[Feedback Admin] Top pages error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/session/{session_id}")
+async def get_session_feedbacks(
+    session_id: str,
+    current_user = Depends(require_auth)
+):
+    """
+    Get all feedbacks from a specific session.
+
+    Path Parameters:
+    - session_id: Session identifier
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        result = await feedback_service.get_session_feedbacks(session_id)
+
+        return DecimalJSONResponse(content=result)
+
+    except Exception as e:
+        print(f"[Feedback Admin] Session feedbacks error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/export")
+async def export_feedbacks(
+    current_user = Depends(require_auth),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    feedback_type: Optional[str] = None,
+    include_conversations: bool = False,
+    format: str = "json"
+):
+    """
+    Export feedbacks for a given period.
+
+    Query Parameters:
+    - start_date: Start date (YYYY-MM-DD)
+    - end_date: End date (YYYY-MM-DD)
+    - feedback_type: Optional filter by type
+    - include_conversations: Include full conversation history (default: false)
+    - format: Export format - 'json' or 'csv' (default: json)
+
+    Note: For large exports, consider adding date filters.
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        feedbacks = await feedback_service.export_feedbacks(
+            start_date=start_date,
+            end_date=end_date,
+            feedback_type=feedback_type,
+            include_conversations=include_conversations
+        )
+
+        if format.lower() == "csv":
+            # Convert to CSV
+            import csv
+            import io
+
+            output = io.StringIO()
+            if feedbacks:
+                # Get headers from first record (excluding conversation for CSV)
+                headers = [k for k in feedbacks[0].keys() if k != 'conversation']
+                writer = csv.DictWriter(output, fieldnames=headers)
+                writer.writeheader()
+                for fb in feedbacks:
+                    row = {k: v for k, v in fb.items() if k != 'conversation'}
+                    writer.writerow(row)
+
+            csv_content = output.getvalue()
+            return Response(
+                content=csv_content,
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f"attachment; filename=feedbacks_export_{start_date or 'all'}_{end_date or 'all'}.csv"
+                }
+            )
+
+        # Default: JSON
+        return DecimalJSONResponse(content={
+            "format": "json",
+            "total_records": len(feedbacks),
+            "data": feedbacks
+        })
+
+    except Exception as e:
+        print(f"[Feedback Admin] Export error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/{feedback_id}")
+async def get_feedback_detail(
+    feedback_id: int,
+    current_user = Depends(require_auth)
+):
+    """
+    Get full details of a single feedback including conversation history.
+
+    Path Parameters:
+    - feedback_id: ID of the feedback to retrieve
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        feedback = await feedback_service.get_feedback_detail(feedback_id)
+
+        if not feedback:
+            raise HTTPException(status_code=404, detail="Feedback not found")
+
+        return DecimalJSONResponse(content=feedback)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Feedback Admin] Detail error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/")
@@ -4235,6 +4871,61 @@ async def root():
 print("[DEBUG] About to include router...")
 app.include_router(router)
 print("[DEBUG] Router included successfully!")
+
+
+# ============================================================================
+# TEST ENDPOINT FOR HISTORY VERIFICATION
+# ============================================================================
+
+@router.post("/test/history")
+async def test_history(request: ChatRequest):
+    """
+    Test endpoint to verify conversation history is working
+
+    Returns the current history for the session
+    """
+    await ensure_initialized()
+
+    if not chatbot_manager:
+        raise HTTPException(status_code=503, detail="Chatbot not initialized")
+
+    session_id = request.session_id
+
+    # Get streaming history if exists
+    streaming_history = chatbot_manager._stream_history.get(session_id, [])
+
+    # Get LangGraph history from checkpointer
+    langgraph_messages = []
+    try:
+        if hasattr(chatbot_manager, 'app') and hasattr(chatbot_manager.app, 'checkpointer'):
+            checkpointer = chatbot_manager.app.checkpointer
+            if checkpointer:
+                # Try to get checkpoint
+                config = {"configurable": {"thread_id": session_id}}
+                checkpoint = checkpointer.get(config)
+                if checkpoint and 'channel_values' in checkpoint:
+                    messages = checkpoint['channel_values'].get('messages', [])
+                    for msg in messages:
+                        langgraph_messages.append({
+                            "type": type(msg).__name__,
+                            "content": msg.content if hasattr(msg, 'content') else str(msg)
+                        })
+    except Exception as e:
+        print(f"[TEST] Error getting LangGraph history: {e}")
+
+    # Build history text using our manager
+    from chatbot.utils.conversation_history_manager import build_conversation_history
+    history_text = build_conversation_history(streaming_history) if streaming_history else "No history"
+
+    return {
+        "session_id": session_id,
+        "streaming_history_count": len(streaming_history),
+        "streaming_history": streaming_history,
+        "langgraph_messages_count": len(langgraph_messages),
+        "langgraph_messages": langgraph_messages,
+        "formatted_history": history_text,
+        "message": "History retrieved successfully"
+    }
 
 
 # ============================================================================
