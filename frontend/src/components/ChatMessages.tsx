@@ -6,11 +6,13 @@ import type { ChatMessage } from "./ChatWidget";
 function CreditExhaustionCard({
   message,
   actions,
-  onAction
+  onAction,
+  onOpenWhatsAppDropdown
 }: {
   message: string;
   actions: ChatMessage["actions"];
   onAction: (type: string) => void;
+  onOpenWhatsAppDropdown?: (anchorEl: HTMLElement, originalQuery?: string) => void;
 }) {
   return (
     <div className="credit-exhaustion-card bg-gradient-to-br from-orange-50 to-amber-50 rounded-2xl border border-orange-200 p-5 my-3 mx-2">
@@ -66,7 +68,14 @@ function CreditExhaustionCard({
           return (
             <button
               key={idx}
-              onClick={() => onAction(action.type)}
+              onClick={(e) => {
+                if (action.type === 'whatsapp') {
+                  e.stopPropagation();
+                  onOpenWhatsAppDropdown?.(e.currentTarget as HTMLElement);
+                } else {
+                  onAction(action.type);
+                }
+              }}
               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 transform hover:scale-105 shadow-sm ${buttonStyle}`}
             >
               {icon}
@@ -133,6 +142,7 @@ type Props = {
   messages: ChatMessage[];
   isStreaming?: boolean;
   onActionClick?: (actionType: string, originalQuery?: string) => void;
+  onOpenWhatsAppDropdown?: (anchorEl: HTMLElement, originalQuery?: string) => void;
   onFeedbackSubmit?: (feedbackData: FeedbackSubmitData) => Promise<void>;
   onDelayedFeedbackSubmit?: (feedbackData: DelayedFeedbackData) => Promise<void>;
   sessionId?: string;
@@ -292,6 +302,7 @@ export function ChatMessages({
   messages,
   isStreaming = false,
   onActionClick,
+  onOpenWhatsAppDropdown,
   onFeedbackSubmit,
   onDelayedFeedbackSubmit,
   sessionId = '',
@@ -630,6 +641,7 @@ export function ChatMessages({
                   message={msg.text}
                   actions={msg.actions}
                   onAction={(type) => onActionClick?.(type)}
+                  onOpenWhatsAppDropdown={(el) => onOpenWhatsAppDropdown?.(el)}
                 />
               )}
 
@@ -699,7 +711,14 @@ export function ChatMessages({
                   return (
                     <button
                       key={actionIdx}
-                      onClick={() => onActionClick?.(action.type, userQuery)}
+                      onClick={(e) => {
+                        if (action.type === 'whatsapp') {
+                          e.stopPropagation();
+                          onOpenWhatsAppDropdown?.(e.currentTarget as HTMLElement, userQuery);
+                        } else {
+                          onActionClick?.(action.type, userQuery);
+                        }
+                      }}
                       className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 transform hover:scale-105 ${buttonStyle}`}
                     >
                       {icon}
