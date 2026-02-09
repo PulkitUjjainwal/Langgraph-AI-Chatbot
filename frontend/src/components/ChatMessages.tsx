@@ -201,8 +201,9 @@ const WORKED_WELL_OPTIONS = [
   { id: 'speed', label: 'Response speed' },
 ];
 
-// Inactivity timeout in milliseconds (40 seconds)
+// Inactivity timeout in milliseconds (40 seconds for feedback, 30 seconds for support buttons)
 const INACTIVITY_TIMEOUT = 40000;
+const SUPPORT_BUTTONS_TIMEOUT = 30000;
 
 /**
  * Parse message text and convert URLs and markdown links to clickable elements
@@ -320,6 +321,14 @@ export function ChatMessages({
   const lastActivityRef = useRef<number>(Date.now());
   const hasShownDelayedFeedbackRef = useRef<boolean>(false);
 
+  // Support buttons state
+  const [supportButtons, setSupportButtons] = useState<{ show: boolean; dismissed: boolean }>({
+    show: false,
+    dismissed: false
+  });
+  const supportButtonsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasShownSupportButtonsRef = useRef<boolean>(false);
+
   // Find the user query that preceded an assistant message
   const findUserQuery = (messageIndex: number): string | undefined => {
     for (let i = messageIndex - 1; i >= 0; i--) {
@@ -426,7 +435,7 @@ export function ChatMessages({
   // DELAYED FEEDBACK (AWS-style "idle" feedback form)
   // =========================================================================
 
-  // Reset inactivity timer
+  // Reset inactivity timer for delayed feedback
   const resetInactivityTimer = useCallback(() => {
     lastActivityRef.current = Date.now();
 
@@ -449,12 +458,37 @@ export function ChatMessages({
     }, INACTIVITY_TIMEOUT);
   }, [messages, delayedFeedback.submitted]);
 
+  // Reset inactivity timer for support buttons
+  const resetSupportButtonsTimer = useCallback(() => {
+    if (supportButtonsTimerRef.current) {
+      clearTimeout(supportButtonsTimerRef.current);
+    }
+
+    // Don't show if already shown, dismissed, or if there are no messages
+    if (hasShownSupportButtonsRef.current || supportButtons.dismissed || messages.length < 2) {
+      return;
+    }
+
+    supportButtonsTimerRef.current = setTimeout(() => {
+      // Only show if user has had at least one exchange
+      const hasAssistantResponse = messages.some(m => m.role === 'assistant' && m.text && m.text !== 'thinking...');
+      if (hasAssistantResponse && !hasShownSupportButtonsRef.current) {
+        setSupportButtons({ show: true, dismissed: false });
+        hasShownSupportButtonsRef.current = true;
+      }
+    }, SUPPORT_BUTTONS_TIMEOUT);
+  }, [messages, supportButtons.dismissed]);
+
   // Track user activity
   useEffect(() => {
     resetInactivityTimer();
+    resetSupportButtonsTimer();
 
     // Listen for user interactions
-    const handleActivity = () => resetInactivityTimer();
+    const handleActivity = () => {
+      resetInactivityTimer();
+      resetSupportButtonsTimer();
+    };
     const container = containerRef.current;
 
     if (container) {
@@ -467,18 +501,41 @@ export function ChatMessages({
       if (inactivityTimerRef.current) {
         clearTimeout(inactivityTimerRef.current);
       }
+      if (supportButtonsTimerRef.current) {
+        clearTimeout(supportButtonsTimerRef.current);
+      }
       if (container) {
         container.removeEventListener('scroll', handleActivity);
         container.removeEventListener('click', handleActivity);
         container.removeEventListener('mousemove', handleActivity);
       }
     };
-  }, [resetInactivityTimer]);
+  }, [resetInactivityTimer, resetSupportButtonsTimer]);
 
-  // Reset timer when messages change (user is active)
+  // Reset timers when messages change (user is active)
+  // Also hide support buttons and feedback form when user sends a new message
   useEffect(() => {
     resetInactivityTimer();
-  }, [messages, resetInactivityTimer]);
+    resetSupportButtonsTimer();
+
+    // Hide support buttons and feedback form when user starts chatting again
+    if (messages.length > 0) {
+      const lastMessage = messages[messages.length - 1];
+
+      // If the last message is from the user, hide both UI elements
+      if (lastMessage?.role === 'user') {
+        // Hide support buttons
+        if (supportButtons.show) {
+          setSupportButtons(prev => ({ ...prev, show: false }));
+        }
+
+        // Hide delayed feedback form (but keep it as "dismissed" so it won't show again)
+        if (delayedFeedback.show) {
+          setDelayedFeedback(prev => ({ ...prev, show: false }));
+        }
+      }
+    }
+  }, [messages, resetInactivityTimer, resetSupportButtonsTimer]);
 
   // Handle star rating click
   const handleStarClick = (star: number) => {
@@ -535,6 +592,34 @@ export function ChatMessages({
       submitting: false,
       submitted: true
     }));
+  };
+
+  // Handle support button clicks
+  const handleSupportAction = (action: string) => {
+    // Dismiss the support buttons card
+    setSupportButtons({ show: false, dismissed: true });
+
+    // Trigger the action
+    if (action === 'contact_support') {
+      // Open contact support (could be WhatsApp, email, or custom modal)
+      window.open('https://api.whatsapp.com/send/?phone=4407727449124&text&type=phone_number&app_absent=0', '_blank');
+    } else if (action === 'view_faq') {
+      // Open FAQ page
+      window.open('https://www.marketinside.io/faq', '_blank');
+    } else if (action === 'get_help') {
+      // Send a message to chatbot asking for help
+      onActionClick?.('chat', 'I need help with something');
+    } else if (action === 'schedule_demo') {
+      // Open schedule demo
+      if (typeof window !== 'undefined' && typeof (window as any).openScheduleDemo === 'function') {
+        (window as any).openScheduleDemo();
+      }
+    }
+  };
+
+  // Dismiss support buttons
+  const dismissSupportButtons = () => {
+    setSupportButtons({ show: false, dismissed: true });
   };
 
   // Smooth auto-scroll to bottom when messages change
@@ -860,6 +945,123 @@ export function ChatMessages({
             {/* Footer */}
             <div className="px-5 py-3 bg-gray-50 border-t border-gray-100">
               <p className="text-xs text-gray-400 text-center">Your feedback helps us serve you better</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Support Buttons Card (appears after 30 seconds of inactivity) */}
+      {supportButtons.show && !supportButtons.dismissed && (
+        <div className="support-buttons-card mx-2 my-4 animate-fade-in">
+          {/* Idle message bubble */}
+          <div className="flex items-center justify-center mb-3">
+            <div className="bg-blue-100 px-4 py-2 rounded-full text-sm text-blue-700 flex items-center gap-2">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-5 0a4 4 0 11-8 0 4 4 0 018 0z" />
+              </svg>
+              Need assistance?
+            </div>
+          </div>
+
+          {/* Support Card */}
+          <div className="bg-white rounded-2xl shadow-lg border border-blue-200 overflow-hidden">
+            <div className="bg-gradient-to-r from-blue-500 to-blue-600 px-5 py-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
+                    <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 className="text-white font-semibold text-base">We're here to help!</h3>
+                    <p className="text-blue-100 text-xs">Choose how you'd like assistance</p>
+                  </div>
+                </div>
+                <button
+                  onClick={dismissSupportButtons}
+                  className="text-white/80 hover:text-white transition-colors p-1 hover:bg-white/10 rounded-full"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Support Options */}
+            <div className="p-5 space-y-3">
+              <button
+                onClick={() => handleSupportAction('get_help')}
+                className="w-full flex items-center gap-4 p-4 rounded-xl transition-all duration-200 hover:bg-orange-50 border-2 border-transparent hover:border-orange-200 group text-left"
+              >
+                <div className="flex-shrink-0 w-12 h-12 bg-orange-100 rounded-full flex items-center justify-center group-hover:bg-orange-200 transition-colors">
+                  <svg className="w-6 h-6 text-orange-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <div className="font-semibold text-gray-800 group-hover:text-orange-700 transition-colors">Continue Chatting</div>
+                  <div className="text-sm text-gray-500">Ask me anything about our services</div>
+                </div>
+                <svg className="w-5 h-5 text-gray-300 group-hover:text-orange-500 transition-all group-hover:translate-x-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+
+              <button
+                onClick={() => handleSupportAction('contact_support')}
+                className="w-full flex items-center gap-4 p-4 rounded-xl transition-all duration-200 hover:bg-green-50 border-2 border-transparent hover:border-green-200 group text-left"
+              >
+                <div className="flex-shrink-0 w-12 h-12 bg-green-100 rounded-full flex items-center justify-center group-hover:bg-green-200 transition-colors">
+                  <svg className="w-6 h-6 text-green-600" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/>
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <div className="font-semibold text-gray-800 group-hover:text-green-700 transition-colors">WhatsApp Support</div>
+                  <div className="text-sm text-gray-500">Chat with our team directly</div>
+                </div>
+                <svg className="w-5 h-5 text-gray-300 group-hover:text-green-500 transition-all group-hover:translate-x-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+
+              <button
+                onClick={() => handleSupportAction('schedule_demo')}
+                className="w-full flex items-center gap-4 p-4 rounded-xl transition-all duration-200 hover:bg-purple-50 border-2 border-transparent hover:border-purple-200 group text-left"
+              >
+                <div className="flex-shrink-0 w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center group-hover:bg-purple-200 transition-colors">
+                  <svg className="w-6 h-6 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <div className="font-semibold text-gray-800 group-hover:text-purple-700 transition-colors">Schedule a Demo</div>
+                  <div className="text-sm text-gray-500">See our platform in action</div>
+                </div>
+                <svg className="w-5 h-5 text-gray-300 group-hover:text-purple-500 transition-all group-hover:translate-x-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+
+              <button
+                onClick={() => handleSupportAction('view_faq')}
+                className="w-full flex items-center gap-4 p-4 rounded-xl transition-all duration-200 hover:bg-blue-50 border-2 border-transparent hover:border-blue-200 group text-left"
+              >
+                <div className="flex-shrink-0 w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center group-hover:bg-blue-200 transition-colors">
+                  <svg className="w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <div className="font-semibold text-gray-800 group-hover:text-blue-700 transition-colors">View FAQ</div>
+                  <div className="text-sm text-gray-500">Find answers to common questions</div>
+                </div>
+                <svg className="w-5 h-5 text-gray-300 group-hover:text-blue-500 transition-all group-hover:translate-x-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
             </div>
           </div>
         </div>
