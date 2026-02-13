@@ -232,6 +232,10 @@ class RedisMemoryManager:
         Returns:
             (embeddings, chunks, full_content) or None if not found
         """
+        # Return None if dynamic_url is not provided
+        if not dynamic_url:
+            return None
+
         url_hash = hashlib.md5(dynamic_url.encode()).hexdigest()[:16]
 
         embed_key = f"embed:{session_id}:{url_hash}"

@@ -65,6 +65,7 @@ import time
 import uuid
 import re
 import os
+import base64
 from pathlib import Path
 from typing import TypedDict, Annotated, Sequence, Dict, Any, Optional, List
 import operator
@@ -100,7 +101,10 @@ from chatbot.models.api_models import (
     LeadCaptureRequest, LeadCaptureResponse,
     LeadSkipRequest, LeadSkipResponse,
     LeadStatsResponse,
-    FeedbackRequest, FeedbackResponse, FeedbackStatsResponse
+    FeedbackRequest, FeedbackResponse, FeedbackStatsResponse,
+    VoiceTokenRequest, VoiceTokenResponse,
+    VoiceMessageRequest, VoiceMessageResponse,
+    VoiceSessionStats
 )
 
 # Import Feedback Service
@@ -127,6 +131,9 @@ from chatbot.models.credit_models import (
     CreditState, CreditDeductionResult, CreditExhaustionResponse,
     ContinueChatRequest, ContinueChatResponse
 )
+
+# Import Voice Chat Service
+from chatbot.services.voice_chat_service import VoiceChatService, get_voice_chat_service
 
 # Import modular utility functions
 from chatbot.utils import (
@@ -2870,7 +2877,12 @@ IMPORTANT
 
         # Add progressive questioning and few-shot examples (same as chat())
         system_prompt += f"""
-        
+
+ABSOLUTE FORMAT RULES — NEVER VIOLATE:
+FORBIDDEN: "Let's break down" / "Let me analyze" / "## Step 1:" / "## Step 2:" / any "Step X:" headers / numbered analysis (1. Understand... 2. Analyze...) / section headers.
+REQUIRED: Start with the direct answer. 1-3 sentences. No structured breakdown. No analytical framing.
+WRONG: "Let's break down systematically. ## Step 1: Understand the Data..."
+RIGHT: "Vietnam imported $1.2B of HS 94 in 2023, mainly from China. Want more details?"
 
 PROGRESSIVE QUESTIONING (SMART FOLLOW-UP):
 - Use conversation history to understand follow-up questions like "list all of them" or "the same"
@@ -2935,6 +2947,7 @@ if query is for platform
             'top_p': Config.TOP_P,
             'num_predict': Config.NUM_PREDICT,
             'num_ctx': Config.NUM_CTX,
+            'request_timeout': 90.0,  # 90s timeout to prevent silent hangs
         }
 
         # Use local Ollama
@@ -2954,13 +2967,37 @@ if query is for platform
         full_response = ""
 
         try:
-            # Stream the response
+            # Stream the response, stripping <think>...</think> reasoning blocks
+            raw_accumulated = ""
+            yielded_length = 0
+            in_think_block = False
+
             async for chunk in llm.astream(llm_messages):
-                if hasattr(chunk, 'content') and chunk.content:
+                if not hasattr(chunk, 'content') or not chunk.content:
+                    continue
+
+                raw_accumulated += chunk.content
+
+                # Track open/close think tags to know if we're mid-block
+                open_tags = raw_accumulated.count('<think>')
+                close_tags = raw_accumulated.count('</think>')
+                in_think_block = open_tags > close_tags
+
+                if in_think_block:
+                    # Still inside a think block — don't yield anything yet
+                    continue
+
+                # Strip all complete <think>...</think> blocks from accumulated text
+                import re as _re
+                cleaned = _re.sub(r'<think>.*?</think>', '', raw_accumulated, flags=_re.DOTALL).strip()
+
+                # Yield only the new portion we haven't sent yet
+                new_content = cleaned[yielded_length:]
+                if new_content:
                     chunk_count += 1
-                    # Clean markdown from chunk
-                    clean_chunk = chunk.content.replace('**', '').replace('__', '')
+                    clean_chunk = new_content.replace('**', '').replace('__', '')
                     full_response += clean_chunk
+                    yielded_length += len(new_content)
                     yield clean_chunk
 
             elapsed = time.time() - start_time
@@ -4849,6 +4886,399 @@ async def get_feedback_detail(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# VOICE CHAT ENDPOINTS
+# Real-time voice conversation with LiveKit + OpenAI Whisper + TTS
+# ============================================================================
+
+@router.post("/voice/token", response_model=VoiceTokenResponse)
+async def get_voice_token(request: VoiceTokenRequest):
+    """
+    Generate LiveKit access token for voice chat session
+
+    This endpoint:
+    1. Creates a LiveKit room for the session
+    2. Generates a JWT access token
+    3. Returns connection details for the client
+
+    The client uses this token to connect to LiveKit and start real-time audio streaming.
+
+    Args:
+        request: VoiceTokenRequest with session_id and optional participant_name
+
+    Returns:
+        VoiceTokenResponse with access token and connection details
+    """
+    try:
+        voice_service = get_voice_chat_service()
+
+        # Generate room name based on session
+        room_name = f"voice_{request.session_id}"
+
+        # Generate access token
+        access_token = await voice_service.generate_access_token(
+            room_name=room_name,
+            participant_identity=request.session_id,
+            participant_name=request.participant_name
+        )
+
+        # Register session
+        voice_service.register_session(request.session_id, room_name)
+
+        return VoiceTokenResponse(
+            access_token=access_token,
+            livekit_url=voice_service.config.livekit_url,
+            room_name=room_name,
+            participant_identity=request.session_id
+        )
+
+    except Exception as e:
+        print(f"[Voice Chat] Error generating token: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate voice token: {str(e)}")
+
+
+@router.post("/voice/message", response_model=VoiceMessageResponse)
+async def process_voice_message(request: VoiceMessageRequest):
+    """
+    Process voice message: STT → Chatbot → TTS
+
+    This endpoint handles the complete voice conversation pipeline:
+    1. Decode base64 audio data
+    2. Transcribe speech to text using OpenAI Whisper
+    3. Process text through chatbot logic
+    4. Generate speech response using OpenAI TTS
+    5. Return transcript, response text, and audio
+
+    Args:
+        request: VoiceMessageRequest with session_id and audio_data
+
+    Returns:
+        VoiceMessageResponse with transcript, response, and audio
+    """
+    start_time = time.time()
+
+    try:
+        # Lazy initialization
+        await ensure_initialized()
+
+        if not chatbot_manager:
+            raise HTTPException(status_code=503, detail="Chatbot not initialized")
+
+        voice_service = get_voice_chat_service()
+
+        # Decode audio data from base64
+        try:
+            audio_bytes = base64.b64decode(request.audio_data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid audio data: {str(e)}")
+
+        print(f"[Voice Chat] Processing voice message for session {request.session_id}")
+        print(f"[Voice Chat] Audio size: {len(audio_bytes)} bytes, format: {request.audio_format}")
+
+        # Define chatbot handler function
+        async def chatbot_handler(session_id: str, message: str) -> Dict[str, Any]:
+            """Handle chatbot processing for voice message"""
+            try:
+                # Process through existing chatbot logic
+                response_text, processing_time, sources_used = await chatbot_manager.chat(
+                    message=message,
+                    session_id=session_id,
+                    dynamic_url=None
+                )
+
+                return {
+                    "response": response_text,
+                    "metadata": {
+                        "sources_used": sources_used,
+                        "processing_time": processing_time
+                    }
+                }
+            except Exception as e:
+                print(f"[Voice Chat] Chatbot error: {e}")
+                import traceback
+                traceback.print_exc()
+                return {
+                    "response": "I'm sorry, I encountered an error processing your message.",
+                    "metadata": {"error": str(e)}
+                }
+
+        # Process voice message
+        print(f"[Voice Chat] Calling voice_service.handle_voice_message...")
+        result = await voice_service.handle_voice_message(
+            session_id=request.session_id,
+            audio_data=audio_bytes,
+            chatbot_handler=chatbot_handler,
+            audio_format=request.audio_format
+        )
+
+        print(f"[Voice Chat] handle_voice_message result: {result is not None}")
+
+        if not result:
+            print(f"[Voice Chat] ERROR: handle_voice_message returned None - check logs above for details")
+            raise HTTPException(status_code=500, detail="Failed to process voice message - check server logs for details")
+
+        # Encode audio response to base64
+        audio_base64 = base64.b64encode(result["audio_data"]).decode("utf-8")
+
+        processing_time = time.time() - start_time
+
+        print(f"[Voice Chat] Voice message processed in {processing_time:.2f}s")
+
+        return VoiceMessageResponse(
+            transcript=result["transcript"],
+            response_text=result["response_text"],
+            audio_data=audio_base64,
+            audio_format=result["audio_format"],
+            processing_time=processing_time,
+            metadata=result.get("metadata")
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Voice Chat] Error processing voice message: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Voice message processing failed: {str(e)}")
+
+
+@router.post("/voice/stream")
+async def stream_voice_message(request: VoiceMessageRequest):
+    """
+    Stream voice message processing via SSE:
+    1. Transcribe audio (STT) → immediately sends transcript event
+    2. Stream LLM response text → sends text_chunk events
+    3. Generate TTS for full response → sends audio event
+    4. Sends done event
+    """
+    try:
+        await ensure_initialized()
+
+        if not chatbot_manager:
+            raise HTTPException(status_code=503, detail="Chatbot not initialized")
+
+        try:
+            audio_bytes = base64.b64decode(request.audio_data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid audio data: {str(e)}")
+
+        voice_service = get_voice_chat_service()
+
+        async def generate():
+            try:
+                # Step 1: Transcribe audio
+                print(f"[Voice Stream] Starting transcription for session {request.session_id}")
+                transcript = await voice_service.transcribe_audio(audio_bytes, request.audio_format)
+                if not transcript or not transcript.strip():
+                    print(f"[Voice Stream] Transcription failed - empty result")
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Could not transcribe audio - please try again'})}\n\n"
+                    return
+
+                print(f"[Voice Stream] Transcription successful: {transcript[:100]}")
+                yield f"data: {json.dumps({'type': 'transcript', 'text': transcript.strip()})}\n\n"
+
+                # Step 2 & 3: Stream LLM response AND generate TTS simultaneously
+                full_response = ""
+                sentence_buffer = ""
+                chunk_count = 0
+
+                print(f"[Voice Stream] Starting LLM streaming...")
+                try:
+                    import asyncio
+
+                    # Create timeout task
+                    stream_start = asyncio.get_event_loop().time()
+                    timeout_seconds = 60.0
+
+                    async for chunk in chatbot_manager.chat_stream(
+                        message=transcript.strip(),
+                        session_id=request.session_id,
+                        dynamic_url=None
+                    ):
+                        # Check timeout manually
+                        elapsed = asyncio.get_event_loop().time() - stream_start
+                        if elapsed > timeout_seconds:
+                            print(f"[Voice Stream] Timeout after {elapsed:.1f}s")
+                            raise asyncio.TimeoutError()
+
+                        chunk_count += 1
+                        if chunk_count == 1:
+                            print(f"[Voice Stream] First chunk received - exiting thinking state")
+
+                        chunk_stripped = chunk.strip()
+                        if chunk_stripped.startswith('{'):
+                            try:
+                                parsed = json.loads(chunk_stripped)
+                                if parsed.get('credit_exhausted') or parsed.get('clarifying_question'):
+                                    msg = parsed.get('message') or parsed.get('question', '')
+                                    if msg:
+                                        full_response = msg
+                                        yield f"data: {json.dumps({'type': 'text_chunk', 'text': msg})}\n\n"
+                                        # Generate TTS for the complete message
+                                        audio_data = await voice_service.generate_speech(msg)
+                                        if audio_data:
+                                            audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                                            yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
+                                    break
+                                if parsed.get('done'):
+                                    break
+                            except json.JSONDecodeError:
+                                pass
+                        else:
+                            full_response += chunk
+                            sentence_buffer += chunk
+                            yield f"data: {json.dumps({'type': 'text_chunk', 'text': chunk})}\n\n"
+
+                            # Check if we have a complete sentence (ends with . ! ? or has 2+ newlines)
+                            if any(sentence_buffer.rstrip().endswith(p) for p in ['.', '!', '?', '.\n', '!\n', '?\n']) or '\n\n' in sentence_buffer:
+                                sentence_to_speak = sentence_buffer.strip()
+                                if sentence_to_speak and len(sentence_to_speak) > 10:  # Only speak substantial sentences
+                                    # Generate TTS for this sentence in parallel
+                                    audio_data = await voice_service.generate_speech(sentence_to_speak)
+                                    if audio_data:
+                                        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                                        yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
+                                    sentence_buffer = ""  # Clear buffer after speaking
+
+                    print(f"[Voice Stream] LLM streaming completed. Total chunks: {chunk_count}")
+
+                except asyncio.TimeoutError:
+                    print(f"[Voice Stream] LLM streaming timed out after 60s")
+                    error_msg = "I'm sorry, the response is taking too long. Please try again."
+                    yield f"data: {json.dumps({'type': 'text_chunk', 'text': error_msg})}\n\n"
+                    # Generate error TTS
+                    audio_data = await voice_service.generate_speech(error_msg)
+                    if audio_data:
+                        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                        yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    return
+
+                except Exception as stream_error:
+                    print(f"[Voice Stream] Error during LLM streaming: {stream_error}")
+                    import traceback
+                    traceback.print_exc()
+                    error_msg = f"I encountered an error: {str(stream_error)}"
+                    yield f"data: {json.dumps({'type': 'text_chunk', 'text': error_msg})}\n\n"
+                    # Generate error TTS
+                    audio_data = await voice_service.generate_speech(error_msg)
+                    if audio_data:
+                        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                        yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    return
+
+                # If we got no chunks at all, yield an error
+                if chunk_count == 0:
+                    print(f"[Voice Stream] WARNING: No chunks received from LLM - yielding fallback message")
+                    error_msg = "I'm sorry, I couldn't generate a response. Please try again."
+                    yield f"data: {json.dumps({'type': 'text_chunk', 'text': error_msg})}\n\n"
+                    audio_data = await voice_service.generate_speech(error_msg)
+                    if audio_data:
+                        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                        yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
+
+                # Step 4: Generate TTS for any remaining text
+                if sentence_buffer.strip():
+                    print(f"[Voice Stream] Generating TTS for remaining text: {len(sentence_buffer)} chars")
+                    audio_data = await voice_service.generate_speech(sentence_buffer.strip())
+                    if audio_data:
+                        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                        yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
+
+                print(f"[Voice Stream] Stream completed successfully")
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+            except Exception as e:
+                print(f"[Voice Stream] Fatal error in generate: {e}")
+                import traceback
+                traceback.print_exc()
+                # Always yield a text chunk for errors so frontend exits "Thinking" state
+                error_msg = f"Error: {str(e)}"
+                yield f"data: {json.dumps({'type': 'text_chunk', 'text': error_msg})}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Voice Stream] Outer error: {e}")
+        raise HTTPException(status_code=500, detail=f"Voice stream failed: {str(e)}")
+
+
+@router.get("/voice/sessions")
+async def get_voice_sessions():
+    """
+    Get active voice chat sessions
+
+    Returns statistics for all active voice chat sessions including:
+    - Session ID
+    - Room name
+    - Start time
+    - Message count
+
+    Returns:
+        List of VoiceSessionStats
+    """
+    try:
+        voice_service = get_voice_chat_service()
+        sessions = voice_service.get_active_sessions()
+
+        return {
+            "total_sessions": len(sessions),
+            "sessions": [
+                VoiceSessionStats(
+                    session_id=session_id,
+                    room_name=data["room_name"],
+                    started_at=data["started_at"].isoformat(),
+                    message_count=data["message_count"]
+                )
+                for session_id, data in sessions.items()
+            ]
+        }
+
+    except Exception as e:
+        print(f"[Voice Chat] Error getting sessions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/voice/session/{session_id}")
+async def close_voice_session(session_id: str):
+    """
+    Close a voice chat session
+
+    Unregisters the session and cleans up resources.
+
+    Args:
+        session_id: Session to close
+
+    Returns:
+        Success message
+    """
+    try:
+        voice_service = get_voice_chat_service()
+        voice_service.unregister_session(session_id)
+
+        return {
+            "status": "success",
+            "message": f"Voice session {session_id} closed"
+        }
+
+    except Exception as e:
+        print(f"[Voice Chat] Error closing session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API information"""
@@ -4862,6 +5292,9 @@ async def root():
             "GET /api/history/{session_id}": "Get conversation history",
             "GET /api/health": "Health check",
             "GET /api/redis/stats": "Redis statistics",
+            "POST /api/voice/token": "Get LiveKit access token for voice chat",
+            "POST /api/voice/message": "Process voice message (STT → Chat → TTS)",
+            "GET /api/voice/sessions": "Get active voice sessions",
             "GET /docs": "Interactive API documentation"
         }
     }

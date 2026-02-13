@@ -1253,7 +1253,10 @@ Date Range: {date_from} to {date_to}""")
                 if isinstance(value, (int, float)) and value > 0:
                     sections.append(f"     Value: ${value:,.2f}")
                 if quantity and unit:
-                    sections.append(f"     Quantity: {quantity:,} {unit}")
+                    try:
+                        sections.append(f"     Quantity: {float(quantity):,.2f} {unit}")
+                    except (TypeError, ValueError):
+                        sections.append(f"     Quantity: {quantity} {unit}")
                 if isinstance(weight, (int, float)) and weight > 0:
                     sections.append(f"     Net Weight: {weight:,.2f} kg")
                 sections.append("")

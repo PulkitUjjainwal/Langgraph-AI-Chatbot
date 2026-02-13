@@ -141,7 +141,8 @@ class ChatbotAgent:
         ]
 
         response = self.llm.invoke(llm_messages)
-        response_text = response.content
+        import re as _re
+        response_text = _re.sub(r'<think>.*?</think>', '', response.content, flags=_re.DOTALL).strip()
 
         elapsed = time.time() - start_time
         print(f"  [OK] Generated response in {elapsed:.2f}s")
