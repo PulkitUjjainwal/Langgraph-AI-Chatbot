@@ -1,16 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-/**
- * VoiceChat Component - Real-time Conversation Mode
- *
- * Features:
- * - Continuous listening with Voice Activity Detection
- * - Auto-send when user stops speaking
- * - Animated waveform visualization
- * - OpenAI Whisper STT + TTS
- * - Interrupt handling (stop bot if user starts speaking)
- */
-
 interface VoiceChatProps {
   sessionId: string;
   apiUrl: string;
@@ -26,6 +15,56 @@ interface VoiceMessage {
   timestamp: Date;
 }
 
+// ─── Frequency-domain VAD ────────────────────────────────────────────────────
+// Computes the probability that the current frame contains speech by comparing
+// energy in the human speech band (300–3400 Hz) vs broadband noise.
+// Background noise (fans, AC, room) is wideband → low SNR → prob ≈ 0.
+// Human voice concentrates energy in the speech band → high SNR → prob ≈ 1.
+function computeSpeechProb(analyser: AnalyserNode, sampleRate: number): number {
+  const freqBuf = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(freqBuf);
+
+  const nyquist = sampleRate / 2;
+  const freqPerBin = nyquist / freqBuf.length;
+
+  // Speech band: 300–3400 Hz
+  const speechLo = Math.max(1, Math.round(300 / freqPerBin));
+  const speechHi = Math.min(freqBuf.length - 1, Math.round(3400 / freqPerBin));
+  // Upper noise bound: 8000 Hz (above this is ultrasonic noise)
+  const noiseHiIdx = Math.min(freqBuf.length - 1, Math.round(8000 / freqPerBin));
+
+  let speechSum = 0, noiseSum = 0;
+  let speechCount = 0, noiseCount = 0;
+
+  for (let i = 1; i < noiseHiIdx; i++) {
+    if (i >= speechLo && i <= speechHi) {
+      speechSum += freqBuf[i];
+      speechCount++;
+    } else {
+      noiseSum += freqBuf[i];
+      noiseCount++;
+    }
+  }
+
+  const speechMean = speechCount > 0 ? speechSum / speechCount : 0;
+  const noiseMean  = noiseCount > 0  ? noiseSum  / noiseCount  : 0;
+
+  // If overall energy is too low, it's silence
+  if (speechMean < 8) return 0;
+
+  // SNR: how much louder is the speech band vs the noise band?
+  const snr = speechMean / (noiseMean + 0.5);
+  // Map SNR [1.0, 3.5] → prob [0, 1]
+  return Math.min(1, Math.max(0, (snr - 1.0) / 2.5));
+}
+
+// ─── VAD constants ───────────────────────────────────────────────────────────
+const SPEECH_PROB_THRESHOLD  = 0.40;  // SNR-based probability to count as a speech frame
+const SPEECH_ONSET_FRAMES    = 6;     // ~100 ms of sustained speech before we start recording
+const SILENCE_FRAMES_END     = 55;    // ~900 ms of silence after speech before we send
+const MIN_RECORD_MS          = 600;   // Ignore recordings shorter than this (noise bursts)
+const POST_AI_COOLDOWN_MS    = 1400;  // Pause VAD after AI finishes speaking (prevent echo)
+
 const VoiceChatComponent: React.FC<VoiceChatProps> = ({
   sessionId,
   apiUrl,
@@ -33,342 +72,252 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
   onResponse,
   onError
 }) => {
-  // State
-  const [isListening, setIsListening] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isThinking, setIsThinking] = useState(false); // true from start until first text chunk
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [messages, setMessages] = useState<VoiceMessage[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [audioLevel, setAudioLevel] = useState(0);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [waveformTime, setWaveformTime] = useState(0);
+  const [isListening,   setIsListening]   = useState(false);
+  const [isProcessing,  setIsProcessing]  = useState(false);
+  const [isThinking,    setIsThinking]    = useState(false);
+  const [isPlaying,     setIsPlaying]     = useState(false);
+  const [messages,      setMessages]      = useState<VoiceMessage[]>([]);
+  const [error,         setError]         = useState<string | null>(null);
+  const [audioLevel,    setAudioLevel]    = useState(0);
+  const [isSpeaking,    setIsSpeaking]    = useState(false); // visual: user is speaking
+  const [waveformTime,  setWaveformTime]  = useState(0);
 
-  // Refs
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const animationFrameRef = useRef<number | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const silenceTimerRef = useRef<number | null>(null);
-  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Core refs
+  const mediaRecorderRef      = useRef<MediaRecorder | null>(null);
+  const audioChunksRef        = useRef<Blob[]>([]);
+  const audioContextRef       = useRef<AudioContext | null>(null);
+  const analyserRef           = useRef<AnalyserNode | null>(null);
+  const animationFrameRef     = useRef<number | null>(null);
+  const streamRef             = useRef<MediaStream | null>(null);
+  const currentAudioRef       = useRef<HTMLAudioElement | null>(null);
   const recordingStartTimeRef = useRef<number>(0);
-  const isListeningRef = useRef<boolean>(false);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const audioQueueRef = useRef<string[]>([]);
-  const isPlayingQueueRef = useRef<boolean>(false);
-  const thinkingTimeoutRef = useRef<number | null>(null);
+  const isListeningRef        = useRef<boolean>(false);
+  const isPlayingRef          = useRef<boolean>(false); // sync ref for animation frame
+  const messagesEndRef        = useRef<HTMLDivElement | null>(null);
+  const audioQueueRef         = useRef<string[]>([]);
+  const isPlayingQueueRef     = useRef<boolean>(false);
+  const thinkingTimeoutRef    = useRef<number | null>(null);
 
-  // VAD Configuration
-  const SILENCE_THRESHOLD = 0.05; // Audio level threshold for silence (increased for RMS calculation)
-  const SILENCE_DURATION = 1500; // ms of silence before auto-send
-  const MIN_RECORDING_DURATION = 500; // Minimum recording length in ms
+  // VAD frame counters
+  const speechFrameCountRef   = useRef<number>(0); // consecutive speech frames (onset detection)
+  const silenceFrameCountRef  = useRef<number>(0); // consecutive silence frames (end detection)
+  const aiCooldownUntilRef    = useRef<number>(0); // timestamp: don't pick up audio until this
 
-  // Waveform animation timer - update every 50ms when listening or playing for smooth animation
+  // Keep isPlayingRef in sync with state (animation frame can't read stale state)
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+
+  // ── Waveform animation timer ────────────────────────────────────────────────
   useEffect(() => {
-    let intervalId: number | null = null;
-
+    let id: number | null = null;
     if (isListening || isPlaying) {
-      intervalId = window.setInterval(() => {
-        setWaveformTime(Date.now());
-      }, 50); // Update 20 times per second for smooth animation
+      id = window.setInterval(() => setWaveformTime(Date.now()), 50);
     }
-
-    return () => {
-      if (intervalId !== null) {
-        clearInterval(intervalId);
-      }
-    };
+    return () => { if (id !== null) clearInterval(id); };
   }, [isListening, isPlaying]);
 
-  // Initialize audio context
+  // ── AudioContext init ───────────────────────────────────────────────────────
   useEffect(() => {
     audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-
-    // Cleanup on unmount only
     return () => {
-      console.log('[VoiceChat] Component unmounting - cleaning up');
-
-      // Stop recording
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.stop();
-      }
-
-      // Stop audio context
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-      }
-
-      // Cancel animation
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-
-      // Stop stream tracks
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-      }
-
-      // Clear timers
-      if (silenceTimerRef.current) {
-        clearTimeout(silenceTimerRef.current);
-      }
-      if (thinkingTimeoutRef.current) {
-        clearTimeout(thinkingTimeoutRef.current);
-      }
-
-      // Clear audio queue and stop playback
+      if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop();
+      audioContextRef.current?.close();
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+      streamRef.current?.getTracks().forEach(t => t.stop());
+      if (thinkingTimeoutRef.current) clearTimeout(thinkingTimeoutRef.current);
       audioQueueRef.current = [];
       isPlayingQueueRef.current = false;
-      if (currentAudioRef.current) {
-        currentAudioRef.current.pause();
-        currentAudioRef.current = null;
-      }
+      if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
     };
   }, []);
 
-  // Waveform visualization and VAD
+  // ── VAD + waveform loop ─────────────────────────────────────────────────────
+  // Called every animation frame (~16 ms / 60 fps).
+  // Phase 1 (not recording): count consecutive speech frames → start recording when onset confirmed.
+  // Phase 2 (recording):     count consecutive silence frames → send when silence confirmed.
   const updateWaveform = () => {
-    if (!analyserRef.current) {
-      setAudioLevel(0);
+    if (!analyserRef.current || !audioContextRef.current) {
       animationFrameRef.current = requestAnimationFrame(updateWaveform);
       return;
     }
 
-    // Use time domain data for better volume detection
-    const bufferLength = analyserRef.current.fftSize;
-    const dataArray = new Uint8Array(bufferLength);
-    analyserRef.current.getByteTimeDomainData(dataArray);
-
-    // Calculate RMS (Root Mean Square) for accurate volume level
+    // ── Waveform level (RMS on time-domain for visual only) ──────────────────
+    const timeBuf = new Uint8Array(analyserRef.current.fftSize);
+    analyserRef.current.getByteTimeDomainData(timeBuf);
     let sum = 0;
-    for (let i = 0; i < bufferLength; i++) {
-      const normalized = (dataArray[i] - 128) / 128; // Normalize to -1 to 1
-      sum += normalized * normalized;
+    for (let i = 0; i < timeBuf.length; i++) {
+      const n = (timeBuf[i] - 128) / 128;
+      sum += n * n;
     }
-    const rms = Math.sqrt(sum / bufferLength);
-    const normalizedLevel = Math.min(1, rms * 3); // Amplify and cap at 1
+    setAudioLevel(Math.min(1, Math.sqrt(sum / timeBuf.length) * 3));
 
-    setAudioLevel(normalizedLevel);
+    // ── Skip VAD during AI cooldown or AI speech (echo prevention) ───────────
+    const now = Date.now();
+    if (isPlayingRef.current || now < aiCooldownUntilRef.current) {
+      speechFrameCountRef.current  = 0;
+      silenceFrameCountRef.current = 0;
+      animationFrameRef.current = requestAnimationFrame(updateWaveform);
+      return;
+    }
 
-    // Voice Activity Detection (using refs to avoid stale closures)
-    const isCurrentlyRecording = mediaRecorderRef.current?.state === 'recording';
+    const prob              = computeSpeechProb(analyserRef.current, audioContextRef.current.sampleRate);
+    const isSpeechFrame     = prob > SPEECH_PROB_THRESHOLD;
+    const isCurrentRecording = mediaRecorderRef.current?.state === 'recording';
 
-    if (isCurrentlyRecording && normalizedLevel > SILENCE_THRESHOLD) {
-      // User is speaking
-      setIsSpeaking(true);
-      // Clear silence timer
-      if (silenceTimerRef.current) {
-        clearTimeout(silenceTimerRef.current);
-        silenceTimerRef.current = null;
+    if (!isCurrentRecording) {
+      // ── Phase 1: waiting for speech onset ──────────────────────────────────
+      if (isSpeechFrame) {
+        speechFrameCountRef.current++;
+        if (speechFrameCountRef.current >= SPEECH_ONSET_FRAMES) {
+          // Speech confirmed — start capturing
+          speechFrameCountRef.current  = 0;
+          silenceFrameCountRef.current = 0;
+          setIsSpeaking(true);
+          startRecording();
+        }
+      } else {
+        // Decay slowly so brief pauses between words don't reset the counter
+        speechFrameCountRef.current = Math.max(0, speechFrameCountRef.current - 1);
       }
-    } else if (isCurrentlyRecording && normalizedLevel <= SILENCE_THRESHOLD) {
-      // Potential silence detected
-      // DON'T immediately hide "Listening..." - keep it visible until we actually send
-      // This provides better UX - user sees "Listening..." throughout their speech
-
-      // Start silence timer if not already started
-      if (!silenceTimerRef.current) {
-        silenceTimerRef.current = window.setTimeout(() => {
-          const recordingDuration = Date.now() - recordingStartTimeRef.current;
-          if (recordingDuration >= MIN_RECORDING_DURATION) {
-            console.log('[VAD] Silence detected - auto-sending message');
-            stopRecordingAndSend();
-          }
-          silenceTimerRef.current = null;
-        }, SILENCE_DURATION);
+    } else {
+      // ── Phase 2: recording — watch for end-of-utterance silence ────────────
+      if (isSpeechFrame) {
+        silenceFrameCountRef.current = 0;
+        setIsSpeaking(true);
+      } else {
+        silenceFrameCountRef.current++;
+        const recDuration = now - recordingStartTimeRef.current;
+        if (
+          silenceFrameCountRef.current >= SILENCE_FRAMES_END &&
+          recDuration >= MIN_RECORD_MS
+        ) {
+          silenceFrameCountRef.current = 0;
+          speechFrameCountRef.current  = 0;
+          setIsSpeaking(false);
+          stopRecordingAndSend();
+        }
       }
     }
 
     animationFrameRef.current = requestAnimationFrame(updateWaveform);
   };
 
-  // Start continuous listening
+  // ── Start listening session ─────────────────────────────────────────────────
   const startListening = async () => {
-    // Prevent multiple simultaneous starts
-    if (isListeningRef.current) {
-      console.log('[VoiceChat] Already listening, ignoring start request');
-      return;
-    }
+    if (isListeningRef.current) return;
 
     try {
-      console.log('[VoiceChat] startListening called');
       isListeningRef.current = true;
       setError(null);
 
-      // Check if getUserMedia is supported
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Your browser does not support audio recording');
       }
 
-      console.log('[VoiceChat] Requesting microphone access...');
-
-      // Request microphone access
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: { ideal: 48000 },
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      });
       streamRef.current = stream;
 
-      console.log('[VoiceChat] Microphone access granted');
-
-      // Set up audio analysis for waveform and VAD
       if (audioContextRef.current) {
         const source = audioContextRef.current.createMediaStreamSource(stream);
         analyserRef.current = audioContextRef.current.createAnalyser();
-        analyserRef.current.fftSize = 2048; // Larger FFT for better frequency resolution
-        analyserRef.current.smoothingTimeConstant = 0.3; // Less smoothing for more responsive waveform
+        analyserRef.current.fftSize = 4096;               // high freq resolution
+        analyserRef.current.smoothingTimeConstant = 0.25; // fast response
         analyserRef.current.minDecibels = -90;
         analyserRef.current.maxDecibels = -10;
         source.connect(analyserRef.current);
-        console.log('[VoiceChat] Audio analyser connected');
         updateWaveform();
       }
 
+      speechFrameCountRef.current  = 0;
+      silenceFrameCountRef.current = 0;
+      aiCooldownUntilRef.current   = 0;
       setIsListening(true);
-      console.log('[VoiceChat] isListening set to true');
 
-      // Automatically start recording
-      console.log('[VoiceChat] Starting recording in 500ms...');
-      setTimeout(() => {
-        if (isListeningRef.current) {
-          console.log('[VoiceChat] Calling startRecording()');
-          startRecording();
-        }
-      }, 500);
-
-      console.log('[VoiceChat] Continuous listening started successfully');
     } catch (err: any) {
-      const errorMessage = err.name === 'NotAllowedError'
+      const msg = err.name === 'NotAllowedError'
         ? 'Microphone access denied. Please allow microphone access and try again.'
         : `Failed to access microphone: ${err.message || 'Unknown error'}`;
-
-      console.error('[VoiceChat] Error starting listening:', err);
-      setError(errorMessage);
-      onError?.(errorMessage);
+      setError(msg);
+      onError?.(msg);
       setIsListening(false);
       isListeningRef.current = false;
     }
   };
 
-  // Stop continuous listening
+  // ── Stop listening session ──────────────────────────────────────────────────
   const stopListening = () => {
-    console.log('[VoiceChat] stopListening called');
     isListeningRef.current = false;
     setIsListening(false);
     setIsSpeaking(false);
     setIsProcessing(false);
     setIsThinking(false);
 
-    // Stop recording if active
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
-    }
+    if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop();
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
 
-    // Stop all tracks
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
+    if (thinkingTimeoutRef.current) { clearTimeout(thinkingTimeoutRef.current); thinkingTimeoutRef.current = null; }
+    if (animationFrameRef.current) { cancelAnimationFrame(animationFrameRef.current); animationFrameRef.current = null; }
 
-    // Clear all timers
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
-    }
-    if (thinkingTimeoutRef.current) {
-      clearTimeout(thinkingTimeoutRef.current);
-      thinkingTimeoutRef.current = null;
-    }
-
-    // Cancel animation frame
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
-
-    // Clear audio queue
     audioQueueRef.current = [];
     isPlayingQueueRef.current = false;
-    if (currentAudioRef.current) {
-      currentAudioRef.current.pause();
-      currentAudioRef.current = null;
-    }
+    if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
     setIsPlaying(false);
-
-    console.log('[VoiceChat] Listening stopped - all states cleared');
+    isPlayingRef.current = false;
   };
 
-  // Start recording segment
+  // ── Start a recording segment (called by VAD only) ──────────────────────────
   const startRecording = () => {
-    if (!streamRef.current || !isListeningRef.current) {
-      console.log('[VoiceChat] Cannot start recording - no stream or not listening');
-      return;
-    }
+    if (!streamRef.current || !isListeningRef.current) return;
+    if (mediaRecorderRef.current?.state === 'recording') return;
 
     try {
-      // Set up media recorder with better format support
       let mimeType = 'audio/webm;codecs=opus';
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = 'audio/webm';
-        if (!MediaRecorder.isTypeSupported(mimeType)) {
-          mimeType = 'audio/ogg;codecs=opus';
-        }
-      }
-
-      console.log('[VoiceChat] Starting recording with MIME type:', mimeType);
+      if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/webm';
+      if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/ogg;codecs=opus';
 
       const mediaRecorder = new MediaRecorder(streamRef.current, { mimeType });
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
       recordingStartTimeRef.current = Date.now();
 
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
       };
 
       mediaRecorder.onstop = async () => {
-        const totalSize = audioChunksRef.current.reduce((acc, chunk) => acc + chunk.size, 0);
-        console.log('[VoiceChat] Recording stopped. Total size:', totalSize, 'bytes');
-
+        const totalSize = audioChunksRef.current.reduce((a, c) => a + c.size, 0);
         if (totalSize < 1000) {
-          console.log('[VoiceChat] Recording too short, restarting...');
+          // Too small — discard (likely noise burst that got through)
           audioChunksRef.current = [];
-          if (isListeningRef.current) {
-            setTimeout(() => startRecording(), 100);
-          }
           return;
         }
-
         const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
         await processVoiceMessage(audioBlob);
-
-        // Restart recording after processing (if still listening)
-        if (isListeningRef.current) {
-          setTimeout(() => startRecording(), 500);
-        }
+        // VAD loop will automatically start the next recording when speech is detected again
       };
 
-      // Start recording - collect data every 100ms
       mediaRecorder.start(100);
-      setIsSpeaking(false);
 
     } catch (err) {
       console.error('[VoiceChat] Error starting recording:', err);
     }
   };
 
-  // Stop recording and send
+  // ── Stop and send (called by VAD only) ──────────────────────────────────────
   const stopRecordingAndSend = () => {
-    console.log('[VoiceChat] Stopping recording and sending...');
-    // Don't set isSpeaking=false here - let processVoiceMessage do it
-    // This keeps the "Listening..." indicator visible until processing starts
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+    if (mediaRecorderRef.current?.state === 'recording') {
       mediaRecorderRef.current.stop();
     }
   };
 
-  // Render message text with clickable URLs
+  // ── Render message text with clickable URLs ──────────────────────────────────
   const renderMessageText = (text: string) => {
     const parts = text.split(/(https?:\/\/[^\s<>"]+)/g);
     return (
@@ -393,78 +342,62 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
     );
   };
 
-  // Process voice message via SSE streaming endpoint
+  // ── Process voice message via SSE ────────────────────────────────────────────
   const processVoiceMessage = async (audioBlob: Blob) => {
-    console.log('[VoiceChat] processVoiceMessage called');
-
     // Interrupt bot if speaking
-    if (currentAudioRef.current && isPlaying) {
-      console.log('[VoiceChat] User interrupted - stopping playback');
+    if (currentAudioRef.current) {
       currentAudioRef.current.pause();
       currentAudioRef.current = null;
-      setIsPlaying(false);
-      // Clear audio queue
       audioQueueRef.current = [];
       isPlayingQueueRef.current = false;
+      setIsPlaying(false);
+      isPlayingRef.current = false;
     }
 
-    // Set processing states IMMEDIATELY and clear speaking state
-    setIsSpeaking(false);  // User finished speaking, now processing
+    setIsSpeaking(false);
     setIsProcessing(true);
     setIsThinking(true);
     setError(null);
-    console.log('[VoiceChat] Set isSpeaking=false, isProcessing=true, isThinking=true');
 
-    // Safety timeout: if we're still "Thinking..." after 30 seconds, force exit
+    // 150 s safety net — backend heartbeats keep the connection alive so this
+    // should never fire under normal conditions.
     thinkingTimeoutRef.current = window.setTimeout(() => {
-      console.warn('[VoiceChat] Thinking timeout - forcing state reset');
       setIsThinking(false);
       setIsProcessing(false);
-      setError('Response timed out. Please try again.');
-    }, 30000);
+      // Don't show an error — just silently resume listening so the user can try again
+    }, 150000);
 
     try {
-      // Convert blob to base64
       const arrayBuffer = await audioBlob.arrayBuffer();
       const base64Audio = btoa(
-        new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
+        new Uint8Array(arrayBuffer).reduce((d, b) => d + String.fromCharCode(b), '')
       );
 
-      // Detect audio format from MIME type
       let audioFormat = 'webm';
-      if (audioBlob.type.includes('ogg')) {
-        audioFormat = 'ogg';
-      } else if (audioBlob.type.includes('wav')) {
-        audioFormat = 'wav';
-      } else if (audioBlob.type.includes('mp3')) {
-        audioFormat = 'mp3';
-      }
+      if (audioBlob.type.includes('ogg')) audioFormat = 'ogg';
+      else if (audioBlob.type.includes('wav')) audioFormat = 'wav';
+      else if (audioBlob.type.includes('mp3')) audioFormat = 'mp3';
 
-      // Ensure correct API URL
       let baseUrl = apiUrl;
-      if (!baseUrl.endsWith('/api')) {
-        baseUrl = `${baseUrl}/api`;
-      }
+      if (!baseUrl.endsWith('/api')) baseUrl = `${baseUrl}/api`;
 
-      console.log('[VoiceChat] Sending to:', `${baseUrl}/voice/stream`);
+      const controller = new AbortController();
+      const timeoutId  = setTimeout(() => controller.abort(), 150000);
 
       const response = await fetch(`${baseUrl}/voice/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: sessionId,
-          audio_data: base64Audio,
-          audio_format: audioFormat
-        })
+        body: JSON.stringify({ session_id: sessionId, audio_data: base64Audio, audio_format: audioFormat }),
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
 
       if (!response.ok || !response.body) {
-        const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
+        const errData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+        throw new Error(errData.detail || `Server error (${response.status})`);
       }
 
-      console.log('[VoiceChat] Starting to read SSE stream...');
-      const reader = response.body.getReader();
+      const reader  = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
       const streamingMsgId = `assistant-streaming-${Date.now()}`;
@@ -473,14 +406,9 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) {
-          console.log('[VoiceChat] SSE stream ended');
-          break;
-        }
+        if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-
-        // Process complete SSE lines
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
 
@@ -492,211 +420,128 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
           try {
             const event = JSON.parse(jsonStr);
 
-            if (event.type === 'transcript') {
-              // Show user's spoken text immediately; AI is still thinking
-              console.log('[VoiceChat] Received transcript:', event.text);
-              const userMsg: VoiceMessage = {
+            if (event.type === 'heartbeat') {
+              // Backend keep-alive ping — silently ignore, connection stays open
+              continue;
+
+            } else if (event.type === 'transcript') {
+              setMessages(prev => [...prev, {
                 id: `user-${Date.now()}`,
                 type: 'user',
                 transcript: event.text,
                 timestamp: new Date()
-              };
-              setMessages(prev => [...prev, userMsg]);
+              }]);
               onTranscript?.(event.text);
-              // keep isProcessing=true and isThinking=true — AI hasn't responded yet
 
             } else if (event.type === 'text_chunk') {
-              // First chunk means AI started responding — hide "Thinking..." bubble
               if (!receivedFirstChunk) {
-                console.log('[VoiceChat] First text chunk received - exiting thinking state');
                 setIsThinking(false);
                 receivedFirstChunk = true;
-
-                // Clear thinking timeout
-                if (thinkingTimeoutRef.current) {
-                  clearTimeout(thinkingTimeoutRef.current);
-                  thinkingTimeoutRef.current = null;
-                }
+                if (thinkingTimeoutRef.current) { clearTimeout(thinkingTimeoutRef.current); thinkingTimeoutRef.current = null; }
               }
-
               streamingText += event.text;
               const currentText = streamingText;
               setMessages(prev => {
                 const exists = prev.some(m => m.id === streamingMsgId);
-                if (exists) {
-                  return prev.map(m =>
-                    m.id === streamingMsgId ? { ...m, transcript: currentText } : m
-                  );
-                }
-                return [...prev, {
-                  id: streamingMsgId,
-                  type: 'assistant',
-                  transcript: currentText,
-                  timestamp: new Date()
-                }];
+                if (exists) return prev.map(m => m.id === streamingMsgId ? { ...m, transcript: currentText } : m);
+                return [...prev, { id: streamingMsgId, type: 'assistant', transcript: currentText, timestamp: new Date() }];
               });
 
             } else if (event.type === 'audio') {
-              // Play audio without blocking - let text and audio happen simultaneously
-              console.log('[VoiceChat] Received audio chunk');
-              playAudioResponse(event.data).catch(err => {
-                console.error('[VoiceChat] Audio playback error:', err);
-              });
+              playAudioResponse(event.data).catch(console.error);
 
             } else if (event.type === 'done') {
-              console.log('[VoiceChat] Received done event');
               onResponse?.(streamingText);
 
             } else if (event.type === 'error') {
-              console.error('[VoiceChat] Received error event:', event.message);
-              setError(event.message || 'An error occurred');
-              // Exit thinking state on error
+              // Only surface truly unexpected errors; routine issues (silence,
+              // noise, echo) are already discarded server-side without an error event
+              console.warn('[VoiceChat] Server error event:', event.message);
               setIsThinking(false);
             }
-
-          } catch (parseError) {
-            // ignore malformed SSE lines
-            console.warn('[VoiceChat] Failed to parse SSE line:', line);
+          } catch {
+            // ignore malformed lines
           }
         }
       }
 
-      // If we never got a text chunk, make sure thinking state is cleared
-      if (!receivedFirstChunk) {
-        console.log('[VoiceChat] WARNING: Stream ended without receiving text chunks');
-        setIsThinking(false);
-      }
+      // Stream ended with no text — silence/noise discarded server-side, resume quietly
+      if (!receivedFirstChunk) setIsThinking(false);
 
     } catch (err: any) {
-      const errorMessage = err.message || 'Failed to process voice message';
-      console.error('[VoiceChat] Error processing message:', err);
-      setError(errorMessage);
-      onError?.(errorMessage);
-
-      // Make sure to exit thinking state on error
+      // AbortController fired (request took >150s) or network dropped — silent recovery
+      console.warn('[VoiceChat] Request error:', err.message);
       setIsThinking(false);
+      // Don't call setError — just let the VAD resume and the user can speak again
     } finally {
-      console.log('[VoiceChat] Processing complete, clearing states');
       setIsProcessing(false);
       setIsThinking(false);
-
-      // Clear thinking timeout
-      if (thinkingTimeoutRef.current) {
-        clearTimeout(thinkingTimeoutRef.current);
-        thinkingTimeoutRef.current = null;
-      }
+      if (thinkingTimeoutRef.current) { clearTimeout(thinkingTimeoutRef.current); thinkingTimeoutRef.current = null; }
     }
   };
 
-  // Process audio queue - plays audio chunks in sequence
+  // ── Audio queue ──────────────────────────────────────────────────────────────
   const processAudioQueue = async () => {
-    if (isPlayingQueueRef.current) return; // Already processing
-
+    if (isPlayingQueueRef.current) return;
     isPlayingQueueRef.current = true;
 
     while (audioQueueRef.current.length > 0) {
-      const base64Audio = audioQueueRef.current.shift();
-      if (!base64Audio) continue;
-
-      try {
-        await playAudioChunk(base64Audio);
-      } catch (err) {
-        console.error('[VoiceChat] Error playing audio chunk:', err);
-      }
+      const b64 = audioQueueRef.current.shift();
+      if (!b64) continue;
+      try { await playAudioChunk(b64); } catch (err) { console.error('[VoiceChat] Audio chunk error:', err); }
     }
 
     isPlayingQueueRef.current = false;
     setIsPlaying(false);
+    isPlayingRef.current = false;
+    // Apply cooldown so VAD doesn't pick up the echo of the AI's voice
+    aiCooldownUntilRef.current = Date.now() + POST_AI_COOLDOWN_MS;
   };
 
-  // Play a single audio chunk
-  const playAudioChunk = async (base64Audio: string): Promise<void> => {
-    return new Promise((resolve, reject) => {
+  const playAudioChunk = (base64Audio: string): Promise<void> =>
+    new Promise((resolve, reject) => {
       try {
         setIsPlaying(true);
+        isPlayingRef.current = true;
 
-        // Decode base64 to binary
-        const binaryString = atob(base64Audio);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-
-        // Create audio blob
-        const audioBlob = new Blob([bytes], { type: 'audio/mpeg' });
-        const audioUrl = URL.createObjectURL(audioBlob);
-
-        // Play audio
-        const audio = new Audio(audioUrl);
+        const bytes = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
+        const url   = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
+        const audio = new Audio(url);
         currentAudioRef.current = audio;
 
-        audio.onended = () => {
-          currentAudioRef.current = null;
-          URL.revokeObjectURL(audioUrl);
-          resolve();
-        };
-
-        audio.onerror = (err) => {
-          currentAudioRef.current = null;
-          URL.revokeObjectURL(audioUrl);
-          reject(err);
-        };
-
+        audio.onended = () => { currentAudioRef.current = null; URL.revokeObjectURL(url); resolve(); };
+        audio.onerror = (e)  => { currentAudioRef.current = null; URL.revokeObjectURL(url); reject(e); };
         audio.play();
-
-        console.log('[VoiceChat] Playing audio chunk');
       } catch (err) {
         currentAudioRef.current = null;
         reject(err);
       }
     });
-  };
 
-  // Add audio to queue and start processing
-  const playAudioResponse = async (base64Audio: string): Promise<void> => {
+  const playAudioResponse = async (base64Audio: string) => {
     audioQueueRef.current.push(base64Audio);
     processAudioQueue();
   };
 
-  // Cancel AI response (stop audio playback)
   const cancelResponse = () => {
-    console.log('[VoiceChat] Canceling AI response');
-
-    // Stop current audio
-    if (currentAudioRef.current) {
-      currentAudioRef.current.pause();
-      currentAudioRef.current = null;
-    }
-
-    // Clear audio queue
+    if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
     audioQueueRef.current = [];
     isPlayingQueueRef.current = false;
     setIsPlaying(false);
-
-    console.log('[VoiceChat] AI response canceled');
+    isPlayingRef.current = false;
+    aiCooldownUntilRef.current = Date.now() + POST_AI_COOLDOWN_MS;
   };
 
-  // Toggle listening
-  const toggleListening = () => {
-    if (isListening) {
-      stopListening();
-    } else {
-      startListening();
-    }
-  };
+  const toggleListening = () => { isListening ? stopListening() : startListening(); };
 
-  // Auto-scroll to bottom when messages change
   useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
+    if (messagesEndRef.current) messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isProcessing, isSpeaking]);
 
-  // Clear error after 5 seconds
   useEffect(() => {
     if (error) {
-      const timer = setTimeout(() => setError(null), 5000);
-      return () => clearTimeout(timer);
+      const t = setTimeout(() => setError(null), 5000);
+      return () => clearTimeout(t);
     }
   }, [error]);
 
@@ -719,14 +564,14 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
             <div>
               <h3 className="text-white font-semibold text-lg">Voice Chat</h3>
               <p className="text-white/60 text-xs">
-                {isPlaying ? '🔊 Speaking...' : isThinking ? '💭 Thinking...' : isProcessing ? '⚙️ Processing...' : isSpeaking ? '🎤 Listening...' : isListening ? '✅ Ready' : '💬 Start'}
+                {isPlaying ? '🔊 Speaking...' : isThinking ? '💭 Thinking...' : isProcessing ? '⚙️ Processing...' : isSpeaking ? '🎤 Listening...' : isListening ? '✅ Ready — speak to start' : '💬 Start voice chat'}
               </p>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Messages Container */}
+      {/* Messages */}
       <div className="voice-messages flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 space-y-4" style={{ scrollBehavior: 'smooth', minHeight: 0 }}>
         {messages.length === 0 && !isSpeaking && !isProcessing ? (
           <div className="flex flex-col items-center justify-center h-full text-center text-white/40">
@@ -738,30 +583,15 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
           </div>
         ) : (
           <>
-            {/* Render all messages */}
             {messages.map((message) => (
-              <div
-                key={message.id}
-                className={`flex min-w-0 ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                <div
-                  className={`max-w-[80%] rounded-2xl px-4 py-3 min-w-0 ${
-                    message.type === 'user'
-                      ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white'
-                      : 'bg-white/10 text-white backdrop-blur-sm'
-                  }`}
-                >
-                  <p className="text-sm whitespace-pre-wrap min-w-0">
-                    {renderMessageText(message.transcript)}
-                  </p>
-                  <p className="text-xs mt-1 opacity-60">
-                    {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </p>
+              <div key={message.id} className={`flex min-w-0 ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[80%] rounded-2xl px-4 py-3 min-w-0 ${message.type === 'user' ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white' : 'bg-white/10 text-white backdrop-blur-sm'}`}>
+                  <p className="text-sm whitespace-pre-wrap min-w-0">{renderMessageText(message.transcript)}</p>
+                  <p className="text-xs mt-1 opacity-60">{message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
                 </div>
               </div>
             ))}
 
-            {/* Show "Listening..." indicator when user is speaking */}
             {isSpeaking && !isProcessing && (
               <div className="flex justify-end">
                 <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-gradient-to-r from-purple-500 to-pink-500 text-white">
@@ -777,7 +607,6 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
               </div>
             )}
 
-            {/* Show "Thinking..." indicator while waiting for AI response */}
             {isThinking && (
               <div className="flex justify-start">
                 <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-white/10 text-white backdrop-blur-sm">
@@ -793,58 +622,43 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
               </div>
             )}
 
-            {/* Auto-scroll anchor */}
             <div ref={messagesEndRef} />
           </>
         )}
       </div>
 
-      {/* Error Message */}
+      {/* Error */}
       {error && (
         <div className="flex-shrink-0 mx-6 mb-4 px-4 py-3 bg-red-500/20 border border-red-500/50 rounded-lg">
           <p className="text-red-200 text-sm">{error}</p>
         </div>
       )}
 
-      {/* Waveform Visualization */}
+      {/* Waveform */}
       <div className="waveform-container flex-shrink-0 px-6 py-4">
         <div className="h-20 flex items-center justify-center space-x-1">
           {Array.from({ length: 40 }).map((_, i) => {
-            // Calculate height based on audio level and animated sine wave
-            let baseHeight = 20;
-            let waveOffset = 0;
-
+            let baseHeight = 20, waveOffset = 0;
             if (isPlaying) {
-              // AI speaking - smooth wave pattern
-              baseHeight = 40;
-              waveOffset = Math.sin((i / 3) + (waveformTime / 150)) * 30;
+              baseHeight  = 40;
+              waveOffset  = Math.sin((i / 3) + (waveformTime / 150)) * 30;
             } else if (isListening) {
-              // User listening - responsive to microphone
-              baseHeight = 20 + (audioLevel * 200);
-              waveOffset = Math.sin((i / 5) + (waveformTime / 200)) * 15;
+              baseHeight  = 20 + (audioLevel * 200);
+              waveOffset  = Math.sin((i / 5) + (waveformTime / 200)) * 15;
             }
-
             const height = Math.max(15, Math.min(95, baseHeight + waveOffset));
-
-            // Different gradient for AI speaking vs user speaking
             const gradientClass = isPlaying
               ? 'bg-gradient-to-t from-blue-500 to-cyan-400'
+              : isSpeaking
+              ? 'bg-gradient-to-t from-green-500 to-emerald-400'
               : 'bg-gradient-to-t from-purple-500 to-pink-500';
-
-            return (
-              <div
-                key={i}
-                className={`w-1 ${gradientClass} rounded-full transition-all duration-75`}
-                style={{ height: `${height}%` }}
-              />
-            );
+            return <div key={i} className={`w-1 ${gradientClass} rounded-full transition-all duration-75`} style={{ height: `${height}%` }} />;
           })}
         </div>
       </div>
 
-      {/* Toggle Button */}
+      {/* Controls */}
       <div className="voice-controls flex-shrink-0 px-6 pb-6">
-        {/* Cancel Button - Shows when AI is speaking */}
         {isPlaying && !isProcessing && !isThinking && (
           <button
             onClick={cancelResponse}
@@ -859,7 +673,6 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
           </button>
         )}
 
-        {/* Main Control Button */}
         <button
           onClick={toggleListening}
           disabled={isProcessing || isThinking || isPlaying}
@@ -897,18 +710,25 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
             <span>Start Conversation</span>
           )}
         </button>
+
         <p className="text-center text-white/40 text-xs mt-3">
-          {isPlaying ? 'AI is speaking - use cancel button to interrupt' : isThinking ? 'Processing your message...' : isProcessing ? 'Sending your message...' : isListening ? 'Speak naturally - I\'ll auto-send when you pause' : 'Click button to start voice conversation'}
+          {isPlaying
+            ? 'AI is speaking — use cancel button to interrupt'
+            : isThinking
+            ? 'Processing your message...'
+            : isProcessing
+            ? 'Sending your message...'
+            : isListening
+            ? 'Speak naturally — I\'ll auto-send when you pause'
+            : 'Click button to start voice conversation'}
         </p>
       </div>
     </div>
   );
 };
 
-// Memoize to prevent unnecessary re-renders
-export const VoiceChat = React.memo(VoiceChatComponent, (prevProps, nextProps) => {
-  // Only re-render if sessionId changes
-  return prevProps.sessionId === nextProps.sessionId && prevProps.apiUrl === nextProps.apiUrl;
-});
+export const VoiceChat = React.memo(VoiceChatComponent, (prev, next) =>
+  prev.sessionId === next.sessionId && prev.apiUrl === next.apiUrl
+);
 
 export default VoiceChat;

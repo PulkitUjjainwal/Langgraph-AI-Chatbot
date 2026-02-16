@@ -383,25 +383,30 @@ export default function ChatWidget() {
     };
   }, [suggestionsState]);
 
-  const getApiBaseUrl = (): string => {
+  // Get API base URL - memoized to avoid re-renders
+  const apiBaseUrl = useMemo(() => {
     let url = "http://localhost:8000";
     if (typeof window !== "undefined" && (window as any).CHATBOT_CONFIG) {
       url = (window as any).CHATBOT_CONFIG.apiUrl || url;
     }
     // Remove trailing slash to prevent double slashes in API calls
     return url.replace(/\/$/, '');
-  };
+  }, []);
+
+  // Helper function for backward compatibility
+  const getApiBaseUrl = (): string => apiBaseUrl;
 
   // Memoize VoiceChat component to prevent unmounting on parent re-renders
   const voiceChatComponent = useMemo(() => {
+    console.log('[ChatWidget] Creating VoiceChat with apiUrl:', apiBaseUrl);
     return (
       <VoiceChat
         key="voice-chat-stable"
         sessionId={sessionId}
-        apiUrl={getApiBaseUrl()}
+        apiUrl={apiBaseUrl}
       />
     );
-  }, [sessionId]); // Only recreate if sessionId changes
+  }, [sessionId, apiBaseUrl]); // Re-create if sessionId OR apiUrl changes
 
   // Check if query matches connect/help intent
   const isConnectHelpIntent = (query: string): boolean => {
@@ -934,19 +939,27 @@ export default function ChatWidget() {
     }
 
     try {
-      const response = await fetch(`${apiBaseUrl}/api/chat/stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: query,
-          session_id: sid,
-          dynamic_url: currentUrl,
-          ...extraData,
-        }),
-      });
+      // Create abort controller for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 second timeout
 
-      if (!response.ok) throw new Error("Stream request failed");
-      if (!response.body) throw new Error("No response body");
+      try {
+        const response = await fetch(`${apiBaseUrl}/api/chat/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: query,
+            session_id: sid,
+            dynamic_url: currentUrl,
+            ...extraData,
+          }),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) throw new Error("Stream request failed");
+        if (!response.body) throw new Error("No response body");
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -973,6 +986,8 @@ export default function ChatWidget() {
               const jsonStr = line.slice(6).trim();
               if (!jsonStr) continue;
               const data = JSON.parse(jsonStr);
+
+              if (data.heartbeat) continue; // keepalive — backend is still processing
 
               if (data.error) {
                 throw new Error(data.error);
@@ -1050,8 +1065,30 @@ export default function ChatWidget() {
         }
 
       return accumulatedText;
-    } catch (error) {
+      } catch (fetchError: any) {
+        clearTimeout(timeoutId);
+
+        // Handle timeout specifically
+        if (fetchError.name === 'AbortError') {
+          throw new Error("Request timed out. The server is taking too long to respond. Please try again.");
+        }
+
+        throw fetchError;
+      }
+    } catch (error: any) {
       console.error("Streaming error:", error);
+
+      // Show user-friendly error message
+      if (error.message && error.message.includes('timed out')) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId
+              ? { ...m, text: "⏱️ The request timed out. Please try again or rephrase your question." }
+              : m
+          )
+        );
+      }
+
       throw error;
     }
   }

@@ -123,36 +123,88 @@ class VoiceChatService:
         audio_format: str = "webm"
     ) -> Optional[str]:
         """
-        Transcribe audio using OpenAI Whisper
+        Transcribe audio using OpenAI Whisper.
 
-        Args:
-            audio_data: Raw audio bytes
-            audio_format: Audio format (webm, mp3, wav, etc.)
+        Attempts verbose_json first to get per-segment no_speech_prob scores,
+        which lets us discard silence/noise before Whisper hallucinations
+        ("Thanks for watching!", "you", etc.) reach the LLM.
+        Falls back to plain text format if verbose_json is unsupported.
 
         Returns:
-            Transcribed text or None if transcription fails
+            Transcribed text, or None if the audio is silence/noise/failed.
         """
+        start_time = time.time()
+
+        # ── Attempt 1: verbose_json (gives no_speech_prob for hallucination filter) ──
         try:
-            # Create a file-like object from audio bytes
             audio_file = io.BytesIO(audio_data)
             audio_file.name = f"audio.{audio_format}"
 
-            # Call Whisper API
-            start_time = time.time()
-            transcript = await self.openai_client.audio.transcriptions.create(
-                model=self.config.stt_model,
-                file=audio_file,
-                language=self.config.stt_language,
-                response_format="text"
+            result = await asyncio.wait_for(
+                self.openai_client.audio.transcriptions.create(
+                    model=self.config.stt_model,
+                    file=audio_file,
+                    language=self.config.stt_language,
+                    response_format="verbose_json"
+                ),
+                timeout=30.0
             )
 
+            # Filter by no_speech_prob — Whisper's own measure of whether the
+            # audio contains actual speech. High value = likely silence/noise.
+            try:
+                segments = getattr(result, 'segments', None) or []
+                if segments:
+                    max_no_speech = max(
+                        float(getattr(seg, 'no_speech_prob', 0)) for seg in segments
+                    )
+                    if max_no_speech > 0.6:
+                        logger.info(
+                            f"Discarding silence (no_speech_prob={max_no_speech:.2f}, "
+                            f"text='{getattr(result, 'text', '')[:50]}')"
+                        )
+                        return None
+            except Exception as filter_err:
+                logger.warning(f"no_speech_prob filter skipped: {filter_err}")
+
+            transcript = getattr(result, 'text', None)
             duration = time.time() - start_time
-            logger.info(f"Transcription completed in {duration:.2f}s: {transcript[:100]}")
+            # Empty text means no speech detected — return None, never stringify the object
+            if not transcript or not transcript.strip():
+                logger.info("Transcription returned empty text (silence/noise)")
+                return None
+            logger.info(f"Transcription (verbose) in {duration:.2f}s: {transcript[:100]}")
+            return transcript.strip()
 
-            return transcript
-
+        except asyncio.TimeoutError:
+            logger.error("Transcription timed out")
+            return None
         except Exception as e:
-            logger.error(f"Error transcribing audio: {str(e)}")
+            logger.warning(f"verbose_json failed ({e}), falling back to text format")
+
+        # ── Attempt 2: plain text fallback ───────────────────────────────────
+        try:
+            audio_file2 = io.BytesIO(audio_data)
+            audio_file2.name = f"audio.{audio_format}"
+
+            transcript = await asyncio.wait_for(
+                self.openai_client.audio.transcriptions.create(
+                    model=self.config.stt_model,
+                    file=audio_file2,
+                    language=self.config.stt_language,
+                    response_format="text"
+                ),
+                timeout=30.0
+            )
+            duration = time.time() - start_time
+            logger.info(f"Transcription (text) in {duration:.2f}s: {transcript[:100]}")
+            return transcript.strip() or None
+
+        except asyncio.TimeoutError:
+            logger.error("Transcription fallback timed out")
+            return None
+        except Exception as e:
+            logger.error(f"Transcription failed: {e}")
             return None
 
     async def generate_speech(
@@ -177,12 +229,15 @@ class VoiceChatService:
 
             start_time = time.time()
 
-            # Generate speech
-            response = await self.openai_client.audio.speech.create(
-                model=self.config.tts_model,
-                voice=voice or self.config.tts_voice,
-                input=text[:4096],  # TTS has 4096 char limit
-                speed=self.config.tts_speed
+            # Generate speech with timeout
+            response = await asyncio.wait_for(
+                self.openai_client.audio.speech.create(
+                    model=self.config.tts_model,
+                    voice=voice or self.config.tts_voice,
+                    input=text[:4096],  # TTS has 4096 char limit
+                    speed=self.config.tts_speed
+                ),
+                timeout=30.0
             )
 
             # Get audio bytes - response.content contains the full audio data
@@ -193,6 +248,9 @@ class VoiceChatService:
 
             return audio_data
 
+        except asyncio.TimeoutError:
+            logger.error(f"TTS timed out after 30s for {len(text)} chars")
+            return None
         except Exception as e:
             logger.error(f"Error generating speech: {str(e)}")
             return None

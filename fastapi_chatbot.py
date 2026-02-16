@@ -3634,39 +3634,73 @@ async def chat_stream(request: ChatRequest):
     async def generate_stream():
         start_time = time.time()
         full_response = ""
-        special_response = None
+
+        # Use a queue so we can interleave heartbeat events while the LLM
+        # is doing its slow pre-processing (KB retrieval, relatedness check,
+        # Ollama model loading). Without heartbeats the browser considers the
+        # connection idle and the frontend's AbortController fires too early.
+        _SENTINEL = object()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _produce():
+            try:
+                async for chunk in chatbot_manager.chat_stream(
+                    message=request.message,
+                    session_id=request.session_id,
+                    dynamic_url=request.dynamic_url
+                ):
+                    await queue.put(chunk)
+            except Exception as exc:
+                await queue.put(exc)
+            finally:
+                await queue.put(_SENTINEL)
+
+        producer = asyncio.create_task(_produce())
 
         try:
-            async for chunk in chatbot_manager.chat_stream(
-                message=request.message,
-                session_id=request.session_id,
-                dynamic_url=request.dynamic_url
-            ):
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    # LLM is still thinking — send a keepalive so the browser
+                    # doesn't close the connection and the JS timeout doesn't fire.
+                    yield f"data: {json.dumps({'heartbeat': True})}\n\n"
+                    continue
+
+                # Producer finished
+                if item is _SENTINEL:
+                    break
+
+                # Producer raised an exception
+                if isinstance(item, Exception):
+                    print(f"[ERROR] Streaming failed: {item}")
+                    import traceback as _tb
+                    _tb.print_exc()
+                    yield f"data: {json.dumps({'error': str(item), 'done': True})}\n\n"
+                    return
+
+                chunk = item
+
                 # Check if this is a special JSON response (credit exhaustion or clarifying question)
                 chunk_stripped = chunk.strip()
                 if chunk_stripped.startswith('{'):
                     try:
                         parsed = json.loads(chunk_stripped)
                         if parsed.get('credit_exhausted'):
-                            # This is credit exhaustion response
                             parsed['done'] = True
-                            sse_data = f"data: {json.dumps(parsed)}\n\n"
                             print(f"  [STREAM] Sending credit exhaustion response: {parsed.get('message', '')[:50]}...")
-                            yield sse_data
+                            yield f"data: {json.dumps(parsed)}\n\n"
                             return
                         if parsed.get('clarifying_question'):
-                            # This is a clarifying question
                             parsed['done'] = True
-                            sse_data = f"data: {json.dumps(parsed)}\n\n"
                             print(f"  [STREAM] Sending clarifying question: {parsed.get('question', '')[:50]}...")
-                            yield sse_data
+                            yield f"data: {json.dumps(parsed)}\n\n"
                             return
                     except json.JSONDecodeError as e:
                         print(f"  [STREAM] JSON parse error: {e}")
 
                 # Normal text chunk
                 full_response += chunk
-                # Send chunk as SSE event
                 yield f"data: {json.dumps({'chunk': chunk, 'done': False})}\n\n"
 
             # Send final message with completion status and explore URL
@@ -3680,17 +3714,17 @@ async def chat_stream(request: ChatRequest):
                 'full_response': full_response
             }
 
-            # Include explore_url only for data-specific responses
             if explore_url:
                 final_data['explore_url'] = explore_url
 
             yield f"data: {json.dumps(final_data)}\n\n"
 
-        except Exception as e:
-            print(f"[ERROR] Streaming failed: {e}")
-            import traceback
-            traceback.print_exc()
-            yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
+        finally:
+            producer.cancel()
+            try:
+                await producer
+            except asyncio.CancelledError:
+                pass
 
     return StreamingResponse(
         generate_stream(),
@@ -4891,6 +4925,43 @@ async def get_feedback_detail(
 # Real-time voice conversation with LiveKit + OpenAI Whisper + TTS
 # ============================================================================
 
+# Tracks when TTS last finished per session (used to detect echo transcripts)
+_voice_tts_end_time: dict = {}
+
+# Short common phrases that are almost certainly echo artifacts, not real user input.
+# If received within ECHO_GUARD_SECONDS of TTS finishing AND the transcript matches
+# one of these patterns, the message is silently discarded.
+_ECHO_PHRASES = {
+    "thank you", "thanks", "thank you.", "thanks.", "okay", "ok", "ok.",
+    "okay.", "you're welcome", "welcome", "great", "sure", "alright",
+    "all right", "got it", "yes", "no", "bye", "goodbye", "hello",
+    "hi", "hey", "please", "sorry", "excuse me", "you", "me",
+    "great, thank you", "great thank you", "thanks a lot", "thank you so much",
+}
+ECHO_GUARD_SECONDS = 4.0  # Discard echo-like transcripts within this window after TTS
+
+# Whisper commonly hallucinates these strings for silence / low-level noise.
+# Trained on YouTube data, it produces these when audio contains no real speech.
+# Always discard regardless of timing.
+_WHISPER_HALLUCINATIONS = {
+    ".", "..", "...", ",", "!", "?",
+    # Single words that are nearly always hallucinations in isolation
+    "you", "you.", "me", "me.", "um", "uh", "hmm", "hm", "oh", "ah",
+    # With punctuation
+    "you!", "you,", "you?",
+    # Common YouTube-trained hallucinations
+    "thank you.", "thanks.", "thank you!", "thanks!", "thanks for watching.",
+    "thanks for watching!", "thank you for watching.", "thank you for watching!",
+    "please like and subscribe.", "like and subscribe.", "subscribe.",
+    "bye.", "bye!", "bye-bye.", "bye-bye!", "goodbye.", "goodbye!",
+    "okay.", "ok.", "alright.", "all right.", "great.", "sure.", "yes.", "no.",
+    "hmm.", "um.", "uh.", "ah.", "oh.", "mm-hmm.", "mm.", "hm.", "huh.",
+    # OpenAI Whisper specific hallucinations on near-silence
+    "you", "the", "a", "i", "",
+    # Repeated noise patterns
+    "[music]", "[applause]", "[laughter]", "(music)", "(applause)",
+}
+
 @router.post("/voice/token", response_model=VoiceTokenResponse)
 async def get_voice_token(request: VoiceTokenRequest):
     """
@@ -5065,139 +5136,167 @@ async def stream_voice_message(request: VoiceMessageRequest):
         voice_service = get_voice_chat_service()
 
         async def generate():
-            try:
-                # Step 1: Transcribe audio
-                print(f"[Voice Stream] Starting transcription for session {request.session_id}")
-                transcript = await voice_service.transcribe_audio(audio_bytes, request.audio_format)
-                if not transcript or not transcript.strip():
-                    print(f"[Voice Stream] Transcription failed - empty result")
-                    yield f"data: {json.dumps({'type': 'error', 'message': 'Could not transcribe audio - please try again'})}\n\n"
-                    return
+            # ── Queue + heartbeat pattern ─────────────────────────────────────
+            # All processing runs in a background asyncio task (_process) that
+            # puts SSE event dicts on a queue.  The generator reads from the queue
+            # with an 8-second timeout and yields a heartbeat on each timeout so
+            # the HTTP connection stays alive regardless of how long STT/LLM/TTS
+            # takes.  This prevents the frontend AbortController from firing and
+            # avoids "Response timed out" errors entirely.
+            import asyncio
+            _SENTINEL = object()
+            queue: asyncio.Queue = asyncio.Queue()
 
-                print(f"[Voice Stream] Transcription successful: {transcript[:100]}")
-                yield f"data: {json.dumps({'type': 'transcript', 'text': transcript.strip()})}\n\n"
-
-                # Step 2 & 3: Stream LLM response AND generate TTS simultaneously
-                full_response = ""
-                sentence_buffer = ""
-                chunk_count = 0
-
-                print(f"[Voice Stream] Starting LLM streaming...")
+            async def _process():
                 try:
-                    import asyncio
+                    # ── Step 1: STT ───────────────────────────────────────────
+                    print(f"[Voice Stream] Transcribing for session {request.session_id}")
+                    try:
+                        transcript = await asyncio.wait_for(
+                            voice_service.transcribe_audio(audio_bytes, request.audio_format),
+                            timeout=45.0
+                        )
+                    except asyncio.TimeoutError:
+                        # Transcription took too long — silently discard, don't
+                        # surface a visible error to the user (they'll just speak again)
+                        print(f"[Voice Stream] Transcription timed out — discarding silently")
+                        return
 
-                    # Create timeout task
-                    stream_start = asyncio.get_event_loop().time()
-                    timeout_seconds = 60.0
+                    # Silence / noise / hallucination checks — all silent discards
+                    if not transcript or not transcript.strip():
+                        print(f"[Voice Stream] Empty transcript — silence, discarding")
+                        return
 
-                    async for chunk in chatbot_manager.chat_stream(
-                        message=transcript.strip(),
-                        session_id=request.session_id,
-                        dynamic_url=None
-                    ):
-                        # Check timeout manually
-                        elapsed = asyncio.get_event_loop().time() - stream_start
-                        if elapsed > timeout_seconds:
-                            print(f"[Voice Stream] Timeout after {elapsed:.1f}s")
-                            raise asyncio.TimeoutError()
+                    transcript_clean = transcript.strip()
 
-                        chunk_count += 1
-                        if chunk_count == 1:
-                            print(f"[Voice Stream] First chunk received - exiting thinking state")
+                    if transcript_clean.lower() in _WHISPER_HALLUCINATIONS or len(transcript_clean) <= 1:
+                        print(f"[Voice Stream] Whisper hallucination: '{transcript_clean}'")
+                        return
 
-                        chunk_stripped = chunk.strip()
-                        if chunk_stripped.startswith('{'):
-                            try:
-                                parsed = json.loads(chunk_stripped)
-                                if parsed.get('credit_exhausted') or parsed.get('clarifying_question'):
-                                    msg = parsed.get('message') or parsed.get('question', '')
-                                    if msg:
-                                        full_response = msg
-                                        yield f"data: {json.dumps({'type': 'text_chunk', 'text': msg})}\n\n"
-                                        # Generate TTS for the complete message
-                                        audio_data = await voice_service.generate_speech(msg)
-                                        if audio_data:
-                                            audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-                                            yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
-                                    break
-                                if parsed.get('done'):
-                                    break
-                            except json.JSONDecodeError:
-                                pass
-                        else:
-                            full_response += chunk
-                            sentence_buffer += chunk
-                            yield f"data: {json.dumps({'type': 'text_chunk', 'text': chunk})}\n\n"
+                    words = transcript_clean.split()
+                    if len(words) >= 6:
+                        half = len(words) // 2
+                        if words[:half] == words[half:half * 2]:
+                            print(f"[Voice Stream] Repetition artifact: '{transcript_clean[:60]}'")
+                            return
 
-                            # Check if we have a complete sentence (ends with . ! ? or has 2+ newlines)
-                            if any(sentence_buffer.rstrip().endswith(p) for p in ['.', '!', '?', '.\n', '!\n', '?\n']) or '\n\n' in sentence_buffer:
-                                sentence_to_speak = sentence_buffer.strip()
-                                if sentence_to_speak and len(sentence_to_speak) > 10:  # Only speak substantial sentences
-                                    # Generate TTS for this sentence in parallel
-                                    audio_data = await voice_service.generate_speech(sentence_to_speak)
-                                    if audio_data:
-                                        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-                                        yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
-                                    sentence_buffer = ""  # Clear buffer after speaking
+                    last_tts = _voice_tts_end_time.get(request.session_id, 0)
+                    if time.time() - last_tts < ECHO_GUARD_SECONDS and \
+                            transcript_clean.lower().rstrip('.!?,') in _ECHO_PHRASES:
+                        print(f"[Voice Stream] Echo guard: discarding '{transcript_clean}'")
+                        return
 
-                    print(f"[Voice Stream] LLM streaming completed. Total chunks: {chunk_count}")
+                    print(f"[Voice Stream] Transcript: {transcript_clean[:100]}")
+                    await queue.put({'type': 'transcript', 'text': transcript_clean})
 
-                except asyncio.TimeoutError:
-                    print(f"[Voice Stream] LLM streaming timed out after 60s")
-                    error_msg = "I'm sorry, the response is taking too long. Please try again."
-                    yield f"data: {json.dumps({'type': 'text_chunk', 'text': error_msg})}\n\n"
-                    # Generate error TTS
-                    audio_data = await voice_service.generate_speech(error_msg)
-                    if audio_data:
-                        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-                        yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                    return
+                    # ── Step 2: LLM streaming ─────────────────────────────────
+                    sentence_buffer = ""
+                    chunk_count = 0
+                    tts_tasks = []
+                    print(f"[Voice Stream] Starting LLM stream...")
+                    try:
+                        stream_start = asyncio.get_event_loop().time()
+                        async for chunk in chatbot_manager.chat_stream(
+                            message=transcript_clean,
+                            session_id=request.session_id,
+                            dynamic_url=None
+                        ):
+                            if asyncio.get_event_loop().time() - stream_start > 90.0:
+                                raise asyncio.TimeoutError()
 
-                except Exception as stream_error:
-                    print(f"[Voice Stream] Error during LLM streaming: {stream_error}")
+                            chunk_count += 1
+                            chunk_stripped = chunk.strip()
+                            if chunk_stripped.startswith('{'):
+                                try:
+                                    parsed = json.loads(chunk_stripped)
+                                    if parsed.get('credit_exhausted') or parsed.get('clarifying_question'):
+                                        msg = parsed.get('message') or parsed.get('question', '')
+                                        if msg:
+                                            await queue.put({'type': 'text_chunk', 'text': msg})
+                                            tts_tasks.append(asyncio.create_task(
+                                                voice_service.generate_speech(msg)))
+                                        break
+                                    if parsed.get('done'):
+                                        break
+                                except json.JSONDecodeError:
+                                    pass
+                            else:
+                                sentence_buffer += chunk
+                                await queue.put({'type': 'text_chunk', 'text': chunk})
+
+                                is_sentence_end = any(sentence_buffer.rstrip().endswith(p)
+                                                      for p in ['.', '!', '?'])
+                                if is_sentence_end or '\n\n' in sentence_buffer or len(sentence_buffer) > 200:
+                                    seg = sentence_buffer.strip()
+                                    sentence_buffer = ""
+                                    if seg and len(seg) > 10:
+                                        tts_tasks.append(asyncio.create_task(
+                                            voice_service.generate_speech(seg)))
+
+                        print(f"[Voice Stream] LLM done. Chunks: {chunk_count}")
+
+                    except asyncio.TimeoutError:
+                        print(f"[Voice Stream] LLM timed out")
+                        graceful = "I'm taking a bit longer than usual — please try again."
+                        await queue.put({'type': 'text_chunk', 'text': graceful})
+                        tts_tasks.append(asyncio.create_task(voice_service.generate_speech(graceful)))
+
+                    except Exception as llm_err:
+                        print(f"[Voice Stream] LLM error: {llm_err}")
+                        graceful = "Sorry, I had trouble with that. Please try again."
+                        await queue.put({'type': 'text_chunk', 'text': graceful})
+                        tts_tasks.append(asyncio.create_task(voice_service.generate_speech(graceful)))
+
+                    if chunk_count == 0:
+                        graceful = "I didn't catch a response — please try again."
+                        await queue.put({'type': 'text_chunk', 'text': graceful})
+                        tts_tasks.append(asyncio.create_task(voice_service.generate_speech(graceful)))
+
+                    if sentence_buffer.strip() and len(sentence_buffer.strip()) > 10:
+                        tts_tasks.append(asyncio.create_task(
+                            voice_service.generate_speech(sentence_buffer.strip())))
+
+                    # ── Step 3: audio from TTS (ran in parallel with LLM) ─────
+                    for task in tts_tasks:
+                        try:
+                            audio_data = await asyncio.wait_for(task, timeout=30.0)
+                            if audio_data:
+                                await queue.put({
+                                    'type': 'audio',
+                                    'data': base64.b64encode(audio_data).decode("utf-8")
+                                })
+                        except Exception as tts_err:
+                            print(f"[Voice Stream] TTS error: {tts_err}")
+
+                    _voice_tts_end_time[request.session_id] = time.time()
+                    print(f"[Voice Stream] Completed successfully")
+
+                except Exception as e:
+                    print(f"[Voice Stream] Background task error: {e}")
                     import traceback
                     traceback.print_exc()
-                    error_msg = f"I encountered an error: {str(stream_error)}"
-                    yield f"data: {json.dumps({'type': 'text_chunk', 'text': error_msg})}\n\n"
-                    # Generate error TTS
-                    audio_data = await voice_service.generate_speech(error_msg)
-                    if audio_data:
-                        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-                        yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                    return
+                finally:
+                    await queue.put(_SENTINEL)
 
-                # If we got no chunks at all, yield an error
-                if chunk_count == 0:
-                    print(f"[Voice Stream] WARNING: No chunks received from LLM - yielding fallback message")
-                    error_msg = "I'm sorry, I couldn't generate a response. Please try again."
-                    yield f"data: {json.dumps({'type': 'text_chunk', 'text': error_msg})}\n\n"
-                    audio_data = await voice_service.generate_speech(error_msg)
-                    if audio_data:
-                        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-                        yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
+            producer = asyncio.create_task(_process())
+            try:
+                while True:
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=8.0)
+                    except asyncio.TimeoutError:
+                        # Keep the SSE connection alive while backend is working
+                        yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                        continue
 
-                # Step 4: Generate TTS for any remaining text
-                if sentence_buffer.strip():
-                    print(f"[Voice Stream] Generating TTS for remaining text: {len(sentence_buffer)} chars")
-                    audio_data = await voice_service.generate_speech(sentence_buffer.strip())
-                    if audio_data:
-                        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-                        yield f"data: {json.dumps({'type': 'audio', 'data': audio_base64})}\n\n"
-
-                print(f"[Voice Stream] Stream completed successfully")
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-            except Exception as e:
-                print(f"[Voice Stream] Fatal error in generate: {e}")
-                import traceback
-                traceback.print_exc()
-                # Always yield a text chunk for errors so frontend exits "Thinking" state
-                error_msg = f"Error: {str(e)}"
-                yield f"data: {json.dumps({'type': 'text_chunk', 'text': error_msg})}\n\n"
-                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    if item is _SENTINEL:
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        break
+                    if isinstance(item, Exception):
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        break
+                    yield f"data: {json.dumps(item)}\n\n"
+            finally:
+                producer.cancel()
 
         return StreamingResponse(
             generate(),
