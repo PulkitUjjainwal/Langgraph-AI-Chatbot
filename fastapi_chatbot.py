@@ -4954,12 +4954,62 @@ _WHISPER_HALLUCINATIONS = {
     "thanks for watching!", "thank you for watching.", "thank you for watching!",
     "please like and subscribe.", "like and subscribe.", "subscribe.",
     "bye.", "bye!", "bye-bye.", "bye-bye!", "goodbye.", "goodbye!",
+    "bye everyone.", "bye everyone!", "bye everybody.", "bye everybody!",
+    "goodbye everyone.", "goodbye everyone!", "goodbye everybody.",
+    "good night.", "good night!", "good night everyone.", "good night everyone!",
+    "see you.", "see you!", "see you later.", "see you later!",
+    "take care.", "take care!", "farewell.", "farewell!",
     "okay.", "ok.", "alright.", "all right.", "great.", "sure.", "yes.", "no.",
     "hmm.", "um.", "uh.", "ah.", "oh.", "mm-hmm.", "mm.", "hm.", "huh.",
     # OpenAI Whisper specific hallucinations on near-silence
     "you", "the", "a", "i", "",
     # Repeated noise patterns
     "[music]", "[applause]", "[laughter]", "(music)", "(applause)",
+}
+
+# Substring patterns — Whisper hallucinates these on silence / ambient audio.
+# Checked with `any(phrase in transcript.lower() for phrase in ...)`.
+_HALLUCINATION_SUBSTRINGS = {
+    "thank you for coming",
+    "thank you for being here",
+    "thank you all for coming",
+    "thanks for coming",
+    "we hope to see you again",
+    "hope to see you again",
+    "see you again in the future",
+    "see you in the next video",
+    "see you next time",
+    "see you in the next episode",
+    "don't forget to subscribe",
+    "please subscribe",
+    "please like and subscribe",
+    "like and subscribe",
+    "hit the subscribe button",
+    "click the subscribe",
+    "this video is sponsored",
+    "this episode is sponsored",
+    "brought to you by",
+    "copyright reserved",
+    "all rights reserved",
+    "i'll see you in the next",
+    "we'll see you next time",
+    "thanks for tuning in",
+    "thank you for tuning in",
+    "stay tuned",
+    "until next time",
+    "that's all for today",
+    "that's all for now",
+    "have a great day everyone",
+    "have a wonderful day",
+    "bye everyone",
+    "bye everybody",
+    "goodbye everyone",
+    "goodbye everybody",
+    "see you everyone",
+    "good night everyone",
+    "good night everybody",
+    "take care everyone",
+    "farewell everyone",
 }
 
 @router.post("/voice/token", response_model=VoiceTokenResponse)
@@ -5146,6 +5196,9 @@ async def stream_voice_message(request: VoiceMessageRequest):
             import asyncio
             _SENTINEL = object()
             queue: asyncio.Queue = asyncio.Queue()
+            # Shared flag: True when _process sent an error fallback message.
+            # The done-event handler reads this to suppress stale explore_urls.
+            _had_error: list = [False]
 
             async def _process():
                 try:
@@ -5170,7 +5223,19 @@ async def stream_voice_message(request: VoiceMessageRequest):
                     transcript_clean = transcript.strip()
 
                     if transcript_clean.lower() in _WHISPER_HALLUCINATIONS or len(transcript_clean) <= 1:
-                        print(f"[Voice Stream] Whisper hallucination: '{transcript_clean}'")
+                        print(f"[Voice Stream] Whisper hallucination (exact): '{transcript_clean}'")
+                        return
+
+                    lower_t = transcript_clean.lower()
+
+                    # Substring hallucination check — catches multi-sentence ceremony phrases
+                    if any(phrase in lower_t for phrase in _HALLUCINATION_SUBSTRINGS):
+                        print(f"[Voice Stream] Whisper hallucination (pattern): '{transcript_clean[:80]}'")
+                        return
+
+                    # 3+ occurrences of "thank you" in one transcript = hallucination
+                    if lower_t.count('thank you') >= 3:
+                        print(f"[Voice Stream] Whisper hallucination (thank-you flood): '{transcript_clean[:80]}'")
                         return
 
                     words = transcript_clean.split()
@@ -5193,14 +5258,30 @@ async def stream_voice_message(request: VoiceMessageRequest):
                     sentence_buffer = ""
                     chunk_count = 0
                     tts_tasks = []
+                    sent_error_message = False
                     print(f"[Voice Stream] Starting LLM stream...")
                     try:
-                        stream_start = asyncio.get_event_loop().time()
-                        async for chunk in chatbot_manager.chat_stream(
+                        # Use per-chunk wait_for so timeout fires even before the
+                        # first token arrives (the old inline check only triggered
+                        # after a chunk was already received).
+                        llm_iter = chatbot_manager.chat_stream(
                             message=transcript_clean,
                             session_id=request.session_id,
                             dynamic_url=None
-                        ):
+                        ).__aiter__()
+                        stream_start = asyncio.get_event_loop().time()
+
+                        while True:
+                            try:
+                                chunk = await asyncio.wait_for(
+                                    llm_iter.__anext__(), timeout=25.0
+                                )
+                            except StopAsyncIteration:
+                                break
+                            except asyncio.TimeoutError:
+                                raise   # bubbles up to outer except
+
+                            # Belt-and-suspenders global wall-clock guard
                             if asyncio.get_event_loop().time() - stream_start > 90.0:
                                 raise asyncio.TimeoutError()
 
@@ -5217,6 +5298,10 @@ async def stream_voice_message(request: VoiceMessageRequest):
                                                 voice_service.generate_speech(msg)))
                                         break
                                     if parsed.get('done'):
+                                        # Capture explore_url from the done chunk directly
+                                        # (covers cases where _last_explore_url may lag)
+                                        if parsed.get('explore_url'):
+                                            chatbot_manager._last_explore_url = parsed['explore_url']
                                         break
                                 except json.JSONDecodeError:
                                     pass
@@ -5229,32 +5314,42 @@ async def stream_voice_message(request: VoiceMessageRequest):
                                 if is_sentence_end or '\n\n' in sentence_buffer or len(sentence_buffer) > 200:
                                     seg = sentence_buffer.strip()
                                     sentence_buffer = ""
-                                    if seg and len(seg) > 10:
+                                    # Strip URLs before TTS so they are not spoken aloud
+                                    seg_for_tts = re.sub(r'https?://\S+', '', seg).strip()
+                                    if seg_for_tts and len(seg_for_tts) > 10:
                                         tts_tasks.append(asyncio.create_task(
-                                            voice_service.generate_speech(seg)))
+                                            voice_service.generate_speech(seg_for_tts)))
 
                         print(f"[Voice Stream] LLM done. Chunks: {chunk_count}")
 
                     except asyncio.TimeoutError:
-                        print(f"[Voice Stream] LLM timed out")
+                        print(f"[Voice Stream] LLM timed out (chunk_count={chunk_count})")
+                        sent_error_message = True
+                        _had_error[0] = True
                         graceful = "I'm taking a bit longer than usual — please try again."
                         await queue.put({'type': 'text_chunk', 'text': graceful})
                         tts_tasks.append(asyncio.create_task(voice_service.generate_speech(graceful)))
 
                     except Exception as llm_err:
                         print(f"[Voice Stream] LLM error: {llm_err}")
+                        sent_error_message = True
+                        _had_error[0] = True
                         graceful = "Sorry, I had trouble with that. Please try again."
                         await queue.put({'type': 'text_chunk', 'text': graceful})
                         tts_tasks.append(asyncio.create_task(voice_service.generate_speech(graceful)))
 
-                    if chunk_count == 0:
+                    # Only send "no response" fallback if nothing else was sent
+                    if chunk_count == 0 and not sent_error_message:
+                        _had_error[0] = True
                         graceful = "I didn't catch a response — please try again."
                         await queue.put({'type': 'text_chunk', 'text': graceful})
                         tts_tasks.append(asyncio.create_task(voice_service.generate_speech(graceful)))
 
                     if sentence_buffer.strip() and len(sentence_buffer.strip()) > 10:
-                        tts_tasks.append(asyncio.create_task(
-                            voice_service.generate_speech(sentence_buffer.strip())))
+                        remaining_for_tts = re.sub(r'https?://\S+', '', sentence_buffer).strip()
+                        if remaining_for_tts and len(remaining_for_tts) > 10:
+                            tts_tasks.append(asyncio.create_task(
+                                voice_service.generate_speech(remaining_for_tts)))
 
                     # ── Step 3: audio from TTS (ran in parallel with LLM) ─────
                     for task in tts_tasks:
@@ -5289,7 +5384,12 @@ async def stream_voice_message(request: VoiceMessageRequest):
                         continue
 
                     if item is _SENTINEL:
-                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        # Never attach an explore URL to error/fallback responses
+                        explore_url = '' if _had_error[0] else getattr(chatbot_manager, '_last_explore_url', '')
+                        done_data: dict = {'type': 'done'}
+                        if explore_url:
+                            done_data['explore_url'] = explore_url
+                        yield f"data: {json.dumps(done_data)}\n\n"
                         break
                     if isinstance(item, Exception):
                         yield f"data: {json.dumps({'type': 'done'})}\n\n"

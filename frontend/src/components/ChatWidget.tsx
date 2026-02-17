@@ -1603,7 +1603,7 @@ export default function ChatWidget() {
                 onClick={() => setVoiceMode(true)}
                 className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-all duration-200 ${
                   voiceMode
-                    ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white'
+                    ? 'bg-orange-500 text-white shadow-sm shadow-orange-400/40'
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
