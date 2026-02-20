@@ -667,7 +667,6 @@ export default function ChatWidget() {
       console.error('[ContinueChat] Error:', error);
     }
   };
-
   // Handle action button clicks
   const handleActionClick = (actionType: string, originalQuery?: string) => {
     if (actionType === "schedule_demo") {
@@ -680,12 +679,8 @@ export default function ChatWidget() {
     } else if (actionType === "call") {
       window.location.href = "tel:+4407727449124";
     } else if (actionType === "hubspot_chat" || actionType === "chat_with_us") {
-      // Open Tawk.to chat widget
-      if (typeof (window as any).Tawk_API !== 'undefined') {
-        (window as any).Tawk_API.maximize();
-      } else {
-        console.error('Tawk.to widget not loaded yet');
-      }
+      // Send conversation context to Odoo and then open Odoo chat
+      void sendContextToOdooAndOpenChat();
     } else if (actionType === "refresh") {
       // Call init API to show suggested questions
       void callInitAndShowQuestions();
@@ -695,6 +690,63 @@ export default function ChatWidget() {
     } else if (actionType === "continue_chat") {
       // Handle continue chat after credit exhaustion
       void handleContinueChat();
+    }
+  };
+
+  // Send conversation context to Odoo and open Odoo chat
+  const sendContextToOdooAndOpenChat = async () => {
+    try {
+      console.log("[ODOO] Sending conversation context to Odoo...");
+      
+      // Call backend endpoint to send context to Odoo
+      const response = await fetch(
+        `${new URL(import.meta.env.VITE_API_URL || "http://localhost:8003").origin}/api/odoo/send-context`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            session_id: sessionIdRef.current
+          })
+        }
+      );
+
+      const data = await response.json();
+      console.log("[ODOO] Backend response:", data);
+
+      if (data.history_sent) {
+        console.log(`[ODOO] Context sent successfully (${data.message_count} messages)`);
+      } else {
+        console.log("[ODOO] No history to send, but proceeding to open chat");
+      }
+    } catch (error) {
+      console.error("[ODOO] Error sending context:", error);
+      // Don't stop - continue to open Odoo chat even if context sending fails
+    } finally {
+      // Open Odoo chat widget - dispatch custom event that Odoo script tag listens to
+      console.log("[ODOO] Opening Odoo chat widget...");
+      
+      // Method 1: Custom event (if Odoo on website listens for this)
+      const event = new CustomEvent("openOdooChat", {
+        detail: { session_id: sessionIdRef.current }
+      });
+      window.dispatchEvent(event);
+      
+      // Method 2: Direct Odoo API call (if available)
+      if (typeof (window as any).odoo !== "undefined" && typeof (window as any).odoo.mail_bot !== "undefined") {
+        console.log("[ODOO] Using Odoo mail_bot API");
+        (window as any).odoo.mail_bot.open_chat();
+      }
+      
+      // Method 3: Try to find and click the Odoo chat button if it exists
+      const odooButton = document.querySelector("[data-action='open-odoo-chat'], .o_mail_bot_chat, .o-mail-bot");
+      if (odooButton instanceof HTMLElement) {
+        console.log("[ODOO] Found Odoo chat button, clicking it");
+        odooButton.click();
+      }
+      
+      console.log("[ODOO] Chat open event dispatched");
     }
   };
 
@@ -1317,14 +1369,8 @@ export default function ChatWidget() {
 
   const handleChatWithUs = () => {
     console.log('[ChatWidget] Chat with us clicked');
-    // Open Tawk.to chat widget
-    if (typeof (window as any).Tawk_API !== 'undefined') {
-      (window as any).Tawk_API.maximize();
-    } else {
-      console.error('Tawk.to widget not loaded yet');
-      // Fallback: try to load Tawk manually
-      alert('Chat widget is loading. Please try again in a moment.');
-    }
+    // Send conversation context to Odoo and then open Odoo chat
+    void sendContextToOdooAndOpenChat();
     setShowOptionsMenu(false);
   };
 

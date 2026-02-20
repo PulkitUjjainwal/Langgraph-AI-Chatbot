@@ -100,7 +100,8 @@ from chatbot.models.api_models import (
     LeadCaptureRequest, LeadCaptureResponse,
     LeadSkipRequest, LeadSkipResponse,
     LeadStatsResponse,
-    FeedbackRequest, FeedbackResponse, FeedbackStatsResponse
+    FeedbackRequest, FeedbackResponse, FeedbackStatsResponse,
+    OdooContextRequest, OdooContextResponse
 )
 
 # Import Feedback Service
@@ -4037,6 +4038,247 @@ async def continue_chat(session_id: str):
     except Exception as e:
         print(f"[ERROR] Continue chat failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to activate continue chat: {str(e)}")
+
+
+@router.post("/odoo/send-context", response_model=OdooContextResponse)
+async def send_context_to_odoo(request: OdooContextRequest):
+    """
+    Send chatbot conversation history to Odoo live chat as context.
+    
+    This endpoint:
+    1. Fetches conversation history from Redis
+    2. Formats it nicely for Odoo chat
+    3. Sends it as a message in the Odoo live chat channel
+    4. Returns success status (always allows opening Odoo chat even if sending fails)
+    
+    - **session_id**: Chatbot session identifier
+    """
+    await ensure_initialized()
+
+    if not redis_manager:
+        return OdooContextResponse(
+            success=False,
+            message="Redis not initialized",
+            history_sent=False,
+            message_count=0,
+            error="Redis service unavailable"
+        )
+
+    try:
+        # 1. Fetch conversation history
+        messages = redis_manager.get_messages(request.session_id, limit=50)
+        
+        print(f"[ODOO] Sending context for session {request.session_id}")
+        print(f"[ODOO] Messages found: {len(messages)}")
+
+        if not messages:
+            print(f"[ODOO] No conversation history found for session {request.session_id}")
+            return OdooContextResponse(
+                success=True,
+                message="No conversation history to send",
+                history_sent=False,
+                message_count=0,
+                odoo_channel_id=None,
+                error=None
+            )
+
+        # 2. Format conversation history for Odoo
+        formatted_history = _format_history_for_odoo(messages)
+        
+        print(f"[ODOO] Formatted history:\n{formatted_history}")
+
+        # 3. Send to Odoo (via custom function)
+        odoo_result = await _send_to_odoo_api(formatted_history)
+
+        return OdooContextResponse(
+            success=odoo_result.get("success", False),
+            message=odoo_result.get("message", "Context sent to Odoo"),
+            history_sent=True,
+            message_count=len(messages),
+            odoo_channel_id=odoo_result.get("channel_id"),
+            error=odoo_result.get("error")
+        )
+
+    except Exception as e:
+        print(f"[ODOO] Error sending context: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Return success: False but allow client to still open Odoo chat
+        return OdooContextResponse(
+            success=False,
+            message="Failed to send context, but Odoo chat will still open",
+            history_sent=False,
+            message_count=0,
+            error=str(e)
+        )
+
+
+def _format_history_for_odoo(messages: List[Dict[str, Any]]) -> str:
+    """
+    Format conversation history into a clean string for Odoo chat.
+    
+    Converts:
+    [
+        {"role": "user", "text": "What is..."},
+        {"role": "assistant", "text": "It is..."},
+    ]
+    
+    Into:
+    User: What is...
+    AI: It is...
+    """
+    formatted_lines = []
+    
+    for msg in messages:
+        role = msg.get("role", "unknown").capitalize()
+        text = msg.get("text", "").strip()
+        
+        # Replace "Assistant" with "AI" for better readability
+        if role == "Assistant":
+            role = "AI"
+        
+        if text:
+            # Add line with proper formatting
+            formatted_lines.append(f"{role}: {text}")
+    
+    # Join with newlines
+    result = "\n".join(formatted_lines)
+    
+    # Add a header if there's conversation history
+    if formatted_lines:
+        header = "=== Conversation History from Chatbot ===\n"
+        result = header + result + "\n=== End of History ===\n\nI need to discuss this with an agent."
+    
+    return result
+
+
+async def _send_to_odoo_api(context_message: str) -> Dict[str, Any]:
+    """
+    Send context message to Odoo live chat API.
+    
+    Uses the endpoint: POST /im_livechat/cors/message/post
+    
+    Returns:
+        Dict with keys: success (bool), message (str), channel_id (int), error (optional str)
+    """
+    import requests
+    import json
+    
+    # Get Odoo config from environment
+    odoo_base_url = os.getenv("ODOO_BASE_URL", "https://personal-company.odoo.com")
+    channel_id = int(os.getenv("ODOO_LIVECHAT_CHANNEL_ID", "1"))
+    # session_cookie = os.getenv("ODOO_SESSION_COOKIE", "dgid=7|5f9c0be5-6de1-41e9-8624-a83233c6143b; session_id=HA-05cCXD7Sn8raoJAtFzCfXkCMV7XewmMwPrSyCfXcYLztyTI08UAGgGNzQ9JBeBhwLD-lajSwaA5vfkFjGWA")
+    
+    url = f"{odoo_base_url}/im_livechat/cors/message/post"
+    
+    # Prepare payload - this is for a guest user posting to a live chat channel
+    payload = {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "call",
+        "params": {
+            "post_data": {
+                "body": context_message,
+                "email_add_signature": False,
+                "message_type": "comment",
+                "subtype_xmlid": "mail.mt_comment"
+            },
+            "thread_id": channel_id,  # This comes from the get_session response
+            "thread_model": "discuss.channel",
+            "context": {
+                "temporary_id": 0.5
+            },
+            "guest_token": None  # Will be provided by frontend's Odoo implementation
+        }
+    }
+    
+    headers = {
+        'accept': '*/*',
+        'content-type': 'application/json',
+        'origin': 'http://localhost:3000',
+        'user-agent': 'Mozilla/5.0'
+        # ,
+        # 'Cookie': session_cookie
+    }
+    
+    try:
+        print(f"[ODOO] Sending POST to {url}")
+        response = requests.post(
+            url,
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=10
+        )
+        
+        print(f"[ODOO] Response status: {response.status_code}")
+        print(f"[ODOO] Response: {response.text[:500]}")
+        
+        if response.status_code == 200:
+            try:
+                response_data = response.json()
+                
+                # Check for Odoo RPC errors
+                if response_data.get("error"):
+                    error_msg = response_data["error"].get("message", "Unknown Odoo error")
+                    print(f"[ODOO] RPC Error: {error_msg}")
+                    return {
+                        "success": False,
+                        "message": "Odoo API returned error",
+                        "channel_id": None,
+                        "error": error_msg
+                    }
+                
+                # Extract channel ID from result if available
+                channel_from_result = response_data.get("result", {}).get("channel_id")
+                
+                return {
+                    "success": True,
+                    "message": "Context sent to Odoo successfully",
+                    "channel_id": channel_from_result,
+                    "error": None
+                }
+            except json.JSONDecodeError:
+                print(f"[ODOO] Failed to parse JSON response")
+                return {
+                    "success": False,
+                    "message": "Invalid response from Odoo",
+                    "channel_id": None,
+                    "error": "Could not parse Odoo response"
+                }
+        else:
+            print(f"[ODOO] Non-200 status code: {response.status_code}")
+            return {
+                "success": False,
+                "message": f"Odoo API returned {response.status_code}",
+                "channel_id": None,
+                "error": f"HTTP {response.status_code}"
+            }
+    
+    except requests.exceptions.Timeout:
+        print(f"[ODOO] Request timeout")
+        return {
+            "success": False,
+            "message": "Odoo API timeout",
+            "channel_id": None,
+            "error": "Request timeout"
+        }
+    except requests.exceptions.ConnectionError as e:
+        print(f"[ODOO] Connection error: {e}")
+        return {
+            "success": False,
+            "message": "Could not connect to Odoo",
+            "channel_id": None,
+            "error": str(e)
+        }
+    except Exception as e:
+        print(f"[ODOO] Unexpected error: {e}")
+        return {
+            "success": False,
+            "message": "Unexpected error sending to Odoo",
+            "channel_id": None,
+            "error": str(e)
+        }
 
 
 @router.get("/health", response_model=HealthResponse)

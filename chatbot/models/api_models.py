@@ -314,3 +314,37 @@ class FeedbackStatsResponse(BaseModel):
                 "avg_rating": 4.2
             }
         }
+
+
+class OdooContextRequest(BaseModel):
+    """Request model for sending chatbot history to Odoo"""
+    session_id: str = Field(..., description="Unique session identifier for the chatbot session")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user123"
+            }
+        }
+
+
+class OdooContextResponse(BaseModel):
+    """Response model for sending chatbot history to Odoo"""
+    success: bool = Field(..., description="Whether context was successfully sent to Odoo")
+    message: str = Field(..., description="Status message")
+    history_sent: bool = Field(..., description="Whether conversation history was sent")
+    message_count: int = Field(..., description="Number of messages in history")
+    odoo_channel_id: Optional[int] = Field(None, description="Odoo channel ID for the chat")
+    error: Optional[str] = Field(None, description="Error message if sending failed")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Context sent to Odoo successfully",
+                "history_sent": True,
+                "message_count": 5,
+                "odoo_channel_id": 17,
+                "error": None
+            }
+        }
