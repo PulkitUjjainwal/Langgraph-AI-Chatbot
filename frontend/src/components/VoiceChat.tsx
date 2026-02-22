@@ -39,11 +39,11 @@ function computeSpeechProb(analyser: AnalyserNode, sampleRate: number): number {
 }
 
 // ─── VAD constants ────────────────────────────────────────────────────────────
-const SPEECH_PROB_THRESHOLD = 0.40;
-const SPEECH_ONSET_FRAMES   = 6;
-const SILENCE_FRAMES_END    = 55;
-const MIN_RECORD_MS         = 600;
-const POST_AI_COOLDOWN_MS   = 1400;
+const SPEECH_PROB_THRESHOLD = 0.40;  // Speech detection sensitivity
+const SPEECH_ONSET_FRAMES   = 5;     // Frames to detect speech start (~83ms at 60fps)
+const SILENCE_FRAMES_END    = 70;    // Frames of silence to end recording (~1.17s at 60fps)
+const MIN_RECORD_MS         = 500;   // Minimum recording duration
+const POST_AI_COOLDOWN_MS   = 1800;  // Cooldown after AI response (1.8s)
 
 // ─── Timer helper ─────────────────────────────────────────────────────────────
 function fmtTime(s: number) {
@@ -191,6 +191,12 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
     try {
       isListeningRef.current = true;
       setError(null);
+
+      // Resume audio context if needed (required by some browsers)
+      if (audioContextRef.current?.state === 'suspended') {
+        await audioContextRef.current.resume();
+      }
+
       if (!navigator.mediaDevices?.getUserMedia)
         throw new Error('Your browser does not support audio recording');
 
@@ -252,6 +258,7 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
   const startRecording = () => {
     if (!streamRef.current || !isListeningRef.current) return;
     if (mediaRecorderRef.current?.state === 'recording') return;
+
     try {
       let mimeType = 'audio/webm;codecs=opus';
       if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/webm';
@@ -262,19 +269,31 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
       audioChunksRef.current = [];
       recordingStartTimeRef.current = Date.now();
 
-      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
       mediaRecorder.onstop = async () => {
         const totalSize = audioChunksRef.current.reduce((a, c) => a + c.size, 0);
-        if (totalSize < 1000) { audioChunksRef.current = []; return; }
+        if (totalSize < 1000) {
+          audioChunksRef.current = [];
+          return;
+        }
         const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
         await processVoiceMessage(audioBlob);
       };
+
       mediaRecorder.start(100);
-    } catch (err) { console.error('[VoiceChat] Error starting recording:', err); }
+    } catch (err) {
+      console.error('[VoiceChat] Error starting recording:', err);
+      setIsSpeaking(false);
+    }
   };
 
   const stopRecordingAndSend = () => {
-    if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop();
+    if (mediaRecorderRef.current?.state === 'recording') {
+      mediaRecorderRef.current.stop();
+    }
   };
 
   // ── Send immediately (manual trigger) ───────────────────────────────────────
@@ -299,19 +318,32 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
 
   // ── Process voice message via SSE ────────────────────────────────────────────
   const processVoiceMessage = async (audioBlob: Blob) => {
+    // Abort any in-flight request first
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
+    // Clear audio playback and queue
     if (currentAudioRef.current) {
       currentAudioRef.current.pause();
       currentAudioRef.current = null;
-      audioQueueRef.current = [];
-      isPlayingQueueRef.current = false;
-      setIsPlaying(false);
-      isPlayingRef.current = false;
     }
+    audioQueueRef.current = [];
+    isPlayingQueueRef.current = false;
+    setIsPlaying(false);
+    isPlayingRef.current = false;
 
     setIsSpeaking(false);
     setIsProcessing(true);
     setIsThinking(true);
     setError(null);
+
+    // Clear any existing thinking timeout
+    if (thinkingTimeoutRef.current) {
+      clearTimeout(thinkingTimeoutRef.current);
+      thinkingTimeoutRef.current = null;
+    }
 
     thinkingTimeoutRef.current = window.setTimeout(() => {
       setIsThinking(false);
@@ -422,7 +454,11 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
       if (!receivedFirstChunk) setIsThinking(false);
 
     } catch (err: any) {
-      console.warn('[VoiceChat] Request error:', err.message);
+      if (err.name !== 'AbortError') {
+        console.warn('[VoiceChat] Request error:', err.message);
+        const errorMsg = err.message.includes('abort') ? 'Request cancelled' : `Error: ${err.message}`;
+        setError(errorMsg);
+      }
       setIsThinking(false);
     } finally {
       abortControllerRef.current = null;
@@ -436,11 +472,14 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
   const processAudioQueue = async () => {
     if (isPlayingQueueRef.current) return;
     isPlayingQueueRef.current = true;
+
     while (audioQueueRef.current.length > 0) {
       const b64 = audioQueueRef.current.shift();
       if (!b64) continue;
-      try { await playAudioChunk(b64); } catch (e) { console.error('[VoiceChat] Audio error:', e); }
+      // playAudioChunk now always resolves (never rejects) to ensure queue continues
+      await playAudioChunk(b64);
     }
+
     isPlayingQueueRef.current = false;
     setIsPlaying(false);
     isPlayingRef.current = false;
@@ -448,18 +487,47 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
   };
 
   const playAudioChunk = (base64Audio: string): Promise<void> =>
-    new Promise((resolve, reject) => {
+    new Promise(async (resolve) => {
       try {
+        // Resume audio context if suspended
+        if (audioContextRef.current?.state === 'suspended') {
+          await audioContextRef.current.resume();
+        }
+
         setIsPlaying(true);
         isPlayingRef.current = true;
         const bytes = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
         const url   = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
         const audio = new Audio(url);
         currentAudioRef.current = audio;
-        audio.onended = () => { currentAudioRef.current = null; URL.revokeObjectURL(url); resolve(); };
-        audio.onerror = (e)  => { currentAudioRef.current = null; URL.revokeObjectURL(url); reject(e); };
-        audio.play();
-      } catch (err) { currentAudioRef.current = null; reject(err); }
+
+        audio.onended = () => {
+          currentAudioRef.current = null;
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+
+        audio.onerror = (e) => {
+          console.error('[VoiceChat] Audio playback error:', e);
+          currentAudioRef.current = null;
+          URL.revokeObjectURL(url);
+          // Resolve instead of reject to continue queue processing
+          resolve();
+        };
+
+        audio.play().catch(err => {
+          console.error('[VoiceChat] Audio play error:', err);
+          currentAudioRef.current = null;
+          URL.revokeObjectURL(url);
+          // Resolve to continue with next chunk
+          resolve();
+        });
+      } catch (err) {
+        console.error('[VoiceChat] Audio chunk error:', err);
+        currentAudioRef.current = null;
+        // Resolve to continue queue
+        resolve();
+      }
     });
 
   const playAudioResponse = async (base64Audio: string) => {
