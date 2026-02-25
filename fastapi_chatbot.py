@@ -4065,37 +4065,59 @@ async def send_context_to_odoo(request: OdooContextRequest):
         )
 
     try:
+        guest_token = getattr(request, 'guest_token', None)
+        channel_id_override = getattr(request, 'channel_id', None)
+        print(f"[ODOO] /odoo/send-context called — session={request.session_id}, channel_id={channel_id_override}, guest_token={'***' if guest_token else 'NOT SET'}")
+
         # 1. Fetch conversation history
         messages = redis_manager.get_messages(request.session_id, limit=50)
-        
-        print(f"[ODOO] Sending context for session {request.session_id}")
-        print(f"[ODOO] Messages found: {len(messages)}")
+        print(f"[ODOO] Messages in Redis for session: {messages}")
 
         if not messages:
-            print(f"[ODOO] No conversation history found for session {request.session_id}")
-            return OdooContextResponse(
-                success=True,
-                message="No conversation history to send",
-                history_sent=False,
-                message_count=0,
-                odoo_channel_id=None,
-                error=None
-            )
+            # No chat history, but if we have guest_token+channel_id we can still send the transfer message
+            # if guest_token and channel_id_override:
+                print(f"[ODOO] No history — sending transfer-only message via backend to channel {channel_id_override}")
+                odoo_result = await _send_to_odoo_api(
+                    "<b>🔄 Transferring to a live agent...</b>",
+                    guest_token=guest_token,
+                    channel_id_override=channel_id_override
+                )
+                return OdooContextResponse(
+                    success=odoo_result.get("success", False),
+                    message=odoo_result.get("message", "Transfer message sent (no chat history)"),
+                    history_sent=False,
+                    message_count=0,
+                    odoo_channel_id=channel_id_override,
+                    error=odoo_result.get("error")
+                )
+            # else:
+            #     print(f"[ODOO] No history and no guest_token — nothing to send")
+            #     return OdooContextResponse(
+            #         success=True,
+            #         message="No conversation history to send",
+            #         history_sent=False,
+            #         message_count=0,
+            #         odoo_channel_id=None,
+            #         error=None
+            #     )
 
         # 2. Format conversation history for Odoo
         formatted_history = _format_history_for_odoo(messages)
-        
-        print(f"[ODOO] Formatted history:\n{formatted_history}")
+        print(f"[ODOO] Formatted history ({len(messages)} msgs):\n{formatted_history[:500]}")
 
-        # 3. Send to Odoo (via custom function)
-        odoo_result = await _send_to_odoo_api(formatted_history)
+        if not formatted_history:
+            print(f"[ODOO] Formatted history is empty — sending transfer-only message")
+            formatted_history = "<b>🔄 Transferring to a live agent...</b><br><br><i>(No readable chat history available)</i>"
+
+        # 3. Send to Odoo using guest_token + channel_id from the frontend get_session response
+        odoo_result = await _send_to_odoo_api(formatted_history, guest_token=guest_token, channel_id_override=channel_id_override)
 
         return OdooContextResponse(
             success=odoo_result.get("success", False),
             message=odoo_result.get("message", "Context sent to Odoo"),
             history_sent=True,
             message_count=len(messages),
-            odoo_channel_id=odoo_result.get("channel_id"),
+            odoo_channel_id=odoo_result.get("channel_id") or channel_id_override,
             error=odoo_result.get("error")
         )
 
@@ -4116,63 +4138,106 @@ async def send_context_to_odoo(request: OdooContextRequest):
 
 def _format_history_for_odoo(messages: List[Dict[str, Any]]) -> str:
     """
-    Format conversation history into a clean string for Odoo chat.
-    
-    Converts:
-    [
-        {"role": "user", "text": "What is..."},
-        {"role": "assistant", "text": "It is..."},
-    ]
-    
-    Into:
-    User: What is...
-    AI: It is...
+    Format conversation history as HTML for Odoo chat.
+
+    Handles the actual Redis message structure:
+    {
+        "role": "user" | "assistant",
+        "content": "...",          # primary field
+        "text": "...",             # fallback field (older sessions)
+        "timestamp": "...",
+        "message_id": "...",
+        "is_clarifying": bool,
+        "intent": "...",
+        "explore_url": "..."
+    }
+
+    Returns HTML string so Odoo renders bold labels, line breaks, etc.
     """
-    formatted_lines = []
-    
+    import re
+
+    formatted_blocks = []
+
     for msg in messages:
         role = msg.get("role", "unknown").capitalize()
-        text = msg.get("text", "").strip()
-        
-        # Replace "Assistant" with "AI" for better readability
+        # Messages from Redis use "content"; older sessions may use "text"
+        text = (msg.get("content") or msg.get("text") or "").strip()
+
+        if not text:
+            continue
+
+        # Clean up markdown links  [label](url) → label
+        text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+        # Remove bare URLs (http/https)
+        text = re.sub(r'https?://\S+', '', text).strip()
+        # Collapse extra blank lines left by URL removal
+        text = re.sub(r'\n{3,}', '\n\n', text).strip()
+
+        if not text:
+            continue
+
+        # Convert newlines to <br> for HTML rendering
+        text_html = text.replace('\n', '<br>')
+
         if role == "Assistant":
-            role = "AI"
-        
-        if text:
-            # Add line with proper formatting
-            formatted_lines.append(f"{role}: {text}")
-    
-    # Join with newlines
-    result = "\n".join(formatted_lines)
-    
-    # Add a header if there's conversation history
-    if formatted_lines:
-        header = "=== Conversation History from Chatbot ===\n"
-        result = header + result + "\n=== End of History ===\n\nI need to discuss this with an agent."
-    
-    return result
+            if msg.get("is_clarifying"):
+                label_html = '<b>🤖 AI [clarifying]:</b>'
+            else:
+                label_html = '<b>🤖 AI:</b>'
+        else:
+            label_html = '<b>👤 User:</b>'
+
+        formatted_blocks.append(f"{label_html} {text_html}")
+
+    if not formatted_blocks:
+        return ""
+
+    # Join messages with a visible divider line between each turn
+    body = '<br><hr style="border:none;border-top:1px solid #ccc;margin:6px 0;">'.join(formatted_blocks)
+
+    header = (
+        '<b>═══ 🤖 AI Chatbot Conversation History ═══</b><br><br>'
+    )
+    footer = (
+        '<br><br><b>═══ End of History ═══</b>'
+        '<br><br>'
+        '<b>🔄 Transferring to a live agent...</b>'
+    )
+
+    return header + body + footer
 
 
-async def _send_to_odoo_api(context_message: str) -> Dict[str, Any]:
+
+async def _send_to_odoo_api(context_message: str, guest_token: Optional[str] = None, channel_id_override: Optional[int] = None) -> Dict[str, Any]:
     """
     Send context message to Odoo live chat API.
-    
+
     Uses the endpoint: POST /im_livechat/cors/message/post
-    
+    Requires guest_token and channel_id from the Odoo get_session response.
+
+    Args:
+        context_message: Formatted conversation history to send
+        guest_token: Odoo guest token from get_session (e.g. '8|c9f18fc2-...')
+        channel_id_override: Odoo discuss.channel id from get_session (e.g. 18)
+
     Returns:
         Dict with keys: success (bool), message (str), channel_id (int), error (optional str)
     """
     import requests
     import json
-    
+
     # Get Odoo config from environment
-    odoo_base_url = os.getenv("ODOO_BASE_URL", "https://personal-company.odoo.com")
-    channel_id = int(os.getenv("ODOO_LIVECHAT_CHANNEL_ID", "1"))
-    # session_cookie = os.getenv("ODOO_SESSION_COOKIE", "dgid=7|5f9c0be5-6de1-41e9-8624-a83233c6143b; session_id=HA-05cCXD7Sn8raoJAtFzCfXkCMV7XewmMwPrSyCfXcYLztyTI08UAGgGNzQ9JBeBhwLD-lajSwaA5vfkFjGWA")
-    
-    url = f"{odoo_base_url}/im_livechat/cors/message/post"
-    
-    # Prepare payload - this is for a guest user posting to a live chat channel
+    odoo_base_url = os.getenv("ODOO_BASE_URL", "https://export-genius-pvt.odoo.com")
+    # Use channel_id from frontend (get_session response) or fall back to env
+    channel_id = channel_id_override if channel_id_override else int(os.getenv("ODOO_LIVECHAT_CHANNEL_ID", "1"))
+    # Use guest_token from frontend (get_session response) or fall back to env
+    resolved_guest_token = guest_token or os.getenv("ODOO_GUEST_TOKEN", None)
+
+    print(f"[ODOO] _send_to_odoo_api — channel_id={channel_id}, guest_token={'set' if resolved_guest_token else 'NOT SET'}")
+
+    url = f"https://export-genius-pvt.odoo.com/im_livechat/cors/message/post"
+
+    # Prepare payload using guest_token from get_session
     payload = {
         "id": 1,
         "jsonrpc": "2.0",
@@ -4180,16 +4245,16 @@ async def _send_to_odoo_api(context_message: str) -> Dict[str, Any]:
         "params": {
             "post_data": {
                 "body": context_message,
-                "email_add_signature": False,
+                "email_add_signature": True,
                 "message_type": "comment",
                 "subtype_xmlid": "mail.mt_comment"
             },
-            "thread_id": channel_id,  # This comes from the get_session response
+            "thread_id":    channel_id,
             "thread_model": "discuss.channel",
+            "guest_token":  resolved_guest_token,
             "context": {
                 "temporary_id": 0.5
-            },
-            "guest_token": None  # Will be provided by frontend's Odoo implementation
+            }
         }
     }
     

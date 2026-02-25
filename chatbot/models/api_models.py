@@ -319,11 +319,15 @@ class FeedbackStatsResponse(BaseModel):
 class OdooContextRequest(BaseModel):
     """Request model for sending chatbot history to Odoo"""
     session_id: str = Field(..., description="Unique session identifier for the chatbot session")
-    
+    guest_token: Optional[str] = Field(None, description="Odoo guest token from get_session response")
+    channel_id: Optional[int] = Field(None, description="Odoo discuss.channel id from get_session response")
+
     class Config:
         json_schema_extra = {
             "example": {
-                "session_id": "user123"
+                "session_id": "user123",
+                "guest_token": "8|c9f18fc2-5568-4482-a8b5-430a94b80c75",
+                "channel_id": 18
             }
         }
 
