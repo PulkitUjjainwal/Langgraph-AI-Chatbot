@@ -717,7 +717,7 @@ export default function ChatWidget() {
   const sendContextToOdooAndOpenChat = async () => {
     console.log("[ODOO] Chat with us clicked — session_id:", sessionIdRef.current);
 
-    const apiOrigin = new URL(import.meta.env.VITE_API_URL || "http://localhost:8003").origin;
+    const apiOrigin = new URL(import.meta.env.VITE_API_URL || "https://chatbot.exportgenius.in").origin;
 
     // ── Step 1: Click the Odoo chatbox button ────────────────────────────────
     // The button lives inside the shadow DOM of <o-livechat-root>.
