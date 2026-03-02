@@ -2113,8 +2113,9 @@ export default function ChatWidget() {
           {/* Disclaimer at bottom - AWS Style */}
           <div className="px-4 py-2 bg-white border-t border-gray-100">
             <p className="text-[10px] text-gray-400 text-center">
-              By chatting, you agree to this{" "}
-              <a href="#" className="text-orange-600 hover:underline">disclaimer</a>.
+              {/* you are agreeing to our terms&conditions */}
+              By chatting, you are agreeing to our{" "}
+              <a href="https://www.marketinsidedata.com/en/terms-and-conditions" className="text-orange-600 hover:underline">terms & conditions</a>.
             </p>
           </div>
 

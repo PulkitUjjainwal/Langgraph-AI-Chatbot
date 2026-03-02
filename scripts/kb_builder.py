@@ -458,9 +458,23 @@ class MarketInsideKBBuilder:
     def load_existing_chunks(self) -> bool:
         """Load existing chunks if available"""
         if self.chunks_file.exists():
+            logger.info(f"Loading chunks from: {self.chunks_file}")
             with open(self.chunks_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                self.chunks = [KBChunk(**chunk) for chunk in data]
+                # Debug: Check first chunk keys
+                if data:
+                    logger.info(f"First chunk keys: {list(data[0].keys())}")
+
+                # Filter out any unexpected fields
+                clean_data = []
+                for chunk in data:
+                    clean_chunk = {k: v for k, v in chunk.items() if k in [
+                        'chunk_id', 'chunk_text', 'page_title', 'page_url',
+                        'heading_context', 'word_count', 'char_count'
+                    ]}
+                    clean_data.append(clean_chunk)
+
+                self.chunks = [KBChunk(**chunk) for chunk in clean_data]
                 self.chunk_id_counter = max(c.chunk_id for c in self.chunks) + 1 if self.chunks else 0
                 logger.info(f"Loaded {len(self.chunks)} existing chunks")
                 return True
