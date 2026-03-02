@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import TypedDict, Annotated, Sequence, Dict, Any, Optional, List
 import operator
 import sys
+import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -104,7 +105,8 @@ from chatbot.models.api_models import (
     FeedbackRequest, FeedbackResponse, FeedbackStatsResponse,
     VoiceTokenRequest, VoiceTokenResponse,
     VoiceMessageRequest, VoiceMessageResponse,
-    VoiceSessionStats
+    VoiceSessionStats,
+    CallbackRequest, CallbackResponse, CallStatusUpdate
 )
 
 # Import Feedback Service
@@ -132,8 +134,16 @@ from chatbot.models.credit_models import (
     ContinueChatRequest, ContinueChatResponse
 )
 
-# Import Voice Chat Service
-from chatbot.services.voice_chat_service import VoiceChatService, get_voice_chat_service
+# Import Voice Chat Service - Commented out (voice mode disabled for now)
+# from chatbot.services.voice_chat_service import VoiceChatService, get_voice_chat_service
+# from chatbot.services.twilio_callback_service import get_twilio_callback_service
+
+# Stub functions for voice services (voice mode disabled)
+def get_voice_chat_service():
+    raise HTTPException(status_code=503, detail="Voice chat feature is currently disabled")
+
+def get_twilio_callback_service():
+    raise HTTPException(status_code=503, detail="Callback feature is currently disabled")
 
 # Import modular utility functions
 from chatbot.utils import (
@@ -152,7 +162,7 @@ from chatbot.services.retrieval.hybrid_retriever import HybridRetriever as Modul
 from chatbot.services.retrieval.dynamic_content import DynamicContentManager
 
 from decimal import Decimal
-from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Response, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Response, Depends, Form
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -2105,6 +2115,37 @@ IMPORTANT
         # Clean up params - remove empty strings
         params = {k: v for k, v in params.items() if v and isinstance(v, str) and v.strip()}
 
+        # Validate country_to_country intent - reject if countries are invalid
+        # This prevents invalid country names from being processed further
+        if intent == "country_to_country":
+            origin = params.get("origin_country", "").lower().strip().replace(" ", "-")
+            destination = params.get("destination_country", "").lower().strip().replace(" ", "-")
+
+            # Import slot manager to use its validation
+            from chatbot.services.slot_manager import get_slot_manager
+            slot_mgr = get_slot_manager()
+
+            # Check if both countries are valid
+            origin_valid = slot_mgr.is_valid_country(origin) if origin else False
+            destination_valid = slot_mgr.is_valid_country(destination) if destination else False
+
+            if not origin_valid or not destination_valid:
+                invalid_countries = []
+                if not origin_valid and origin:
+                    invalid_countries.append(f"origin='{origin}'")
+                if not destination_valid and destination:
+                    invalid_countries.append(f"destination='{destination}'")
+
+                print(f"  [INTENT] Rejecting country_to_country: invalid countries {', '.join(invalid_countries)}")
+                print(f"  [INTENT] Downgrading to 'unknown' intent - will use KB fallback")
+
+                # Downgrade to unknown intent if countries are invalid
+                # This will cause the system to use KB/general response instead of API
+                intent = "unknown"
+                confidence = 0.0
+                params = {}
+                # Don't set URL - let it fall through to general handling
+
         url = parsed.get("url", "")
         if not isinstance(url, str):
             url = ""
@@ -2474,6 +2515,48 @@ IMPORTANT
                 is_slot_answer = True
                 print(f"  [STREAM] Detected slot answer: '{message}' for slot '{pending_slot}' (intent: {prev_intent})")
 
+                # CRITICAL: Validate slot answer before accepting it
+                # Reject conversational phrases like "you suggest", "recommend", "any", etc.
+                if pending_slot in ["country", "origin_country", "destination_country"]:
+                    conversational_phrases = [
+                        "you-suggest", "you suggest", "suggest", "any", "all", "anywhere",
+                        "everywhere", "all-countries", "multiple", "many", "several",
+                        "which", "what", "where", "recommend", "best", "whatever",
+                        "doesn't matter", "dont care", "don't care", "idk", "i don't know"
+                    ]
+
+                    normalized_answer = message.lower().strip().replace("-", " ")
+                    is_conversational = any(phrase in normalized_answer for phrase in conversational_phrases)
+
+                    if is_conversational:
+                        print(f"  [STREAM] Rejected conversational response '{message}' for slot '{pending_slot}'")
+                        print(f"  [STREAM] User is asking for suggestions, not providing a valid country")
+
+                        # Save user message
+                        if self.redis:
+                            self.redis.save_message(session_id, {"role": "user", "content": message})
+
+                        # Return a helpful response asking the user to pick a specific country
+                        question_text = "I need a specific country name to show you the data. Please choose one of the suggested countries, or type any country you're interested in:"
+                        suggestions = ["India", "USA", "China", "Germany", "Indonesia"]
+
+                        # Save assistant response
+                        if self.redis:
+                            self.redis.save_message(session_id, {
+                                "role": "assistant",
+                                "content": question_text,
+                                "is_clarifying": True
+                            })
+
+                        # Yield clarifying question again
+                        yield json.dumps({
+                            "clarifying_question": True,
+                            "question": question_text,
+                            "slot_name": pending_slot,
+                            "suggestions": suggestions
+                        })
+                        return
+
         # ========================================================================
         # STEP 1: Detect intent and extract params
         # ========================================================================
@@ -2650,6 +2733,38 @@ IMPORTANT
                 missing_question = slot_mgr.get_missing_slot_question(session_id, intent, slot_state.slots)
 
                 if missing_question:
+                    # Check if we've asked too many times (loop detection)
+                    if missing_question.get("too_many_attempts"):
+                        print(f"  [STREAM] Too many attempts for slot: {missing_question['slot_name']}")
+
+                        # Save messages
+                        if self.redis:
+                            self.redis.save_message(session_id, {"role": "user", "content": message})
+
+                        # Escalate to support options
+                        support_message = missing_question.get("message", "I'm having trouble understanding. Let me connect you with our team who can help you better:")
+
+                        # Save assistant response
+                        if self.redis:
+                            self.redis.save_message(session_id, {
+                                "role": "assistant",
+                                "content": support_message
+                            })
+
+                        # Use credit_exhausted format to reuse the same UI component
+                        yield json.dumps({
+                            "credit_exhausted": True,  # Reuse the same UI component for support options
+                            "message": support_message,
+                            "actions": [
+                                {"type": "schedule_demo", "label": "Schedule a Demo"},
+                                {"type": "chat_with_us", "label": "Chat"},
+                                {"type": "whatsapp", "label": "WhatsApp"},
+                                {"type": "continue_chat", "label": "Continue Chat"}
+                            ],
+                            "done": True
+                        })
+                        return
+
                     # Need more info - yield clarifying question
                     print(f"  [STREAM] Missing slot: {missing_question['slot_name']}")
 
@@ -2658,7 +2773,7 @@ IMPORTANT
                         self.redis.save_message(session_id, {"role": "user", "content": message})
                         self.redis.save_message(session_id, {
                             "role": "assistant",
-                            "content": missing_question["question"],
+                            "content": missing_question.get("question", ""),
                             "is_clarifying": True
                         })
 
@@ -3412,6 +3527,13 @@ app = FastAPI(
     # lifespan=lifespan
 )
 print("[DEBUG] FastAPI app created!")
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # CORS middleware
 app.add_middleware(
@@ -5475,6 +5597,135 @@ async def close_voice_session(session_id: str):
 
     except Exception as e:
         print(f"[Voice Chat] Error closing session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# TWILIO CALLBACK ENDPOINTS - Phone Call Feature
+# ============================================================================
+
+@router.post("/callback/request", response_model=CallbackResponse)
+async def request_callback(request: CallbackRequest):
+    """
+    Request a phone callback to speak with the sales team
+
+    This endpoint initiates a conference call connecting the user
+    and the sales team via their phone numbers.
+
+    Flow:
+    1. User provides their phone number
+    2. System calls the user's phone
+    3. System calls the sales team's phone
+    4. Both parties are connected in a conference call
+
+    Args:
+        request: CallbackRequest with session_id and phone_number
+
+    Returns:
+        CallbackResponse with call status and SIDs
+
+    Raises:
+        HTTPException: If Twilio is not configured or call fails
+    """
+    try:
+        twilio_service = get_twilio_callback_service()
+
+        if not twilio_service.is_available():
+            raise HTTPException(
+                status_code=503,
+                detail="Phone callback feature is not available. Please configure Twilio credentials."
+            )
+
+        # Get the base URL from the request
+        # For production, you'd want to set this via environment variable
+        base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
+
+        result = await twilio_service.request_callback(
+            session_id=request.session_id,
+            user_phone=request.phone_number,
+            base_url=base_url
+        )
+
+        logger.info(f"Callback initiated for session {request.session_id}")
+
+        return CallbackResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error requesting callback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/callback/status")
+async def callback_status_webhook(
+    CallSid: str = Form(...),
+    CallStatus: str = Form(...),
+    From: Optional[str] = Form(None),
+    To: Optional[str] = Form(None),
+    Direction: Optional[str] = Form(None),
+    Duration: Optional[str] = Form(None)
+):
+    """
+    Twilio webhook endpoint for call status updates
+
+    This endpoint receives status updates from Twilio about the calls.
+    Configure this URL in your Twilio console as the status callback URL.
+
+    Twilio sends POST requests to this endpoint with form-encoded data.
+
+    Args:
+        Various form fields sent by Twilio (CallSid, CallStatus, etc.)
+
+    Returns:
+        Empty response (Twilio doesn't need a specific response)
+    """
+    try:
+        status_data = {
+            "CallSid": CallSid,
+            "CallStatus": CallStatus,
+            "From": From,
+            "To": To,
+            "Direction": Direction,
+            "Duration": Duration
+        }
+
+        twilio_service = get_twilio_callback_service()
+        twilio_service.handle_call_status(CallSid, status_data)
+
+        logger.info(f"Call status webhook - SID: {CallSid}, Status: {CallStatus}")
+
+        # Twilio expects a 200 OK response
+        return {"status": "received"}
+
+    except Exception as e:
+        logger.error(f"Error handling call status webhook: {e}")
+        # Still return 200 to Twilio to avoid retries
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/callback/info/{session_id}")
+async def get_callback_info(session_id: str):
+    """
+    Get callback information for a specific session
+
+    Args:
+        session_id: Session identifier
+
+    Returns:
+        Call information or null if not found
+    """
+    try:
+        twilio_service = get_twilio_callback_service()
+        call_info = twilio_service.get_call_info(session_id)
+
+        if not call_info:
+            return {"status": "not_found", "message": "No callback found for this session"}
+
+        return {"status": "found", "call_info": call_info}
+
+    except Exception as e:
+        logger.error(f"Error getting callback info: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

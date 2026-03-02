@@ -37,6 +37,7 @@ class SlotState:
     slots: Dict[str, Any] = field(default_factory=dict)
     missing_slots: List[str] = field(default_factory=list)
     last_asked_slot: Optional[str] = None
+    slot_ask_counts: Dict[str, int] = field(default_factory=dict)  # Track how many times each slot was asked
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
@@ -72,18 +73,111 @@ class SlotConfig:
         ]
     }
 
-    # Known countries list for multi-country detection
+    # Known countries list - Comprehensive list of all countries
+    # Including common name variations and abbreviations
     KNOWN_COUNTRIES = {
-        "usa", "united states", "america", "china", "india", "germany",
-        "japan", "uk", "united kingdom", "france", "italy", "spain",
-        "canada", "mexico", "brazil", "russia", "australia", "south korea",
-        "indonesia", "turkey", "saudi arabia", "netherlands", "switzerland",
-        "poland", "sweden", "belgium", "argentina", "thailand", "vietnam",
-        "malaysia", "singapore", "philippines", "pakistan", "bangladesh",
-        "egypt", "nigeria", "south africa", "kenya", "uae", "dubai",
-        "taiwan", "hong kong", "ireland", "austria", "norway", "denmark",
-        "finland", "portugal", "greece", "czech republic", "romania",
-        "colombia", "chile", "peru", "venezuela", "ecuador"
+        # A
+        "afghanistan", "albania", "algeria", "andorra", "angola",
+        "antigua and barbuda", "antigua", "barbuda", "argentina", "armenia",
+        "australia", "austria", "azerbaijan",
+
+        # B
+        "bahamas", "the bahamas", "bahrain", "bangladesh", "barbados",
+        "belarus", "belgium", "belize", "benin", "bhutan", "bolivia",
+        "bosnia and herzegovina", "bosnia", "herzegovina", "botswana", "brazil",
+        "brunei", "bulgaria", "burkina faso", "burundi",
+
+        # C
+        "cabo verde", "cape verde", "cambodia", "cameroon", "canada",
+        "central african republic", "chad", "chile", "china", "colombia",
+        "comoros", "congo", "democratic republic of congo", "drc", "costa rica",
+        "croatia", "cuba", "cyprus", "czech republic", "czechia",
+
+        # D
+        "denmark", "djibouti", "dominica", "dominican republic",
+
+        # E
+        "ecuador", "egypt", "el salvador", "equatorial guinea", "eritrea",
+        "estonia", "eswatini", "swaziland", "ethiopia",
+
+        # F
+        "fiji", "finland", "france",
+
+        # G
+        "gabon", "gambia", "the gambia", "georgia", "germany", "ghana",
+        "greece", "grenada", "guatemala", "guinea", "guinea-bissau", "guyana",
+
+        # H
+        "haiti", "honduras", "hungary",
+
+        # I
+        "iceland", "india", "indonesia", "iran", "iraq", "ireland",
+        "israel", "italy", "ivory coast", "cote d'ivoire",
+
+        # J
+        "jamaica", "japan", "jordan",
+
+        # K
+        "kazakhstan", "kenya", "kiribati", "north korea", "south korea",
+        "korea", "kosovo", "kuwait", "kyrgyzstan",
+
+        # L
+        "laos", "latvia", "lebanon", "lesotho", "liberia", "libya",
+        "liechtenstein", "lithuania", "luxembourg",
+
+        # M
+        "madagascar", "malawi", "malaysia", "maldives", "mali", "malta",
+        "marshall islands", "mauritania", "mauritius", "mexico",
+        "micronesia", "moldova", "monaco", "mongolia", "montenegro",
+        "morocco", "mozambique", "myanmar", "burma",
+
+        # N
+        "namibia", "nauru", "nepal", "netherlands", "new zealand", "nicaragua",
+        "niger", "nigeria", "north macedonia", "macedonia", "norway",
+
+        # O
+        "oman",
+
+        # P
+        "pakistan", "palau", "palestine", "panama", "papua new guinea",
+        "paraguay", "peru", "philippines", "poland", "portugal",
+
+        # Q
+        "qatar",
+
+        # R
+        "romania", "russia", "russian federation", "rwanda",
+
+        # S
+        "saint kitts and nevis", "saint lucia", "saint vincent and the grenadines",
+        "samoa", "san marino", "sao tome and principe", "saudi arabia",
+        "senegal", "serbia", "seychelles", "sierra leone", "singapore",
+        "slovakia", "slovenia", "solomon islands", "somalia", "south africa",
+        "south sudan", "spain", "sri lanka", "sudan", "suriname", "sweden",
+        "switzerland", "syria",
+
+        # T
+        "taiwan", "tajikistan", "tanzania", "thailand", "timor-leste",
+        "east timor", "togo", "tonga", "trinidad and tobago", "tunisia",
+        "turkey", "turkmenistan", "tuvalu",
+
+        # U
+        "uganda", "ukraine", "united arab emirates", "uae", "emirates", "dubai",
+        "abu dhabi", "united kingdom", "uk", "britain", "england", "scotland",
+        "wales", "northern ireland", "united states", "usa", "us", "america",
+        "uruguay", "uzbekistan",
+
+        # V
+        "vanuatu", "vatican city", "vatican", "venezuela", "vietnam", "viet nam",
+
+        # Y
+        "yemen",
+
+        # Z
+        "zambia", "zimbabwe",
+
+        # Common regions that are often treated as countries
+        "hong kong", "macau", "puerto rico", "greenland",
     }
 
     # Required slots for each intent type
@@ -188,6 +282,7 @@ class SlotManager:
             "slots": state.slots,
             "missing_slots": state.missing_slots,
             "last_asked_slot": state.last_asked_slot,
+            "slot_ask_counts": state.slot_ask_counts,
             "created_at": state.created_at,
             "updated_at": state.updated_at,
         }
@@ -199,6 +294,7 @@ class SlotManager:
             slots=data.get("slots", {}),
             missing_slots=data.get("missing_slots", []),
             last_asked_slot=data.get("last_asked_slot"),
+            slot_ask_counts=data.get("slot_ask_counts", {}),
             created_at=data.get("created_at", datetime.now().isoformat()),
             updated_at=data.get("updated_at", datetime.now().isoformat()),
         )
@@ -312,10 +408,68 @@ class SlotManager:
 
                 state.slots[key] = value
 
-                # Clear last_asked_slot if we just filled it
+                # Clear last_asked_slot and reset ask count if we just filled it
                 if key == state.last_asked_slot:
                     print(f"[SLOTS] Filled pending slot '{key}' with '{value}'")
                     state.last_asked_slot = None
+                    # Reset ask count for this slot since it was successfully filled
+                    state.slot_ask_counts[key] = 0
+
+        # Validate ALL country-related slots across all intents
+        # This prevents invalid country names (like "you-suggest", "all", etc.) from being stored
+
+        # Validate country_to_country intent
+        if intent == "country_to_country":
+            origin = state.slots.get("origin_country", "")
+            destination = state.slots.get("destination_country", "")
+
+            # Check if both countries are valid (if provided)
+            origin_valid = self.is_valid_country(origin) if origin else True
+            destination_valid = self.is_valid_country(destination) if destination else True
+
+            if origin and not origin_valid:
+                print(f"[SLOTS] Invalid origin_country '{origin}' - not in KNOWN_COUNTRIES. Clearing slot.")
+                state.slots.pop("origin_country", None)
+
+            if destination and not destination_valid:
+                print(f"[SLOTS] Invalid destination_country '{destination}' - not in KNOWN_COUNTRIES. Clearing slot.")
+                state.slots.pop("destination_country", None)
+
+        # Validate search_trade_data and search_country_data intents (use "country" slot)
+        if intent in ["search_trade_data", "search_country_data", "hs_code"]:
+            country = state.slots.get("country", "")
+
+            if country and not self.is_valid_country(country):
+                # Check for special conversational phrases that aren't countries
+                conversational_phrases = [
+                    "you-suggest", "you suggest", "suggest", "any", "all", "anywhere",
+                    "everywhere", "all-countries", "multiple", "many", "several",
+                    "which", "what", "where", "recommend", "best", "whatever",
+                    "doesn't matter", "dont care", "don't care", "idk", "i don't know",
+                    "i dunno", "dunno", "pick one", "choose", "decide", "up to you",
+                    "you pick", "you choose", "you decide", "your choice", "your pick"
+                ]
+
+                normalized_country = country.lower().strip().replace("-", " ")
+                is_conversational = any(phrase in normalized_country for phrase in conversational_phrases)
+
+                # Also check for common non-country responses
+                invalid_responses = ["yes", "no", "ok", "okay", "sure", "maybe", "none", "nothing"]
+                is_invalid_response = normalized_country in invalid_responses
+
+                if is_conversational:
+                    print(f"[SLOTS] Detected conversational response '{country}' instead of country name.")
+                    print(f"[SLOTS] User is asking for suggestions, not providing a country. Clearing slot.")
+                elif is_invalid_response:
+                    print(f"[SLOTS] Detected invalid response '{country}' - not a country name. Clearing slot.")
+                else:
+                    print(f"[SLOTS] Invalid country '{country}' - not in KNOWN_COUNTRIES. Clearing slot.")
+
+                # Remove invalid country from slots
+                state.slots.pop("country", None)
+                # Mark this slot as pending so next answer is detected as slot fill
+                state.last_asked_slot = "country"
+                print(f"[SLOTS] Marked 'country' as pending slot for next user message.")
 
         # Calculate missing slots
         state.missing_slots = self._get_missing_slots(intent, state.slots)
@@ -388,6 +542,86 @@ class SlotManager:
         if not value:
             return ""
         return value.strip().replace("-", " ").title()
+
+    def is_valid_country(self, value: str) -> bool:
+        """
+        Check if the value is a valid country name.
+        Uses a hybrid approach:
+        1. Check if in KNOWN_COUNTRIES list (fast path)
+        2. If not, use heuristics to determine if it looks like a valid country name
+        3. Reject obvious conversational phrases and invalid responses
+
+        Args:
+            value: Country name to validate (can be hyphenated or space-separated)
+
+        Returns:
+            True if likely a valid country, False if definitely not a country
+        """
+        if not value:
+            return False
+
+        # Normalize to match KNOWN_COUNTRIES format (lowercase, spaces not hyphens)
+        normalized = value.lower().strip().replace("-", " ")
+
+        # Fast path: Check if in known countries list
+        if normalized in self.config.KNOWN_COUNTRIES:
+            return True
+
+        # CRITICAL: Reject conversational phrases first (high confidence they're not countries)
+        conversational_phrases = [
+            "you-suggest", "you suggest", "suggest", "any", "all", "anywhere",
+            "everywhere", "all-countries", "all countries", "multiple", "many", "several",
+            "which", "what", "where", "recommend", "best", "whatever",
+            "doesn't matter", "dont care", "don't care", "idk", "i don't know",
+            "i dunno", "dunno", "pick one", "choose", "decide", "up to you",
+            "you pick", "you choose", "you decide", "your choice", "your pick",
+        ]
+
+        # Check for conversational phrases
+        for phrase in conversational_phrases:
+            if phrase in normalized or normalized in phrase:
+                return False
+
+        # Reject common invalid responses (not countries)
+        invalid_responses = ["yes", "no", "ok", "okay", "sure", "maybe", "none", "nothing", "nope", "yep"]
+        if normalized in invalid_responses:
+            return False
+
+        # Reject single letters or very short inputs (likely typos or abbreviations user doesn't want)
+        if len(normalized) <= 2:
+            return False
+
+        # Reject numeric-only values
+        if normalized.isdigit():
+            return False
+
+        # Heuristic validation: Accept reasonable country-like inputs
+        # - Must be alphabetic (with spaces, hyphens, apostrophes allowed)
+        # - Must be 1-4 words (most countries are 1-4 words)
+        # - Each word should be at least 2 characters
+
+        # Remove allowed punctuation for checking
+        cleaned = normalized.replace(" ", "").replace("-", "").replace("'", "").replace(".", "")
+
+        # Must be primarily alphabetic
+        if not cleaned.isalpha():
+            return False
+
+        # Check word count and length
+        words = normalized.split()
+        if len(words) > 5:  # Very unlikely to be a country name
+            return False
+
+        # Each word should be at least 2 characters (with some exceptions like "UK")
+        for word in words:
+            clean_word = word.replace("-", "").replace("'", "")
+            if len(clean_word) < 2 and normalized not in ["uk", "us"]:
+                return False
+
+        # If it passes all heuristics, accept it as a potential country
+        # This allows for country name variations we might have missed
+        print(f"[SLOTS] Accepting '{value}' as potential country (not in known list but passes heuristics)")
+        return True
 
     def is_complex_query(self, message: str, params: Dict[str, Any] = None) -> Tuple[bool, str]:
         """
@@ -525,6 +759,8 @@ class SlotManager:
     ) -> Optional[Dict[str, Any]]:
         """
         Get the next clarifying question to ask for missing slots.
+        Includes loop detection - if we've asked for the same slot 3+ times,
+        return a special response to trigger support options.
 
         Args:
             session_id: Session identifier
@@ -532,7 +768,7 @@ class SlotManager:
             slots: Currently collected slots
 
         Returns:
-            Dict with question info, or None if no slots missing
+            Dict with question info, special "too_many_attempts" marker, or None if no slots missing
         """
         missing = self._get_missing_slots(intent, slots)
 
@@ -549,6 +785,25 @@ class SlotManager:
         # Track which slot we're asking about
         state = self.get_slots(session_id)
         state.last_asked_slot = slot_name
+
+        # Increment ask count for this slot
+        if slot_name not in state.slot_ask_counts:
+            state.slot_ask_counts[slot_name] = 0
+        state.slot_ask_counts[slot_name] += 1
+
+        ask_count = state.slot_ask_counts[slot_name]
+        print(f"[SLOTS] Asking for slot '{slot_name}' (attempt {ask_count})")
+
+        # Loop detection: If we've asked 3+ times, escalate to support
+        if ask_count >= 3:
+            print(f"[SLOTS] Loop detected: Asked for '{slot_name}' {ask_count} times. Escalating to support.")
+            self._save_state(session_id, state)
+            return {
+                "slot_name": slot_name,
+                "too_many_attempts": True,
+                "message": f"I'm having trouble understanding the {definition.display_name.lower()}. Let me connect you with our team who can help you better:",
+            }
+
         self._save_state(session_id, state)
 
         return {
@@ -651,6 +906,11 @@ class SlotManager:
                 print(f"  [SLOTS] Detected restricted country: {country_name} - redirect to support")
                 return f"RESTRICTED:{country_name}"
 
+            # Validate country before generating URL
+            if not self.is_valid_country(country):
+                print(f"  [SLOTS] Cannot generate URL: invalid country '{country}'")
+                return None
+
             direction = slots.get("direction", "import")
             direction_suffix = "imports" if direction == "import" else "exports"
             return f"{base_url}/country/{country}/{direction_suffix}"
@@ -661,6 +921,12 @@ class SlotManager:
             product = slots.get("product", "")
             hs_code = slots.get("hs_code", "")
             entity_type = slots.get("entity_type", "trade")
+
+            # Validate country before generating URL (unless it's empty/universal)
+            if country and country.lower() not in ["", "universal", "all"]:
+                if not self.is_valid_country(country):
+                    print(f"  [SLOTS] Cannot generate URL: invalid country '{country}' for search_trade_data")
+                    return None
 
             # Determine endpoint based on entity_type
             # importer/exporter/supplier/buyer/trade
@@ -675,15 +941,35 @@ class SlotManager:
             return f"{base_url}/search-data/{endpoint}?{params}"
 
         elif intent == "country_to_country":
-            origin = slots.get("origin_country", "").title().replace("%20", " ").replace(" ", "%20")
-            destination = slots.get("destination_country", "").title().replace("%20", " ").replace(" ", "%20")
+            origin = slots.get("origin_country", "")
+            destination = slots.get("destination_country", "")
             direction = slots.get("direction", "export")
-            return f"{base_url}/cntry/{origin}-{direction}-{destination}"
+
+            # Validate both countries before generating URL
+            if not self.is_valid_country(origin):
+                print(f"  [SLOTS] Cannot generate URL: invalid origin_country '{origin}'")
+                return None
+
+            if not self.is_valid_country(destination):
+                print(f"  [SLOTS] Cannot generate URL: invalid destination_country '{destination}'")
+                return None
+
+            # Convert to URL format (title case with %20 for spaces)
+            origin_formatted = origin.title().replace("%20", " ").replace(" ", "%20")
+            destination_formatted = destination.title().replace("%20", " ").replace(" ", "%20")
+
+            return f"{base_url}/cntry/{origin_formatted}-{direction}-{destination_formatted}"
 
         elif intent == "hs_code":
             country = slots.get("country", "")
             direction = slots.get("direction", "import")
             hs_code = slots.get("hs_code", "")
+
+            # Validate country before generating URL
+            if not self.is_valid_country(country):
+                print(f"  [SLOTS] Cannot generate URL: invalid country '{country}' for hs_code")
+                return None
+
             return f"{base_url}/chapter/{country}-{direction}-hs-code-{hs_code}"
 
         return None

@@ -150,20 +150,59 @@ class VoiceChatService:
                 timeout=30.0
             )
 
-            # Filter by no_speech_prob — Whisper's own measure of whether the
-            # audio contains actual speech. High value = likely silence/noise.
+            # Smart multi-stage filtering to balance false positives vs false negatives
+            # Industry-standard approach: strict on obvious noise, lenient on borderline cases
             try:
+                transcript_text = getattr(result, 'text', '').strip()
                 segments = getattr(result, 'segments', None) or []
+
+                # Stage 1: Reject extremely short/empty transcripts (1-2 chars) - likely noise
+                if len(transcript_text) <= 2:
+                    logger.info(f"Discarding very short text: '{transcript_text}'")
+                    return None
+
+                # Common Whisper hallucinations (filler words that appear from silence)
+                hallucinations = {
+                    "thank you", "thanks for watching", "please subscribe",
+                    "like and subscribe", "you", ".", "..."
+                }
+
                 if segments:
                     max_no_speech = max(
                         float(getattr(seg, 'no_speech_prob', 0)) for seg in segments
                     )
-                    if max_no_speech > 0.6:
+
+                    # Stage 2: Very confident silence (0.98+) = definite rejection
+                    if max_no_speech > 0.98:
                         logger.info(
                             f"Discarding silence (no_speech_prob={max_no_speech:.2f}, "
-                            f"text='{getattr(result, 'text', '')[:50]}')"
+                            f"text='{transcript_text[:50]}')"
                         )
                         return None
+
+                    # Stage 3: High confidence silence (0.90+) + short text (≤8 chars) = rejection
+                    if max_no_speech > 0.90 and len(transcript_text) <= 8:
+                        logger.info(
+                            f"Discarding short/noisy utterance (no_speech_prob={max_no_speech:.2f}, "
+                            f"text='{transcript_text}')"
+                        )
+                        return None
+
+                    # Stage 4: Known hallucinations with high confidence (0.85+)
+                    if max_no_speech > 0.85 and transcript_text.lower() in hallucinations:
+                        logger.info(
+                            f"Discarding hallucination (no_speech_prob={max_no_speech:.2f}, "
+                            f"text='{transcript_text}')"
+                        )
+                        return None
+
+                    # Stage 5: Log borderline cases (accepted but worth monitoring)
+                    if max_no_speech > 0.80:
+                        logger.info(
+                            f"Accepting borderline transcript (no_speech_prob={max_no_speech:.2f}, "
+                            f"text='{transcript_text[:50]}')"
+                        )
+
             except Exception as filter_err:
                 logger.warning(f"no_speech_prob filter skipped: {filter_err}")
 

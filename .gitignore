@@ -94,3 +94,6 @@ dump.rdb
 
 # Claude Code
 .claude
+
+
+backend/assets/chat-widget.js

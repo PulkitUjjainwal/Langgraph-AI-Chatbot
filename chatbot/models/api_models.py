@@ -513,3 +513,63 @@ class VoiceSessionStats(BaseModel):
                 "message_count": 5
             }
         }
+
+
+# ============================================================================
+# Twilio Callback Models
+# ============================================================================
+
+class CallbackRequest(BaseModel):
+    """Request model for phone callback feature"""
+    session_id: str = Field(..., description="Session identifier")
+    phone_number: str = Field(..., description="User's phone number (E.164 format)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user_123",
+                "phone_number": "+19876543210"
+            }
+        }
+
+
+class CallbackResponse(BaseModel):
+    """Response model for callback request"""
+    status: str = Field(..., description="Call status (connecting, connected, failed)")
+    message: str = Field(..., description="Status message")
+    conference_name: Optional[str] = Field(None, description="Conference room name")
+    user_call_sid: Optional[str] = Field(None, description="User's call SID")
+    team_call_sid: Optional[str] = Field(None, description="Team's call SID")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "connecting",
+                "message": "You'll receive a call shortly",
+                "conference_name": "support-user_123",
+                "user_call_sid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "team_call_sid": "CAyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+            }
+        }
+
+
+class CallStatusUpdate(BaseModel):
+    """Webhook payload for call status updates"""
+    CallSid: str
+    CallStatus: str
+    From: Optional[str] = None
+    To: Optional[str] = None
+    Direction: Optional[str] = None
+    Duration: Optional[str] = None
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "CallSid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "CallStatus": "completed",
+                "From": "+19876543210",
+                "To": "+12345678900",
+                "Direction": "outbound-api",
+                "Duration": "120"
+            }
+        }
