@@ -573,3 +573,310 @@ class CallStatusUpdate(BaseModel):
                 "Duration": "120"
             }
         }
+
+
+# ============================================================================
+# Twilio Callback Models
+# ============================================================================
+
+class CallbackRequest(BaseModel):
+    """Request model for phone callback feature"""
+    session_id: str = Field(..., description="Session identifier")
+    phone_number: str = Field(..., description="User's phone number (E.164 format)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user_123",
+                "phone_number": "+19876543210"
+            }
+        }
+
+
+class CallbackResponse(BaseModel):
+    """Response model for callback request"""
+    status: str = Field(..., description="Call status (connecting, connected, failed)")
+    message: str = Field(..., description="Status message")
+    conference_name: Optional[str] = Field(None, description="Conference room name")
+    user_call_sid: Optional[str] = Field(None, description="User's call SID")
+    team_call_sid: Optional[str] = Field(None, description="Team's call SID")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "connecting",
+                "message": "You'll receive a call shortly",
+                "conference_name": "support-user_123",
+                "user_call_sid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "team_call_sid": "CAyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+            }
+        }
+
+
+class CallStatusUpdate(BaseModel):
+    """Webhook payload for call status updates"""
+    CallSid: str
+    CallStatus: str
+    From: Optional[str] = None
+    To: Optional[str] = None
+    Direction: Optional[str] = None
+    Duration: Optional[str] = None
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "CallSid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "CallStatus": "completed",
+                "From": "+19876543210",
+                "To": "+12345678900",
+                "Direction": "outbound-api",
+                "Duration": "120"
+            }
+        }
+
+
+class OdooContextRequest(BaseModel):
+    """Request model for sending chatbot history to Odoo"""
+    session_id: str = Field(..., description="Unique session identifier for the chatbot session")
+    guest_token: Optional[str] = Field(None, description="Odoo guest token from get_session response")
+    channel_id: Optional[int] = Field(None, description="Odoo discuss.channel id from get_session response")
+# ============================================================================
+# Twilio Callback Models
+# ============================================================================
+
+class CallbackRequest(BaseModel):
+    """Request model for phone callback feature"""
+    session_id: str = Field(..., description="Session identifier")
+    phone_number: str = Field(..., description="User's phone number (E.164 format)")
+
+class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user123",
+                "guest_token": "8|c9f18fc2-5568-4482-a8b5-430a94b80c75",
+                "channel_id": 18
+                # "session_id": "user_123",
+                # "phone_number": "+19876543210"
+            }
+        }
+
+
+class OdooContextResponse(BaseModel):
+    """Response model for sending chatbot history to Odoo"""
+    success: bool = Field(..., description="Whether context was successfully sent to Odoo")
+    message: str = Field(..., description="Status message")
+    history_sent: bool = Field(..., description="Whether conversation history was sent")
+    message_count: int = Field(..., description="Number of messages in history")
+    odoo_channel_id: Optional[int] = Field(None, description="Odoo channel ID for the chat")
+    error: Optional[str] = Field(None, description="Error message if sending failed")
+
+class CallbackResponse(BaseModel):
+    """Response model for callback request"""
+    status: str = Field(..., description="Call status (connecting, connected, failed)")
+    message: str = Field(..., description="Status message")
+    conference_name: Optional[str] = Field(None, description="Conference room name")
+    user_call_sid: Optional[str] = Field(None, description="User's call SID")
+    team_call_sid: Optional[str] = Field(None, description="Team's call SID")
+
+class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Context sent to Odoo successfully",
+                "history_sent": True,
+                "message_count": 5,
+                "odoo_channel_id": 17,
+                "error": None
+            }
+        }
+        # for voice note
+        #         "status": "connecting",
+        #         "message": "You'll receive a call shortly",
+        #         "conference_name": "support-user_123",
+        #         "user_call_sid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        #         "team_call_sid": "CAyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+        #     }
+        # }
+
+class CallStatusUpdate(BaseModel):
+    """Webhook payload for call status updates"""
+    CallSid: str
+    CallStatus: str
+    From: Optional[str] = None
+    To: Optional[str] = None
+    Direction: Optional[str] = None
+    Duration: Optional[str] = None
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "CallSid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "CallStatus": "completed",
+                "From": "+19876543210",
+                "To": "+12345678900",
+                "Direction": "outbound-api",
+                "Duration": "120"
+            }
+        }
+
+
+class OdooContextRequest(BaseModel):
+    """Request model for sending chatbot history to Odoo"""
+    session_id: str = Field(..., description="Unique session identifier for the chatbot session")
+    guest_token: Optional[str] = Field(None, description="Odoo guest token from get_session response")
+    channel_id: Optional[int] = Field(None, description="Odoo discuss.channel id from get_session response")
+
+class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user123",
+                "guest_token": "8|c9f18fc2-5568-4482-a8b5-430a94b80c75",
+                "channel_id": 18
+            }
+        }
+
+
+class OdooContextResponse(BaseModel):
+    """Response model for sending chatbot history to Odoo"""
+    success: bool = Field(..., description="Whether context was successfully sent to Odoo")
+    message: str = Field(..., description="Status message")
+    history_sent: bool = Field(..., description="Whether conversation history was sent")
+    message_count: int = Field(..., description="Number of messages in history")
+    odoo_channel_id: Optional[int] = Field(None, description="Odoo channel ID for the chat")
+    error: Optional[str] = Field(None, description="Error message if sending failed")
+
+class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Context sent to Odoo successfully",
+                "history_sent": True,
+                "message_count": 5,
+                "odoo_channel_id": 17,
+                "error": None
+            }
+        }
+
+
+
+class OdooContextRequest(BaseModel):
+    """Request model for sending chatbot history to Odoo"""
+    session_id: str = Field(..., description="Unique session identifier for the chatbot session")
+    guest_token: Optional[str] = Field(None, description="Odoo guest token from get_session response")
+    channel_id: Optional[int] = Field(None, description="Odoo discuss.channel id from get_session response")
+# ============================================================================
+# Twilio Callback Models
+# ============================================================================
+
+class CallbackRequest(BaseModel):
+    """Request model for phone callback feature"""
+    session_id: str = Field(..., description="Session identifier")
+    phone_number: str = Field(..., description="User's phone number (E.164 format)")
+
+class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user123",
+                "guest_token": "8|c9f18fc2-5568-4482-a8b5-430a94b80c75",
+                "channel_id": 18
+                # "session_id": "user_123",
+                # "phone_number": "+19876543210"
+            }
+        }
+
+
+class OdooContextResponse(BaseModel):
+    """Response model for sending chatbot history to Odoo"""
+    success: bool = Field(..., description="Whether context was successfully sent to Odoo")
+    message: str = Field(..., description="Status message")
+    history_sent: bool = Field(..., description="Whether conversation history was sent")
+    message_count: int = Field(..., description="Number of messages in history")
+    odoo_channel_id: Optional[int] = Field(None, description="Odoo channel ID for the chat")
+    error: Optional[str] = Field(None, description="Error message if sending failed")
+
+class CallbackResponse(BaseModel):
+    """Response model for callback request"""
+    status: str = Field(..., description="Call status (connecting, connected, failed)")
+    message: str = Field(..., description="Status message")
+    conference_name: Optional[str] = Field(None, description="Conference room name")
+    user_call_sid: Optional[str] = Field(None, description="User's call SID")
+    team_call_sid: Optional[str] = Field(None, description="Team's call SID")
+
+class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Context sent to Odoo successfully",
+                "history_sent": True,
+                "message_count": 5,
+                "odoo_channel_id": 17,
+                "error": None
+            }
+        }
+        # for voice note
+        #         "status": "connecting",
+        #         "message": "You'll receive a call shortly",
+        #         "conference_name": "support-user_123",
+        #         "user_call_sid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        #         "team_call_sid": "CAyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+        #     }
+        # }
+
+class CallStatusUpdate(BaseModel):
+    """Webhook payload for call status updates"""
+    CallSid: str
+    CallStatus: str
+    From: Optional[str] = None
+    To: Optional[str] = None
+    Direction: Optional[str] = None
+    Duration: Optional[str] = None
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "CallSid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "CallStatus": "completed",
+                "From": "+19876543210",
+                "To": "+12345678900",
+                "Direction": "outbound-api",
+                "Duration": "120"
+            }
+        }
+
+
+class OdooContextRequest(BaseModel):
+    """Request model for sending chatbot history to Odoo"""
+    session_id: str = Field(..., description="Unique session identifier for the chatbot session")
+    guest_token: Optional[str] = Field(None, description="Odoo guest token from get_session response")
+    channel_id: Optional[int] = Field(None, description="Odoo discuss.channel id from get_session response")
+
+class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user123",
+                "guest_token": "8|c9f18fc2-5568-4482-a8b5-430a94b80c75",
+                "channel_id": 18
+            }
+        }
+
+
+class OdooContextResponse(BaseModel):
+    """Response model for sending chatbot history to Odoo"""
+    success: bool = Field(..., description="Whether context was successfully sent to Odoo")
+    message: str = Field(..., description="Status message")
+    history_sent: bool = Field(..., description="Whether conversation history was sent")
+    message_count: int = Field(..., description="Number of messages in history")
+    odoo_channel_id: Optional[int] = Field(None, description="Odoo channel ID for the chat")
+    error: Optional[str] = Field(None, description="Error message if sending failed")
+
+class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Context sent to Odoo successfully",
+                "history_sent": True,
+                "message_count": 5,
+                "odoo_channel_id": 17,
+                "error": None
+            }
+        }

@@ -687,7 +687,6 @@ export default function ChatWidget() {
       console.error('[ContinueChat] Error:', error);
     }
   };
-
   // Handle action button clicks
   const handleActionClick = (actionType: string, originalQuery?: string) => {
     if (actionType === "schedule_demo") {
@@ -700,12 +699,8 @@ export default function ChatWidget() {
     } else if (actionType === "call") {
       window.location.href = "tel:+4407727449124";
     } else if (actionType === "hubspot_chat" || actionType === "chat_with_us") {
-      // Open Tawk.to chat widget
-      if (typeof (window as any).Tawk_API !== 'undefined') {
-        (window as any).Tawk_API.maximize();
-      } else {
-        console.error('Tawk.to widget not loaded yet');
-      }
+      // Send conversation context to Odoo and then open Odoo chat
+      void sendContextToOdooAndOpenChat();
     } else if (actionType === "refresh") {
       // Call init API to show suggested questions
       void callInitAndShowQuestions();
@@ -715,6 +710,355 @@ export default function ChatWidget() {
     } else if (actionType === "continue_chat") {
       // Handle continue chat after credit exhaustion
       void handleContinueChat();
+    }
+  };
+
+  // Send conversation context to Odoo and open Odoo chat
+  const sendContextToOdooAndOpenChat = async () => {
+    console.log("[ODOO] Chat with us clicked — session_id:", sessionIdRef.current);
+
+    const apiOrigin = new URL(import.meta.env.VITE_API_URL || "https://chatbot.exportgenius.in").origin;
+
+    // ── Step 1: Click the Odoo chatbox button ────────────────────────────────
+    // The button lives inside the shadow DOM of <o-livechat-root>.
+    // We MUST open it this way so Odoo calls get_session for THIS channel —
+    // if we call get_session ourselves we'd get a different channel/agent.
+    const openOdoo = (): boolean => {
+      // Odoo 17 renders a <div class="o-livechat-root"> with a shadow root.
+      // NOTE: selector must use "." prefix (class), NOT a bare tag name.
+      const host = document.querySelector(".o-livechat-root") as (HTMLElement & { shadowRoot?: ShadowRoot }) | null;
+      if (host?.shadowRoot) {
+        // Priority order: bubble button (avatar) → openChatButton part → LivechatButton class → any non-utility button
+        const btn = host.shadowRoot.querySelector(
+          ".o-mail-ChatHub-bubbleBtn.btn.shadow, " +
+          ".o-mail-ChatHub-bubbleBtn:not(.o-mail-ChatHub-optionsBtn), " +
+          "button[part='openChatButton'], " +
+          ".o-livechat-LivechatButton, " +
+          "button:not(.o-mail-ChatHub-optionsBtn):not(.o-mail-ChatBubble-close)"
+        ) as HTMLElement | null;
+        if (btn) {
+          console.log("[ODOO] Shadow button found, clicking:", btn.getAttribute("part") || btn.className);
+          btn.click();
+          return true;
+        }
+        // Shadow root exists but no usable button found — click host as fallback
+        host.click();
+        console.log("[ODOO] Clicked .o-livechat-root host (no inner button matched)");
+        return true;
+      }
+
+      // Fallback: regular DOM (older Odoo versions or non-shadow rendering)
+      for (const sel of [
+        ".o-livechat-LivechatButton",
+        "button[part='openChatButton']",
+        ".o_livechat_button",
+        ".o_im_livechat_button",
+        "#o_livechat_button"
+      ]) {
+        const btn = document.querySelector(sel) as HTMLElement | null;
+        if (btn) { console.log("[ODOO] Clicked DOM button:", sel); btn.click(); return true; }
+      }
+
+      // Last resort: scan all shadow roots
+      const all = document.querySelectorAll("*");
+      for (let j = 0; j < all.length; j++) {
+        const root = (all[j] as HTMLElement & { shadowRoot?: ShadowRoot }).shadowRoot;
+        if (!root) continue;
+        const anyBtn = root.querySelector(
+          ".o-mail-ChatHub-bubbleBtn:not(.o-mail-ChatHub-optionsBtn), button[part='openChatButton'], .o-livechat-LivechatButton"
+        ) as HTMLElement | null;
+        if (anyBtn) {
+          console.log("[ODOO] Clicked shadow button in:", all[j].tagName, anyBtn.className);
+          anyBtn.click();
+          return true;
+        }
+      }
+
+      console.warn("[ODOO] Odoo livechat button not found in DOM or shadowDOM");
+      return false;
+    };
+
+    const clicked = openOdoo();
+    if (!clicked) {
+      // Nothing to do — Odoo widget not on this page
+      return;
+    }
+
+    // ── Step 2: Start listening for session BEFORE sending message ───────────
+    // We set up the promise NOW so we don't miss the event that fires when
+    // Odoo calls get_session in response to the first message send.
+    const waitForOdooSession = (): Promise<{ guest_token: string; channel_id: number }> => {
+      return new Promise((resolve, reject) => {
+        // Already captured from a previous open? Reuse it.
+        const cached = (window as any).__odoo_session__ as { guest_token?: string; channel_id?: number } | undefined;
+        if (cached?.guest_token && cached?.channel_id && cached.channel_id > 0) {
+          console.log("[ODOO] Reusing cached session — channel_id:", cached.channel_id);
+          resolve(cached as { guest_token: string; channel_id: number });
+          return;
+        }
+
+        let resolved = false;
+        const doResolve = (d: { guest_token: string; channel_id: number }) => {
+          if (resolved) return;
+          resolved = true;
+          clearInterval(pollTimer);
+          clearTimeout(timer);
+          window.removeEventListener("odoo:session-ready", onReady);
+          resolve(d);
+        };
+
+        // Listen for the interceptor event (fired by layout.tsx after get_session response)
+        const onReady = (e: Event) => {
+          const d = (e as CustomEvent<{ guest_token: string; channel_id: number }>).detail;
+          if (d?.guest_token && d?.channel_id > 0) {
+            console.log("[ODOO] odoo:session-ready event received — channel_id:", d.channel_id);
+            doResolve(d);
+          }
+        };
+        window.addEventListener("odoo:session-ready", onReady);
+
+        // Polling fallback: check window.__odoo_session__ every 300 ms
+        // Catches cases where get_session fired BEFORE this listener was set up,
+        // or where the event was dispatched but missed.
+        const pollTimer = setInterval(() => {
+          const s = (window as any).__odoo_session__ as { guest_token?: string; channel_id?: number } | undefined;
+          if (s?.guest_token && s?.channel_id && s.channel_id > 0) {
+            console.log("[ODOO] Polled session — channel_id:", s.channel_id);
+            doResolve(s as { guest_token: string; channel_id: number });
+          }
+        }, 300);
+
+        // Allow up to 20 s — covers: chat window render + message send + get_session round-trip
+        const timer = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            clearInterval(pollTimer);
+            window.removeEventListener("odoo:session-ready", onReady);
+            reject(new Error("Odoo did not return a session within 20 s"));
+          }
+        }, 20_000);
+      });
+    };
+
+    // Register the listener immediately (before the message send that triggers get_session)
+    const sessionPromise = waitForOdooSession();
+
+    // ── Backup interceptor: wrap fetch ourselves for 30 s ─────────────────────
+    // This catches get_session even if the layout.tsx interceptor failed to
+    // extract the guest_token (e.g. wrong response path, installed too late).
+    const _origFetch = (window as any).__odoo_backup_orig_fetch__ || window.fetch;
+    (window as any).__odoo_backup_orig_fetch__ = _origFetch;
+    let _backupRestored = false;
+    const _restoreBackup = () => {
+      if (!_backupRestored) { _backupRestored = true; window.fetch = _origFetch; }
+    };
+    const _backupTimer = setTimeout(_restoreBackup, 30_000);
+
+    // Helper: fire session-ready from a known guest_token + channel_id pair
+    const _emitSession = (gt: string, cid: number, source: string) => {
+      if (!(window as any).__odoo_session__?.guest_token) {
+        console.log(`[ODOO-backup] session captured via ${source} — channel_id:`, cid, 'guest_token: ***set***');
+        (window as any).__odoo_session__ = { guest_token: gt, channel_id: cid };
+        window.dispatchEvent(new CustomEvent('odoo:session-ready', { detail: { guest_token: gt, channel_id: cid } }));
+        clearTimeout(_backupTimer);
+        _restoreBackup();
+      }
+    };
+
+    if (!(window as any).__odoo_session__?.guest_token) {
+      window.fetch = function(input: RequestInfo | URL, init?: RequestInit) {
+        let reqUrl = '';
+        try { reqUrl = typeof input === 'string' ? input : (input as Request).url ?? String(input); } catch(e) { /**/ }
+
+        // ── Extract from message/post REQUEST body (most reliable path) ──────
+        // The guest_token and thread_id are sent plainly in the outgoing payload.
+        if (reqUrl.indexOf('/im_livechat/cors/message/post') !== -1 ||
+            reqUrl.indexOf('/mail/message/post') !== -1) {
+          try {
+            const bodyStr = typeof init?.body === 'string' ? init.body : '';
+            if (bodyStr) {
+              const bodyJson = JSON.parse(bodyStr);
+              const params = bodyJson?.params ?? {};
+              const gt: string | undefined = params.guest_token;
+              // thread_id is the channel id
+              const cid: number | undefined = typeof params.thread_id === 'number' ? params.thread_id : undefined;
+              if (gt && cid && cid > 0) {
+                _emitSession(gt, cid, 'message/post request body');
+              }
+            }
+          } catch(e) { /**/ }
+        }
+
+        const promise = _origFetch(input, init);
+
+        // ── Also keep get_session RESPONSE extraction as secondary fallback ──
+        if (reqUrl.indexOf('/im_livechat/cors/get_session') !== -1) {
+          promise.then((resp: Response) => {
+            resp.clone().json().then((json: any) => {
+              try {
+                const result = json?.result;
+                if (!result) return;
+                console.log('[ODOO-backup] get_session raw (first 800 chars):', JSON.stringify(result).substring(0, 800));
+
+                // Try every known guest_token location
+                let gt: string | null = null;
+                const sd: any = result.store_data || {};
+                if (sd?.Store?.guest_token)   gt = sd.Store.guest_token;
+                if (!gt && sd['res.guest']) {
+                  const recs: any[] = Array.isArray(sd['res.guest']) ? sd['res.guest'] : Object.values(sd['res.guest']);
+                  for (const rec of recs) { if (rec?.access_token || rec?.guest_token) { gt = rec.access_token || rec.guest_token; break; } }
+                }
+                if (!gt) gt = result.guest_token ?? null;
+                if (!gt) {
+                  for (const key of Object.keys(sd)) {
+                    const blk: any = sd[key];
+                    const items: any[] = Array.isArray(blk) ? blk : Object.values(blk ?? {});
+                    for (const item of items) {
+                      if (item && (item.guest_token || item.access_token)) {
+                        gt = item.guest_token || item.access_token;
+                        console.log('[ODOO-backup] guest_token found in store_data.' + key);
+                        break;
+                      }
+                    }
+                    if (gt) break;
+                  }
+                }
+
+                const cid: number = result.channel_id;
+                console.log('[ODOO-backup] channelId:', cid, 'guestToken found:', !!gt);
+
+                if (gt && typeof cid === 'number' && cid > 0) {
+                  _emitSession(gt, cid, 'get_session response');
+                }
+              } catch(e) { /**/ }
+            }).catch(() => { /**/ });
+          }).catch(() => { /**/ });
+        }
+
+        return promise;
+      } as typeof fetch;
+    }
+
+    // ── Step 3: Type and send a message via the Odoo chat input ──────────────
+    // Odoo calls get_session only when the FIRST message is sent — so we must
+    // send a message ourselves to trigger that call and capture the guest_token.
+    const   sendMessageViaOdooInput = async (text: string): Promise<boolean> => {
+      // Find the shadow root that contains Odoo's chat window
+      const getShadowRoot = (): ShadowRoot | null => {
+        const host = document.querySelector(".o-livechat-root") as (HTMLElement & { shadowRoot?: ShadowRoot }) | null;
+        if (host?.shadowRoot) return host.shadowRoot;
+        // Fallback: scan every element's shadow root
+        const all = document.querySelectorAll("*");
+        for (let i = 0; i < all.length; i++) {
+          const r = (all[i] as HTMLElement & { shadowRoot?: ShadowRoot }).shadowRoot;
+          if (r) return r;
+        }
+        return null;
+      };
+
+      // Poll for the composer input — Odoo needs ~1-3 s to render the chat window
+      let input: HTMLElement | null = null;
+      let shadowRoot: ShadowRoot | null = null;
+
+      for (let i = 0; i < 80; i++) {  // up to 8 s
+        shadowRoot = getShadowRoot();
+        if (shadowRoot) {
+          input = shadowRoot.querySelector(
+            "textarea.o-mail-Composer-input, " +
+            ".o-mail-Composer-input, " +
+            "textarea[placeholder], " +
+            "div[contenteditable='true']"
+          ) as HTMLElement | null;
+          if (input) break;
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      if (!input) {
+        console.warn("[ODOO] Composer input not found after 8 s");
+        return false;
+      }
+
+      console.log("[ODOO] Composer input found:", input.tagName, input.className);
+      input.focus();
+      await new Promise(r => setTimeout(r, 80));
+
+      // Set value — handles both <textarea> and contenteditable <div>
+      if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
+        const textarea = input as HTMLTextAreaElement;
+        // Use native value setter so Owl/React change detection fires
+        const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+        if (nativeSetter) {
+          nativeSetter.call(textarea, text);
+        } else {
+          textarea.value = text;
+        }
+        textarea.dispatchEvent(new Event("input",  { bubbles: true, composed: true }));
+        textarea.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      } else {
+        // contenteditable div
+        input.textContent = text;
+        input.dispatchEvent(new Event("input",  { bubbles: true, composed: true }));
+        input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: text }));
+      }
+
+      await new Promise(r => setTimeout(r, 200));
+
+      // Submit via Enter key (what Odoo listens to)
+      input.dispatchEvent(new KeyboardEvent("keydown",  { key: "Enter", code: "Enter", keyCode: 13, bubbles: true, composed: true }));
+      input.dispatchEvent(new KeyboardEvent("keypress", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true, composed: true }));
+      input.dispatchEvent(new KeyboardEvent("keyup",    { key: "Enter", code: "Enter", keyCode: 13, bubbles: true, composed: true }));
+
+      await new Promise(r => setTimeout(r, 100));
+
+      // Also click the send button if present
+      if (shadowRoot) {
+        const sendBtn = shadowRoot.querySelector(
+          ".o-mail-Composer-send, button[aria-label='Send'], .o-mail-Composer button[type='submit'], button.o-mail-Composer-send"
+        ) as HTMLElement | null;
+        if (sendBtn) {
+          console.log("[ODOO] Also clicking send button:", sendBtn.className);
+          sendBtn.click();
+        }
+      }
+
+      console.log("[ODOO] Transfer message sent via input");
+      return true;
+    };
+
+    // Send the transfer message — this is what triggers Odoo's get_session call
+    await sendMessageViaOdooInput("🤖 Transferring to a live agent — AI chat context has been shared.");
+
+
+    // ── Step 4: Wait for session (get_session fires right after message send) ─
+    try {
+      const { guest_token, channel_id } = await sessionPromise;
+      clearTimeout(_backupTimer);
+      _restoreBackup();   // restore original fetch
+      console.log("[ODOO] Session ready — channel_id:", channel_id, "| guest_token: ***set***");
+
+      // ── Step 5: Send AI conversation history via backend ─────────────────
+      // Always use the original (unpatched) fetch so we never intercept ourselves
+      try {
+        const histRes = await _origFetch(`${apiOrigin}/api/odoo/send-context`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionIdRef.current, guest_token, channel_id })
+        });
+        const histData = await histRes.json();
+        console.log("[ODOO] /odoo/send-context response:", histData);
+        if (histData.history_sent) {
+          console.log(`[ODOO] History sent — ${histData.message_count} msgs to channel ${histData.odoo_channel_id}`);
+        }
+      } catch (histErr) {
+        console.warn("[ODOO] /odoo/send-context error:", histErr);
+      }
+
+    } catch (err) {
+      clearTimeout(_backupTimer);
+      _restoreBackup();   // always restore fetch
+      console.warn("[ODOO] Session wait failed:", (err as Error).message);
+      // Chatbox is still open — user can chat with the agent manually
     }
   };
 
@@ -1363,14 +1707,8 @@ export default function ChatWidget() {
 
   const handleChatWithUs = () => {
     console.log('[ChatWidget] Chat with us clicked');
-    // Open Tawk.to chat widget
-    if (typeof (window as any).Tawk_API !== 'undefined') {
-      (window as any).Tawk_API.maximize();
-    } else {
-      console.error('Tawk.to widget not loaded yet');
-      // Fallback: try to load Tawk manually
-      alert('Chat widget is loading. Please try again in a moment.');
-    }
+    // Send conversation context to Odoo and then open Odoo chat
+    void sendContextToOdooAndOpenChat();
     setShowOptionsMenu(false);
   };
 
