@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import CallbackRequest from './CallbackRequest';
 
 interface VoiceChatProps {
   sessionId: string;
@@ -17,14 +18,15 @@ interface VoiceMessage {
 }
 
 // ─── Frequency-domain VAD ────────────────────────────────────────────────────
+// Industry-standard voice activity detection using frequency analysis
 function computeSpeechProb(analyser: AnalyserNode, sampleRate: number): number {
   const freqBuf = new Uint8Array(analyser.frequencyBinCount);
   analyser.getByteFrequencyData(freqBuf);
 
   const nyquist     = sampleRate / 2;
   const freqPerBin  = nyquist / freqBuf.length;
-  const speechLo    = Math.max(1, Math.round(300 / freqPerBin));
-  const speechHi    = Math.min(freqBuf.length - 1, Math.round(3400 / freqPerBin));
+  const speechLo    = Math.max(1, Math.round(300 / freqPerBin));   // 300 Hz - lower bound of human speech
+  const speechHi    = Math.min(freqBuf.length - 1, Math.round(3400 / freqPerBin)); // 3400 Hz - upper bound
   const noiseHiIdx  = Math.min(freqBuf.length - 1, Math.round(8000 / freqPerBin));
 
   let speechSum = 0, noiseSum = 0, speechCount = 0, noiseCount = 0;
@@ -34,16 +36,20 @@ function computeSpeechProb(analyser: AnalyserNode, sampleRate: number): number {
   }
   const speechMean = speechCount > 0 ? speechSum / speechCount : 0;
   const noiseMean  = noiseCount  > 0 ? noiseSum  / noiseCount  : 0;
-  if (speechMean < 8) return 0;
+
+  // Lower threshold for better sensitivity (was 8, now 5)
+  if (speechMean < 5) return 0;
+
+  // Calculate speech probability based on speech-to-noise ratio
   return Math.min(1, Math.max(0, (speechMean / (noiseMean + 0.5) - 1.0) / 2.5));
 }
 
 // ─── VAD constants ────────────────────────────────────────────────────────────
-const SPEECH_PROB_THRESHOLD = 0.40;  // Speech detection sensitivity
-const SPEECH_ONSET_FRAMES   = 5;     // Frames to detect speech start (~83ms at 60fps)
-const SILENCE_FRAMES_END    = 70;    // Frames of silence to end recording (~1.17s at 60fps)
-const MIN_RECORD_MS         = 500;   // Minimum recording duration
-const POST_AI_COOLDOWN_MS   = 1800;  // Cooldown after AI response (1.8s)
+const SPEECH_PROB_THRESHOLD = 0.25;  // Speech detection sensitivity (lower = more sensitive)
+const SPEECH_ONSET_FRAMES   = 3;     // Frames to detect speech start (~50ms at 60fps)
+const SILENCE_FRAMES_END    = 45;    // Frames of silence to end recording (~750ms at 60fps)
+const MIN_RECORD_MS         = 400;   // Minimum recording duration
+const POST_AI_COOLDOWN_MS   = 800;   // Cooldown after AI response (0.8s)
 
 // ─── Timer helper ─────────────────────────────────────────────────────────────
 function fmtTime(s: number) {
@@ -67,6 +73,7 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
   const [audioLevel,   setAudioLevel]   = useState(0);
   const [waveformTime, setWaveformTime] = useState(0);
   const [elapsed,      setElapsed]      = useState(0); // session timer (seconds)
+  const [showCallback, setShowCallback] = useState(false); // Show callback request UI
 
   // Core refs
   const mediaRecorderRef      = useRef<MediaRecorder | null>(null);
@@ -201,17 +208,23 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
         throw new Error('Your browser does not support audio recording');
 
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { sampleRate: { ideal: 48000 }, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        audio: {
+          sampleRate: { ideal: 48000 },
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1
+        }
       });
       streamRef.current = stream;
 
       if (audioContextRef.current) {
         const source = audioContextRef.current.createMediaStreamSource(stream);
         analyserRef.current = audioContextRef.current.createAnalyser();
-        analyserRef.current.fftSize               = 4096;
-        analyserRef.current.smoothingTimeConstant = 0.25;
-        analyserRef.current.minDecibels           = -90;
-        analyserRef.current.maxDecibels           = -10;
+        analyserRef.current.fftSize               = 2048;  // Faster FFT for quicker response
+        analyserRef.current.smoothingTimeConstant = 0.15;  // Less smoothing for faster detection
+        analyserRef.current.minDecibels           = -85;   // Slightly higher floor for better SNR
+        analyserRef.current.maxDecibels           = -15;   // Adjusted ceiling
         source.connect(analyserRef.current);
         updateWaveform();
       }
@@ -442,6 +455,53 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
                   prev.map(m => m.id === streamingMsgId ? { ...m, exploreUrl: finalUrl } : m)
                 );
               }
+
+              // Detect if AI response indicates callback should be offered
+              const responseText = streamingText.toLowerCase();
+
+              // Primary triggers - Strong indicators of callback offer
+              const primaryKeywords = [
+                'connect you with our team',
+                'connect you with our sales team',
+                'arrange a phone call',
+                'schedule a call',
+                'call from our team',
+                'speak with our team',
+                'talk to our team',
+                'transfer you to',
+                'put you in touch with'
+              ];
+
+              // Secondary triggers - Weaker indicators, need context
+              const secondaryKeywords = [
+                'phone call',
+                'callback',
+                'sales team',
+                'representative',
+                'human agent',
+                'real person',
+                'team member',
+                'specialist'
+              ];
+
+              // Check for strong triggers first
+              const hasPrimaryTrigger = primaryKeywords.some(keyword =>
+                responseText.includes(keyword)
+              );
+
+              // Check for secondary triggers (need at least 2)
+              const secondaryMatches = secondaryKeywords.filter(keyword =>
+                responseText.includes(keyword)
+              );
+              const hasSecondaryTrigger = secondaryMatches.length >= 2;
+
+              const shouldShowCallback = hasPrimaryTrigger || hasSecondaryTrigger;
+
+              if (shouldShowCallback && !showCallback) {
+                // Small delay to let the response finish playing
+                setTimeout(() => setShowCallback(true), 1000);
+              }
+
               onResponse?.(streamingText);
             } else if (event.type === 'error') {
               console.warn('[VoiceChat] Server error event:', event.message);
@@ -593,25 +653,42 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
 
   return (
     <div
-      className="voice-chat-container flex flex-col flex-1 overflow-hidden"
+      className="voice-chat-container flex flex-col flex-1 overflow-hidden relative"
       style={{ background: 'linear-gradient(165deg, #fff9f6 0%, #ffffff 52%, #fff4ef 100%)' }}
     >
 
       {/* ── Section header ──────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 flex items-center gap-3 px-4 py-3 border-b border-orange-100/50"
+      <div className="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-orange-100/50"
         style={{ background: 'rgba(255,255,255,0.7)', backdropFilter: 'blur(8px)' }}
       >
-        <div className={`relative w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0
-          bg-orange-500 shadow-sm shadow-orange-300`}>
-          <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-              d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-          </svg>
-          {isListening && (
-            <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse ring-2 ring-white" />
-          )}
+        <div className="flex items-center gap-3">
+          <div className={`relative w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0
+            bg-orange-500 shadow-sm shadow-orange-300`}>
+            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+            </svg>
+            {isListening && (
+              <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse ring-2 ring-white" />
+            )}
+          </div>
+          <span className="font-bold text-gray-800 text-sm tracking-wide">Voice Chat</span>
         </div>
-        <span className="font-bold text-gray-800 text-sm tracking-wide">Voice Chat</span>
+
+        {/* Manual "Call Team" button */}
+        <button
+          onClick={() => setShowCallback(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg
+            bg-orange-500 hover:bg-orange-600 text-white text-xs font-semibold
+            shadow-sm hover:shadow-md transition-all duration-150 active:scale-95"
+          title="Request a callback from our team"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+          </svg>
+          Call Team
+        </button>
       </div>
 
       {/* ── Messages ────────────────────────────────────────────────────────── */}
@@ -719,6 +796,17 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
           </>
         )}
       </div>
+
+      {/* ── Callback Request Overlay ───────────────────────────────────────────── */}
+      {showCallback && (
+        <div className="absolute inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <CallbackRequest
+            sessionId={sessionId}
+            apiUrl={apiUrl}
+            onClose={() => setShowCallback(false)}
+          />
+        </div>
+      )}
 
       {/* ── Error toast ──────────────────────────────────────────────────────── */}
       {error && (

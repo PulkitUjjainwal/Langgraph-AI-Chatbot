@@ -4,7 +4,7 @@ import { ChatMessages } from "./ChatMessages";
 import { ChatFooter, type ChatFooterHandle } from "./ChatFooter";
 import genericQA from "../data/genericQA.json";
 import WhatsAppDropdown from "./WhatsAppDropdown";
-import VoiceChat from "./VoiceChat";
+// import VoiceChat from "./VoiceChat"; // Commented out - will add back later
 
 export type ChatMessage = {
   id: string;
@@ -124,7 +124,7 @@ export default function ChatWidget() {
   const [suggestionsState, setSuggestionsState] = useState<SuggestionsState | null>(null);
   const [showTooltip, setShowTooltip] = useState(false);
   const [tooltipDismissed, setTooltipDismissed] = useState(false);
-  const [voiceMode, setVoiceMode] = useState(false);
+  // const [voiceMode, setVoiceMode] = useState(false); // Commented out - will add back later
 
   const [sessionId, setSessionId] = useState<string>(() => {
     if (typeof window === "undefined") return "";
@@ -397,16 +397,17 @@ export default function ChatWidget() {
   const getApiBaseUrl = (): string => apiBaseUrl;
 
   // Memoize VoiceChat component to prevent unmounting on parent re-renders
-  const voiceChatComponent = useMemo(() => {
-    console.log('[ChatWidget] Creating VoiceChat with apiUrl:', apiBaseUrl);
-    return (
-      <VoiceChat
-        key="voice-chat-stable"
-        sessionId={sessionId}
-        apiUrl={apiBaseUrl}
-      />
-    );
-  }, [sessionId, apiBaseUrl]); // Re-create if sessionId OR apiUrl changes
+  // Commented out - will add back later
+  // const voiceChatComponent = useMemo(() => {
+  //   console.log('[ChatWidget] Creating VoiceChat with apiUrl:', apiBaseUrl);
+  //   return (
+  //     <VoiceChat
+  //       key="voice-chat-stable"
+  //       sessionId={sessionId}
+  //       apiUrl={apiBaseUrl}
+  //     />
+  //   );
+  // }, [sessionId, apiBaseUrl]); // Re-create if sessionId OR apiUrl changes
 
   // Check if query matches connect/help intent
   const isConnectHelpIntent = (query: string): boolean => {
@@ -1918,8 +1919,8 @@ export default function ChatWidget() {
         >
           <ChatHeader onClose={() => setOpen(false)} />
 
-          {/* Voice/Text Mode Toggle */}
-          <div className="px-4 py-2 bg-white border-b border-gray-100 flex items-center justify-between">
+          {/* Voice/Text Mode Toggle - Commented out - will add back later */}
+          {/* <div className="px-4 py-2 bg-white border-b border-gray-100 flex items-center justify-between">
             <span className="text-xs font-medium text-gray-600">Chat Mode:</span>
             <div className="flex items-center space-x-2">
               <button
@@ -1953,16 +1954,16 @@ export default function ChatWidget() {
                 </span>
               </button>
             </div>
-          </div>
+          </div> */}
 
-          {/* Voice Chat - always mounted so messages survive mode switches */}
-          <div style={{ display: voiceMode ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden' }}>
+          {/* Voice Chat - always mounted so messages survive mode switches - Commented out - will add back later */}
+          {/* <div style={{ display: voiceMode ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden' }}>
             {voiceChatComponent}
-          </div>
+          </div> */}
 
           {/* Text Chat - always mounted; display:contents is invisible to layout */}
           {/* Conditional Rendering: Text Chat */}
-          <div style={{ display: voiceMode ? 'none' : 'contents' }}>
+          <div style={{ display: 'contents' }}>
             <>
               {/* Input Field - AWS Style (at top, below header) */}
 
