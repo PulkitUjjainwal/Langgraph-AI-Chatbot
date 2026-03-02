@@ -324,6 +324,490 @@ class FeedbackService:
             print(f"[Feedback] Get negative feedback error: {e}")
             return []
 
+    # =========================================================================
+    # MANAGEMENT ENDPOINTS - List, Detail, Analytics
+    # =========================================================================
+
+    async def get_feedback_list(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        feedback_type: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        session_id: Optional[str] = None,
+        min_rating: Optional[int] = None,
+        max_rating: Optional[int] = None,
+        search: Optional[str] = None,
+        sort_by: str = "created_at",
+        sort_order: str = "desc"
+    ) -> Dict[str, Any]:
+        """
+        Get paginated list of feedbacks with filters.
+
+        Args:
+            page: Page number (1-indexed)
+            page_size: Number of items per page
+            feedback_type: Filter by type (thumbs_up, thumbs_down, rating, comment)
+            start_date: Filter by start date (YYYY-MM-DD)
+            end_date: Filter by end date (YYYY-MM-DD)
+            session_id: Filter by session ID
+            min_rating: Minimum rating filter
+            max_rating: Maximum rating filter
+            search: Search in user_query and assistant_message
+            sort_by: Sort field (created_at, rating, feedback_type)
+            sort_order: Sort order (asc, desc)
+
+        Returns:
+            Dict with feedbacks list, total count, and pagination info
+        """
+        if not self._available:
+            return {"error": "MySQL not available", "feedbacks": [], "total": 0}
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    # Build WHERE clause
+                    conditions = []
+                    params = []
+
+                    if feedback_type:
+                        conditions.append("f.feedback_type = %s")
+                        params.append(feedback_type)
+
+                    if start_date:
+                        conditions.append("f.created_at >= %s")
+                        params.append(f"{start_date} 00:00:00")
+
+                    if end_date:
+                        conditions.append("f.created_at <= %s")
+                        params.append(f"{end_date} 23:59:59")
+
+                    if session_id:
+                        conditions.append("f.session_id = %s")
+                        params.append(session_id)
+
+                    if min_rating is not None:
+                        conditions.append("f.rating >= %s")
+                        params.append(min_rating)
+
+                    if max_rating is not None:
+                        conditions.append("f.rating <= %s")
+                        params.append(max_rating)
+
+                    if search:
+                        conditions.append("(f.user_query LIKE %s OR f.assistant_message LIKE %s OR f.comment LIKE %s)")
+                        search_param = f"%{search}%"
+                        params.extend([search_param, search_param, search_param])
+
+                    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+                    # Validate sort_by to prevent SQL injection
+                    valid_sort_fields = ["created_at", "rating", "feedback_type", "session_id"]
+                    if sort_by not in valid_sort_fields:
+                        sort_by = "created_at"
+                    sort_order = "DESC" if sort_order.lower() == "desc" else "ASC"
+
+                    # Get total count
+                    await cur.execute(f"""
+                        SELECT COUNT(*) as total FROM feedback f WHERE {where_clause}
+                    """, params)
+                    total_result = await cur.fetchone()
+                    total = total_result['total'] if total_result else 0
+
+                    # Calculate pagination
+                    offset = (page - 1) * page_size
+                    total_pages = (total + page_size - 1) // page_size if total > 0 else 1
+
+                    # Get feedbacks with conversation count
+                    await cur.execute(f"""
+                        SELECT
+                            f.id, f.session_id, f.feedback_type, f.rating, f.comment,
+                            f.user_query, f.assistant_message, f.page_url, f.created_at,
+                            (SELECT COUNT(*) FROM feedback_conversations fc WHERE fc.feedback_id = f.id) as conversation_length
+                        FROM feedback f
+                        WHERE {where_clause}
+                        ORDER BY f.{sort_by} {sort_order}
+                        LIMIT %s OFFSET %s
+                    """, params + [page_size, offset])
+
+                    feedbacks = await cur.fetchall()
+
+                    # Convert datetime to string
+                    for fb in feedbacks:
+                        if fb.get('created_at'):
+                            fb['created_at'] = fb['created_at'].isoformat()
+
+                    return {
+                        "feedbacks": feedbacks,
+                        "total": total,
+                        "page": page,
+                        "page_size": page_size,
+                        "total_pages": total_pages,
+                        "filters_applied": {
+                            "feedback_type": feedback_type,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "session_id": session_id,
+                            "search": search
+                        }
+                    }
+
+        except Exception as e:
+            print(f"[Feedback] Get feedback list error: {e}")
+            return {"error": str(e), "feedbacks": [], "total": 0}
+
+    async def get_feedback_detail(self, feedback_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get full details of a single feedback with conversation history.
+
+        Args:
+            feedback_id: ID of the feedback
+
+        Returns:
+            Dict with full feedback details and conversation, or None if not found
+        """
+        if not self._available:
+            return None
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    # Get feedback
+                    await cur.execute("""
+                        SELECT
+                            f.id, f.session_id, f.feedback_type, f.rating, f.comment,
+                            f.message_id, f.user_query, f.assistant_message,
+                            f.page_url, f.user_agent, f.ip_address, f.created_at
+                        FROM feedback f
+                        WHERE f.id = %s
+                    """, (feedback_id,))
+
+                    feedback = await cur.fetchone()
+
+                    if not feedback:
+                        return None
+
+                    # Convert datetime
+                    if feedback.get('created_at'):
+                        feedback['created_at'] = feedback['created_at'].isoformat()
+
+                    # Get conversation
+                    await cur.execute("""
+                        SELECT role, content, message_order, message_id
+                        FROM feedback_conversations
+                        WHERE feedback_id = %s
+                        ORDER BY message_order
+                    """, (feedback_id,))
+
+                    feedback['conversation'] = await cur.fetchall()
+
+                    return feedback
+
+        except Exception as e:
+            print(f"[Feedback] Get feedback detail error: {e}")
+            return None
+
+    async def get_dashboard_stats(self, days: int = 30) -> Dict[str, Any]:
+        """
+        Get dashboard statistics for the management UI.
+
+        Args:
+            days: Number of days to include in stats
+
+        Returns:
+            Dict with comprehensive statistics
+        """
+        if not self._available:
+            return {"error": "MySQL not available"}
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    # Get counts by type
+                    await cur.execute("""
+                        SELECT
+                            COUNT(*) as total,
+                            SUM(CASE WHEN feedback_type = 'thumbs_up' THEN 1 ELSE 0 END) as thumbs_up_count,
+                            SUM(CASE WHEN feedback_type = 'thumbs_down' THEN 1 ELSE 0 END) as thumbs_down_count,
+                            SUM(CASE WHEN feedback_type = 'rating' THEN 1 ELSE 0 END) as rating_count,
+                            SUM(CASE WHEN feedback_type = 'comment' THEN 1 ELSE 0 END) as comment_count,
+                            AVG(CASE WHEN rating IS NOT NULL THEN rating END) as avg_rating
+                        FROM feedback
+                        WHERE created_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                    """, (days,))
+
+                    stats = await cur.fetchone()
+
+                    # Calculate satisfaction rate
+                    thumbs_up = stats['thumbs_up_count'] or 0
+                    thumbs_down = stats['thumbs_down_count'] or 0
+                    satisfaction_rate = None
+                    if thumbs_up + thumbs_down > 0:
+                        satisfaction_rate = round((thumbs_up / (thumbs_up + thumbs_down)) * 100, 2)
+
+                    return {
+                        "total_feedback": stats['total'] or 0,
+                        "thumbs_up_count": thumbs_up,
+                        "thumbs_down_count": thumbs_down,
+                        "rating_count": stats['rating_count'] or 0,
+                        "comment_count": stats['comment_count'] or 0,
+                        "avg_rating": round(stats['avg_rating'], 2) if stats['avg_rating'] else None,
+                        "satisfaction_rate": satisfaction_rate,
+                        "period_days": days
+                    }
+
+        except Exception as e:
+            print(f"[Feedback] Get dashboard stats error: {e}")
+            return {"error": str(e)}
+
+    async def get_time_series(self, days: int = 30) -> Dict[str, Any]:
+        """
+        Get daily feedback data for time series charts.
+
+        Args:
+            days: Number of days to include
+
+        Returns:
+            Dict with daily statistics
+        """
+        if not self._available:
+            return {"error": "MySQL not available", "data": []}
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("""
+                        SELECT
+                            DATE(created_at) as date,
+                            SUM(CASE WHEN feedback_type = 'thumbs_up' THEN 1 ELSE 0 END) as thumbs_up,
+                            SUM(CASE WHEN feedback_type = 'thumbs_down' THEN 1 ELSE 0 END) as thumbs_down,
+                            SUM(CASE WHEN feedback_type = 'rating' THEN 1 ELSE 0 END) as rating,
+                            SUM(CASE WHEN feedback_type = 'comment' THEN 1 ELSE 0 END) as comment,
+                            COUNT(*) as total,
+                            AVG(CASE WHEN rating IS NOT NULL THEN rating END) as avg_rating
+                        FROM feedback
+                        WHERE created_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        GROUP BY DATE(created_at)
+                        ORDER BY date ASC
+                    """, (days,))
+
+                    results = await cur.fetchall()
+
+                    # Convert dates to strings and round avg_rating
+                    data = []
+                    for row in results:
+                        data.append({
+                            "date": row['date'].isoformat() if row['date'] else None,
+                            "thumbs_up": row['thumbs_up'] or 0,
+                            "thumbs_down": row['thumbs_down'] or 0,
+                            "rating": row['rating'] or 0,
+                            "comment": row['comment'] or 0,
+                            "total": row['total'] or 0,
+                            "avg_rating": round(row['avg_rating'], 2) if row['avg_rating'] else None
+                        })
+
+                    # Calculate date range
+                    from datetime import datetime, timedelta
+                    end_date = datetime.now().date()
+                    start_date = end_date - timedelta(days=days)
+
+                    return {
+                        "data": data,
+                        "period_days": days,
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat()
+                    }
+
+        except Exception as e:
+            print(f"[Feedback] Get time series error: {e}")
+            return {"error": str(e), "data": []}
+
+    async def get_top_pages(self, days: int = 30, limit: int = 10, feedback_type: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get top pages by feedback count.
+
+        Args:
+            days: Number of days to include
+            limit: Maximum number of pages to return
+            feedback_type: Optional filter by feedback type
+
+        Returns:
+            Dict with page statistics
+        """
+        if not self._available:
+            return {"error": "MySQL not available", "pages": []}
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    type_filter = ""
+                    params = [days]
+
+                    if feedback_type:
+                        type_filter = "AND feedback_type = %s"
+                        params.append(feedback_type)
+
+                    params.append(limit)
+
+                    await cur.execute(f"""
+                        SELECT
+                            page_url,
+                            COUNT(*) as total_feedback,
+                            SUM(CASE WHEN feedback_type = 'thumbs_up' THEN 1 ELSE 0 END) as thumbs_up,
+                            SUM(CASE WHEN feedback_type = 'thumbs_down' THEN 1 ELSE 0 END) as thumbs_down,
+                            AVG(CASE WHEN rating IS NOT NULL THEN rating END) as avg_rating
+                        FROM feedback
+                        WHERE created_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        {type_filter}
+                        AND page_url IS NOT NULL AND page_url != ''
+                        GROUP BY page_url
+                        ORDER BY total_feedback DESC
+                        LIMIT %s
+                    """, params)
+
+                    pages = await cur.fetchall()
+
+                    # Round avg_rating
+                    for page in pages:
+                        if page.get('avg_rating'):
+                            page['avg_rating'] = round(page['avg_rating'], 2)
+
+                    return {
+                        "pages": pages,
+                        "period_days": days
+                    }
+
+        except Exception as e:
+            print(f"[Feedback] Get top pages error: {e}")
+            return {"error": str(e), "pages": []}
+
+    async def get_session_feedbacks(self, session_id: str) -> Dict[str, Any]:
+        """
+        Get all feedbacks from a specific session.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            Dict with all feedbacks from the session
+        """
+        if not self._available:
+            return {"error": "MySQL not available", "feedbacks": [], "total": 0}
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    # Get all feedbacks for the session
+                    await cur.execute("""
+                        SELECT
+                            f.id, f.session_id, f.feedback_type, f.rating, f.comment,
+                            f.message_id, f.user_query, f.assistant_message,
+                            f.page_url, f.user_agent, f.ip_address, f.created_at
+                        FROM feedback f
+                        WHERE f.session_id = %s
+                        ORDER BY f.created_at ASC
+                    """, (session_id,))
+
+                    feedbacks = await cur.fetchall()
+
+                    # Get conversations for each feedback
+                    for fb in feedbacks:
+                        if fb.get('created_at'):
+                            fb['created_at'] = fb['created_at'].isoformat()
+
+                        await cur.execute("""
+                            SELECT role, content, message_order, message_id
+                            FROM feedback_conversations
+                            WHERE feedback_id = %s
+                            ORDER BY message_order
+                        """, (fb['id'],))
+
+                        fb['conversation'] = await cur.fetchall()
+
+                    return {
+                        "session_id": session_id,
+                        "feedbacks": feedbacks,
+                        "total": len(feedbacks)
+                    }
+
+        except Exception as e:
+            print(f"[Feedback] Get session feedbacks error: {e}")
+            return {"error": str(e), "feedbacks": [], "total": 0}
+
+    async def export_feedbacks(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        feedback_type: Optional[str] = None,
+        include_conversations: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Export feedbacks for a given period.
+
+        Args:
+            start_date: Start date (YYYY-MM-DD)
+            end_date: End date (YYYY-MM-DD)
+            feedback_type: Optional filter by type
+            include_conversations: Whether to include conversation history
+
+        Returns:
+            List of feedback records
+        """
+        if not self._available:
+            return []
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    conditions = []
+                    params = []
+
+                    if start_date:
+                        conditions.append("f.created_at >= %s")
+                        params.append(f"{start_date} 00:00:00")
+
+                    if end_date:
+                        conditions.append("f.created_at <= %s")
+                        params.append(f"{end_date} 23:59:59")
+
+                    if feedback_type:
+                        conditions.append("f.feedback_type = %s")
+                        params.append(feedback_type)
+
+                    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+                    await cur.execute(f"""
+                        SELECT
+                            f.id, f.session_id, f.feedback_type, f.rating, f.comment,
+                            f.message_id, f.user_query, f.assistant_message,
+                            f.page_url, f.user_agent, f.ip_address, f.created_at
+                        FROM feedback f
+                        WHERE {where_clause}
+                        ORDER BY f.created_at DESC
+                    """, params)
+
+                    feedbacks = await cur.fetchall()
+
+                    for fb in feedbacks:
+                        if fb.get('created_at'):
+                            fb['created_at'] = fb['created_at'].isoformat()
+
+                        if include_conversations:
+                            await cur.execute("""
+                                SELECT role, content, message_order
+                                FROM feedback_conversations
+                                WHERE feedback_id = %s
+                                ORDER BY message_order
+                            """, (fb['id'],))
+                            fb['conversation'] = await cur.fetchall()
+
+                    return feedbacks
+
+        except Exception as e:
+            print(f"[Feedback] Export feedbacks error: {e}")
+            return []
+
     async def close(self):
         """Close database connections"""
         if self._pool:

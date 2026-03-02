@@ -1,6 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import "./index.css";
+import widgetCSS from "./index.css?inline";
 import App from './App.tsx'
 
 /**
@@ -28,24 +28,10 @@ function initWidget() {
   reactContainer.id = 'chatbot-react-root';
   shadowRoot.appendChild(reactContainer);
 
-  // Inject Tailwind and custom styles into shadow DOM
-  const styleContainer = document.createElement('div');
-  styleContainer.innerHTML = `
-    <style id="chatbot-styles">
-      /* Import all necessary styles inline to avoid external CSS conflicts */
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    </style>
-  `;
-  shadowRoot.insertBefore(styleContainer.firstElementChild!, reactContainer);
-
-  // Copy all stylesheets from document head (for Vite injected styles)
-  const styles = document.querySelectorAll('style');
-  styles.forEach((style) => {
-    if (style.textContent && style.textContent.includes('chat-')) {
-      const clonedStyle = style.cloneNode(true) as HTMLStyleElement;
-      shadowRoot.insertBefore(clonedStyle, reactContainer);
-    }
-  });
+  // Inject all styles into shadow DOM only — nothing touches document.head
+  const styleElement = document.createElement('style');
+  styleElement.textContent = widgetCSS;
+  shadowRoot.insertBefore(styleElement, reactContainer);
 
   // Render React app in shadow DOM
   const root = createRoot(reactContainer);

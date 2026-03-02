@@ -65,6 +65,7 @@ import time
 import uuid
 import re
 import os
+import base64
 from pathlib import Path
 from typing import TypedDict, Annotated, Sequence, Dict, Any, Optional, List
 import operator
@@ -110,6 +111,14 @@ from chatbot.database.feedback_service import (
     get_feedback_service, init_feedback_service
 )
 
+# Import Authentication
+from chatbot.auth.dependencies import require_auth, require_super_admin, get_auth_db_service
+from chatbot.auth.service import AuthService
+from chatbot.auth.models import (
+    LoginRequest, TokenResponse, RefreshTokenRequest, LogoutRequest,
+    CreateUserRequest, UpdateUserRequest, UserResponse, UserListResponse
+)
+
 # Import Lead Manager
 from lead_manager import LeadManager, get_lead_form_config
 
@@ -120,6 +129,9 @@ from chatbot.models.credit_models import (
     CreditState, CreditDeductionResult, CreditExhaustionResponse,
     ContinueChatRequest, ContinueChatResponse
 )
+
+# Import Voice Chat Service
+from chatbot.services.voice_chat_service import VoiceChatService, get_voice_chat_service
 
 # Import modular utility functions
 from chatbot.utils import (
@@ -137,10 +149,31 @@ from chatbot.services.retrieval.kb_retriever import KnowledgeBaseRetriever as Mo
 from chatbot.services.retrieval.hybrid_retriever import HybridRetriever as ModularHybridRetriever
 from chatbot.services.retrieval.dynamic_content import DynamicContentManager
 
-from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks
+from decimal import Decimal
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Response, Depends
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+import json as json_module
+
+
+class _DecimalEncoder(json_module.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super().default(obj)
+
+
+class DecimalJSONResponse(JSONResponse):
+    def render(self, content: Any) -> bytes:
+        return json_module.dumps(
+            content,
+            cls=_DecimalEncoder,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
 import os
 from pydantic import BaseModel, Field
 import asyncio
@@ -1057,6 +1090,9 @@ def create_chatbot_node():
         kb_context = state["retrieved_context"]
         messages = state.get("messages", [])
 
+        # DEBUG: Log message count for troubleshooting
+        print(f"  [HISTORY] Chatbot node received {len(messages)} messages from state")
+
         print(f"\n[CHAT] Chatbot processing...")
 
         # FEATURE 1: Context-Aware Greetings (100x faster for greetings)
@@ -1138,15 +1174,9 @@ def create_chatbot_node():
 
         print(f"  [DATA] FINAL CONTEXT SIZE: {len(context)} chars (~{len(context)//4} tokens)")
 
-        # Get conversation history
-        conversation_history = []
-        for msg in messages:
-            if isinstance(msg, HumanMessage):
-                conversation_history.append(f"User: {msg.content}")
-            elif isinstance(msg, AIMessage):
-                conversation_history.append(f"Assistant: {msg.content}")
-
-        history_text = "\n".join(conversation_history[-4:]) if conversation_history else ""
+        # Get conversation history using smart history manager
+        from chatbot.utils.conversation_history_manager import build_conversation_history
+        history_text = build_conversation_history(messages)
 
         # ========================================================================
         # BUILD SYSTEM PROMPT USING MODULAR PromptBuilder
@@ -2808,13 +2838,18 @@ IMPORTANT
 
         print(f"  [STREAM] Total merged context: {len(merged_context)} chars")
 
-        # Build conversation history string (last 6 messages = 3 exchanges)
-        history_messages = self._stream_history[session_id][-6:]
-        history_text = ""
-        if history_messages:
-            for msg in history_messages:
-                role = "User" if msg["role"] == "user" else "Assistant"
-                history_text += f"{role}: {msg['content'][:500]}\n"
+        # Build conversation history using smart history manager
+        from chatbot.utils.conversation_history_manager import build_conversation_history
+        history_messages = self._stream_history[session_id]
+        history_text = build_conversation_history(history_messages)
+
+        # DEBUG: Log history context being used
+        print(f"  [HISTORY] Building context from {len(history_messages)} messages")
+        print(f"  [HISTORY] Generated history: {len(history_text)} chars")
+        if history_text:
+            # Show first 200 chars of history for debugging
+            preview = history_text[:200].replace('\n', ' | ')
+            print(f"  [HISTORY] Preview: {preview}...")
 
         # Detect query type for response length (use llm_query for better detection)
         smart_query_type = detect_query_type_simple(llm_query)
@@ -2840,7 +2875,12 @@ IMPORTANT
 
         # Add progressive questioning and few-shot examples (same as chat())
         system_prompt += f"""
-        
+
+ABSOLUTE FORMAT RULES — NEVER VIOLATE:
+FORBIDDEN: "Let's break down" / "Let me analyze" / "## Step 1:" / "## Step 2:" / any "Step X:" headers / numbered analysis (1. Understand... 2. Analyze...) / section headers.
+REQUIRED: Start with the direct answer. 1-3 sentences. No structured breakdown. No analytical framing.
+WRONG: "Let's break down systematically. ## Step 1: Understand the Data..."
+RIGHT: "Vietnam imported $1.2B of HS 94 in 2023, mainly from China. Want more details?"
 
 PROGRESSIVE QUESTIONING (SMART FOLLOW-UP):
 - Use conversation history to understand follow-up questions like "list all of them" or "the same"
@@ -2905,6 +2945,7 @@ if query is for platform
             'top_p': Config.TOP_P,
             'num_predict': Config.NUM_PREDICT,
             'num_ctx': Config.NUM_CTX,
+            'request_timeout': 90.0,  # 90s timeout to prevent silent hangs
         }
 
         # Use local Ollama
@@ -2924,13 +2965,37 @@ if query is for platform
         full_response = ""
 
         try:
-            # Stream the response
+            # Stream the response, stripping <think>...</think> reasoning blocks
+            raw_accumulated = ""
+            yielded_length = 0
+            in_think_block = False
+
             async for chunk in llm.astream(llm_messages):
-                if hasattr(chunk, 'content') and chunk.content:
+                if not hasattr(chunk, 'content') or not chunk.content:
+                    continue
+
+                raw_accumulated += chunk.content
+
+                # Track open/close think tags to know if we're mid-block
+                open_tags = raw_accumulated.count('<think>')
+                close_tags = raw_accumulated.count('</think>')
+                in_think_block = open_tags > close_tags
+
+                if in_think_block:
+                    # Still inside a think block — don't yield anything yet
+                    continue
+
+                # Strip all complete <think>...</think> blocks from accumulated text
+                import re as _re
+                cleaned = _re.sub(r'<think>.*?</think>', '', raw_accumulated, flags=_re.DOTALL).strip()
+
+                # Yield only the new portion we haven't sent yet
+                new_content = cleaned[yielded_length:]
+                if new_content:
                     chunk_count += 1
-                    # Clean markdown from chunk
-                    clean_chunk = chunk.content.replace('**', '').replace('__', '')
+                    clean_chunk = new_content.replace('**', '').replace('__', '')
                     full_response += clean_chunk
+                    yielded_length += len(new_content)
                     yield clean_chunk
 
             elapsed = time.time() - start_time
@@ -2940,9 +3005,14 @@ if query is for platform
             self._stream_history[session_id].append({"role": "user", "content": message})
             self._stream_history[session_id].append({"role": "assistant", "content": full_response})
 
-            # Keep only last 10 messages to prevent memory bloat
-            if len(self._stream_history[session_id]) > 10:
-                self._stream_history[session_id] = self._stream_history[session_id][-10:]
+            # Keep only last 40 messages (20 exchanges) to prevent memory bloat
+            # This matches our history manager configuration
+            history_count = len(self._stream_history[session_id])
+            if history_count > 40:
+                self._stream_history[session_id] = self._stream_history[session_id][-40:]
+                print(f"  [HISTORY] Trimmed history: {history_count} -> 40 messages")
+            else:
+                print(f"  [HISTORY] Stored in history: {history_count} total messages for session {session_id}")
 
             # ========================================================================
             # STEP 4: Save messages to Redis for persistence
@@ -3334,7 +3404,8 @@ print("[DEBUG] Creating FastAPI app...")
 app = FastAPI(
     title="Export Genius AI Chatbot API",
     description="LangGraph-powered chatbot with RAG and dynamic content fetching",
-    version="1.0.0"
+    version="1.0.0",
+    default_response_class=DecimalJSONResponse
     # Lifespan temporarily disabled for debugging
     # lifespan=lifespan
 )
@@ -3561,39 +3632,73 @@ async def chat_stream(request: ChatRequest):
     async def generate_stream():
         start_time = time.time()
         full_response = ""
-        special_response = None
+
+        # Use a queue so we can interleave heartbeat events while the LLM
+        # is doing its slow pre-processing (KB retrieval, relatedness check,
+        # Ollama model loading). Without heartbeats the browser considers the
+        # connection idle and the frontend's AbortController fires too early.
+        _SENTINEL = object()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _produce():
+            try:
+                async for chunk in chatbot_manager.chat_stream(
+                    message=request.message,
+                    session_id=request.session_id,
+                    dynamic_url=request.dynamic_url
+                ):
+                    await queue.put(chunk)
+            except Exception as exc:
+                await queue.put(exc)
+            finally:
+                await queue.put(_SENTINEL)
+
+        producer = asyncio.create_task(_produce())
 
         try:
-            async for chunk in chatbot_manager.chat_stream(
-                message=request.message,
-                session_id=request.session_id,
-                dynamic_url=request.dynamic_url
-            ):
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    # LLM is still thinking — send a keepalive so the browser
+                    # doesn't close the connection and the JS timeout doesn't fire.
+                    yield f"data: {json.dumps({'heartbeat': True})}\n\n"
+                    continue
+
+                # Producer finished
+                if item is _SENTINEL:
+                    break
+
+                # Producer raised an exception
+                if isinstance(item, Exception):
+                    print(f"[ERROR] Streaming failed: {item}")
+                    import traceback as _tb
+                    _tb.print_exc()
+                    yield f"data: {json.dumps({'error': str(item), 'done': True})}\n\n"
+                    return
+
+                chunk = item
+
                 # Check if this is a special JSON response (credit exhaustion or clarifying question)
                 chunk_stripped = chunk.strip()
                 if chunk_stripped.startswith('{'):
                     try:
                         parsed = json.loads(chunk_stripped)
                         if parsed.get('credit_exhausted'):
-                            # This is credit exhaustion response
                             parsed['done'] = True
-                            sse_data = f"data: {json.dumps(parsed)}\n\n"
                             print(f"  [STREAM] Sending credit exhaustion response: {parsed.get('message', '')[:50]}...")
-                            yield sse_data
+                            yield f"data: {json.dumps(parsed)}\n\n"
                             return
                         if parsed.get('clarifying_question'):
-                            # This is a clarifying question
                             parsed['done'] = True
-                            sse_data = f"data: {json.dumps(parsed)}\n\n"
                             print(f"  [STREAM] Sending clarifying question: {parsed.get('question', '')[:50]}...")
-                            yield sse_data
+                            yield f"data: {json.dumps(parsed)}\n\n"
                             return
                     except json.JSONDecodeError as e:
                         print(f"  [STREAM] JSON parse error: {e}")
 
                 # Normal text chunk
                 full_response += chunk
-                # Send chunk as SSE event
                 yield f"data: {json.dumps({'chunk': chunk, 'done': False})}\n\n"
 
             # Send final message with completion status and explore URL
@@ -3607,17 +3712,17 @@ async def chat_stream(request: ChatRequest):
                 'full_response': full_response
             }
 
-            # Include explore_url only for data-specific responses
             if explore_url:
                 final_data['explore_url'] = explore_url
 
             yield f"data: {json.dumps(final_data)}\n\n"
 
-        except Exception as e:
-            print(f"[ERROR] Streaming failed: {e}")
-            import traceback
-            traceback.print_exc()
-            yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
+        finally:
+            producer.cancel()
+            try:
+                await producer
+            except asyncio.CancelledError:
+                pass
 
     return StreamingResponse(
         generate_stream(),
@@ -3852,7 +3957,7 @@ async def reset_session(request: ResetRequest):
 
     chatbot_manager.reset_session(request.session_id)
 
-    return JSONResponse(
+    return DecimalJSONResponse(
         content={
             "status": "success",
             "message": f"Session {request.session_id} reset successfully"
@@ -3992,7 +4097,7 @@ async def get_history(session_id: str, limit: int = 50):
         # Check if session is active (has messages within TTL)
         session_active = len(messages) > 0
 
-        return JSONResponse(content={
+        return DecimalJSONResponse(content={
             "session_id": session_id,
             "messages": messages,
             "total_messages": len(messages),
@@ -4002,7 +4107,7 @@ async def get_history(session_id: str, limit: int = 50):
 
     except Exception as e:
         print(f"[ERROR] History retrieval failed: {e}")
-        return JSONResponse(content={
+        return DecimalJSONResponse(content={
             "session_id": session_id,
             "messages": [],
             "total_messages": 0,
@@ -4029,7 +4134,7 @@ async def continue_chat(session_id: str):
         # Activate continue chat mode
         state = credit_manager.activate_continue_chat(session_id)
 
-        return JSONResponse(content={
+        return DecimalJSONResponse(content={
             "status": "success",
             "credits_remaining": state.get("remaining", 0),
             "message": "I'm happy to continue helping you explore our trade data. What would you like to know?"
@@ -4383,7 +4488,7 @@ async def redis_stats():
 
     stats = redis_manager.get_stats()
 
-    return JSONResponse(
+    return DecimalJSONResponse(
         content={
             "redis_stats": stats,
             "status": "healthy"
@@ -4510,7 +4615,7 @@ async def get_negative_feedback(limit: int = 50):
 
         feedbacks = await feedback_service.get_negative_feedback(limit=limit)
 
-        return JSONResponse(content={
+        return DecimalJSONResponse(content={
             "count": len(feedbacks),
             "feedbacks": feedbacks
         })
@@ -4518,6 +4623,1163 @@ async def get_negative_feedback(limit: int = 50):
     except Exception as e:
         print(f"[Feedback] Get negative error: {e}")
         raise HTTPException(status_code=500, detail="Failed to get negative feedback")
+
+
+# ============================================================================
+# AUTHENTICATION ENDPOINTS
+# ============================================================================
+
+@router.post("/auth/login", response_model=TokenResponse)
+async def login(request: LoginRequest):
+    """
+    Authenticate user and return access + refresh tokens.
+
+    - **email**: User email address
+    - **password**: User password
+
+    Returns JWT access token (60min) and refresh token (30 days)
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Authenticate user
+        user = await auth_service.authenticate_user(request.email, request.password)
+
+        if not user:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid email or password"
+            )
+
+        # Generate tokens
+        tokens = await auth_service.generate_tokens(user)
+
+        # Remove password_hash from user object
+        user_safe = {k: v for k, v in user.items() if k != "password_hash"}
+
+        return TokenResponse(
+            access_token=tokens["access_token"],
+            refresh_token=tokens["refresh_token"],
+            token_type="bearer",
+            user=user_safe
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Login error: {e}")
+        raise HTTPException(status_code=500, detail="Login failed")
+
+
+@router.post("/auth/refresh")
+async def refresh_token(request: RefreshTokenRequest):
+    """
+    Refresh access token using refresh token.
+
+    - **refresh_token**: Valid refresh token from login
+
+    Returns new access token
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Refresh access token
+        access_token = await auth_service.refresh_access_token(request.refresh_token)
+
+        if not access_token:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired refresh token"
+            )
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Token refresh error: {e}")
+        raise HTTPException(status_code=500, detail="Token refresh failed")
+
+
+@router.post("/auth/logout")
+async def logout(request: LogoutRequest, current_user = Depends(require_auth)):
+    """
+    Logout user by revoking refresh token.
+
+    Requires authentication. Revokes the provided refresh token.
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Revoke refresh token
+        success = await auth_service.logout(request.refresh_token)
+
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to logout"
+            )
+
+        return {
+            "message": "Logged out successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Logout error: {e}")
+        raise HTTPException(status_code=500, detail="Logout failed")
+
+
+@router.get("/auth/me", response_model=UserResponse)
+async def get_current_user_info(current_user = Depends(require_auth)):
+    """
+    Get current authenticated user information.
+
+    Requires authentication. Returns user profile.
+    """
+    return UserResponse(**current_user)
+
+
+# ============================================================================
+# USER MANAGEMENT ENDPOINTS (Super Admin Only)
+# ============================================================================
+
+@router.post("/admin/users/create", response_model=UserResponse)
+async def create_user(
+    request: CreateUserRequest,
+    current_user = Depends(require_super_admin)
+):
+    """
+    Create a new user (super_admin only).
+
+    - **username**: Unique username
+    - **email**: User email address
+    - **password**: Password (must meet security requirements)
+    - **full_name**: Full name
+    - **role**: User role (admin or user, cannot create super_admin)
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Create user
+        user = await auth_service.create_user(
+            username=request.username,
+            email=request.email,
+            password=request.password,
+            full_name=request.full_name,
+            role=request.role,
+            creator_role=current_user["role"]
+        )
+
+        if not user:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to create user. Email may already exist."
+            )
+
+        return UserResponse(**user)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Create user error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/users/list", response_model=UserListResponse)
+async def list_users(
+    page: int = 1,
+    page_size: int = 20,
+    role: Optional[str] = None,
+    current_user = Depends(require_super_admin)
+):
+    """
+    List all users with pagination (super_admin only).
+
+    - **page**: Page number (default: 1)
+    - **page_size**: Items per page (default: 20)
+    - **role**: Filter by role (optional)
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Get paginated users
+        result = await auth_db.list_users(page=page, page_size=page_size, role=role)
+
+        # Convert users to UserResponse objects
+        users = [UserResponse(**user) for user in result["users"]]
+
+        return UserListResponse(
+            users=users,
+            total=result["total"],
+            page=result["page"],
+            page_size=result["page_size"],
+            total_pages=result["total_pages"]
+        )
+
+    except Exception as e:
+        print(f"[Auth] List users error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list users")
+
+
+@router.patch("/admin/users/{user_id}", response_model=UserResponse)
+async def update_user(
+    user_id: int,
+    request: UpdateUserRequest,
+    current_user = Depends(require_super_admin)
+):
+    """
+    Update user information (super_admin only).
+
+    - **user_id**: ID of user to update
+    - **full_name**: New full name (optional)
+    - **role**: New role (optional, cannot set to super_admin)
+    - **is_active**: Active status (optional, cannot deactivate super_admin)
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Update user
+        success = await auth_service.update_user(
+            user_id=user_id,
+            full_name=request.full_name,
+            role=request.role,
+            is_active=request.is_active,
+            updater_role=current_user["role"]
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to update user"
+            )
+
+        # Get updated user
+        updated_user = await auth_db.get_user_by_id(user_id)
+
+        if not updated_user:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+
+        return UserResponse(**updated_user)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Update user error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/admin/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    current_user = Depends(require_super_admin)
+):
+    """
+    Delete (deactivate) user (super_admin only).
+
+    Soft deletes user by setting is_active = False.
+    Cannot delete super_admin users.
+    """
+    try:
+        # Get auth database service
+        auth_db = get_auth_db_service()
+        await auth_db.initialize()
+
+        # Create auth service
+        auth_service = AuthService(auth_db)
+
+        # Delete user
+        success = await auth_service.delete_user(
+            user_id=user_id,
+            deleter_role=current_user["role"]
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to delete user. Cannot delete super_admin users."
+            )
+
+        return {
+            "message": f"User {user_id} deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Auth] Delete user error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# FEEDBACK MANAGEMENT ENDPOINTS (Admin/Dashboard)
+# ============================================================================
+
+@router.get("/admin/feedback/list")
+async def get_feedback_list(
+    current_user = Depends(require_auth),
+    page: int = 1,
+    page_size: int = 20,
+    feedback_type: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    session_id: Optional[str] = None,
+    min_rating: Optional[int] = None,
+    max_rating: Optional[int] = None,
+    search: Optional[str] = None,
+    sort_by: str = "created_at",
+    sort_order: str = "desc"
+):
+    """
+    Get paginated list of all feedbacks with filters.
+
+    Query Parameters:
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 20, max: 100)
+    - feedback_type: Filter by type (thumbs_up, thumbs_down, rating, comment)
+    - start_date: Filter by start date (YYYY-MM-DD)
+    - end_date: Filter by end date (YYYY-MM-DD)
+    - session_id: Filter by session ID
+    - min_rating: Minimum rating (1-5)
+    - max_rating: Maximum rating (1-5)
+    - search: Search in user_query and assistant_message
+    - sort_by: Sort field (created_at, rating, feedback_type)
+    - sort_order: Sort order (asc, desc)
+    """
+    try:
+        # Validate page_size
+        page_size = min(page_size, 100)
+
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        result = await feedback_service.get_feedback_list(
+            page=page,
+            page_size=page_size,
+            feedback_type=feedback_type,
+            start_date=start_date,
+            end_date=end_date,
+            session_id=session_id,
+            min_rating=min_rating,
+            max_rating=max_rating,
+            search=search,
+            sort_by=sort_by,
+            sort_order=sort_order
+        )
+
+        return DecimalJSONResponse(content=result)
+
+    except Exception as e:
+        print(f"[Feedback Admin] List error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/dashboard/stats")
+async def get_dashboard_stats(
+    current_user = Depends(require_auth),
+    days: int = 30
+):
+    """
+    Get comprehensive dashboard statistics.
+
+    Query Parameters:
+    - days: Number of days to include (default: 30)
+
+    Returns:
+    - total_feedback: Total feedback count
+    - thumbs_up_count: Positive feedback count
+    - thumbs_down_count: Negative feedback count
+    - rating_count: Star rating count
+    - comment_count: Comment count
+    - avg_rating: Average star rating
+    - satisfaction_rate: Percentage of positive vs negative feedback
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        stats = await feedback_service.get_dashboard_stats(days=days)
+
+        return DecimalJSONResponse(content=stats)
+
+    except Exception as e:
+        print(f"[Feedback Admin] Dashboard stats error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/dashboard/timeseries")
+async def get_feedback_timeseries(
+    current_user = Depends(require_auth),
+    days: int = 30
+):
+    """
+    Get daily feedback data for time series charts.
+
+    Query Parameters:
+    - days: Number of days to include (default: 30)
+
+    Returns:
+    - data: Array of daily statistics
+    - period_days: Number of days
+    - start_date: Start of period
+    - end_date: End of period
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        result = await feedback_service.get_time_series(days=days)
+
+        return DecimalJSONResponse(content=result)
+
+    except Exception as e:
+        print(f"[Feedback Admin] Timeseries error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/dashboard/top-pages")
+async def get_top_pages(
+    current_user = Depends(require_auth),
+    days: int = 30,
+    limit: int = 10,
+    feedback_type: Optional[str] = None
+):
+    """
+    Get top pages by feedback count.
+
+    Query Parameters:
+    - days: Number of days to include (default: 30)
+    - limit: Maximum pages to return (default: 10)
+    - feedback_type: Optional filter (e.g., 'thumbs_down' for problem pages)
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        result = await feedback_service.get_top_pages(
+            days=days,
+            limit=limit,
+            feedback_type=feedback_type
+        )
+
+        return DecimalJSONResponse(content=result)
+
+    except Exception as e:
+        print(f"[Feedback Admin] Top pages error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/session/{session_id}")
+async def get_session_feedbacks(
+    session_id: str,
+    current_user = Depends(require_auth)
+):
+    """
+    Get all feedbacks from a specific session.
+
+    Path Parameters:
+    - session_id: Session identifier
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        result = await feedback_service.get_session_feedbacks(session_id)
+
+        return DecimalJSONResponse(content=result)
+
+    except Exception as e:
+        print(f"[Feedback Admin] Session feedbacks error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/export")
+async def export_feedbacks(
+    current_user = Depends(require_auth),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    feedback_type: Optional[str] = None,
+    include_conversations: bool = False,
+    format: str = "json"
+):
+    """
+    Export feedbacks for a given period.
+
+    Query Parameters:
+    - start_date: Start date (YYYY-MM-DD)
+    - end_date: End date (YYYY-MM-DD)
+    - feedback_type: Optional filter by type
+    - include_conversations: Include full conversation history (default: false)
+    - format: Export format - 'json' or 'csv' (default: json)
+
+    Note: For large exports, consider adding date filters.
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        feedbacks = await feedback_service.export_feedbacks(
+            start_date=start_date,
+            end_date=end_date,
+            feedback_type=feedback_type,
+            include_conversations=include_conversations
+        )
+
+        if format.lower() == "csv":
+            # Convert to CSV
+            import csv
+            import io
+
+            output = io.StringIO()
+            if feedbacks:
+                # Get headers from first record (excluding conversation for CSV)
+                headers = [k for k in feedbacks[0].keys() if k != 'conversation']
+                writer = csv.DictWriter(output, fieldnames=headers)
+                writer.writeheader()
+                for fb in feedbacks:
+                    row = {k: v for k, v in fb.items() if k != 'conversation'}
+                    writer.writerow(row)
+
+            csv_content = output.getvalue()
+            return Response(
+                content=csv_content,
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f"attachment; filename=feedbacks_export_{start_date or 'all'}_{end_date or 'all'}.csv"
+                }
+            )
+
+        # Default: JSON
+        return DecimalJSONResponse(content={
+            "format": "json",
+            "total_records": len(feedbacks),
+            "data": feedbacks
+        })
+
+    except Exception as e:
+        print(f"[Feedback Admin] Export error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/feedback/{feedback_id}")
+async def get_feedback_detail(
+    feedback_id: int,
+    current_user = Depends(require_auth)
+):
+    """
+    Get full details of a single feedback including conversation history.
+
+    Path Parameters:
+    - feedback_id: ID of the feedback to retrieve
+    """
+    try:
+        feedback_service = await get_feedback_service()
+        await feedback_service.initialize()
+
+        feedback = await feedback_service.get_feedback_detail(feedback_id)
+
+        if not feedback:
+            raise HTTPException(status_code=404, detail="Feedback not found")
+
+        return DecimalJSONResponse(content=feedback)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Feedback Admin] Detail error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# VOICE CHAT ENDPOINTS
+# Real-time voice conversation with LiveKit + OpenAI Whisper + TTS
+# ============================================================================
+
+# Tracks when TTS last finished per session (used to detect echo transcripts)
+_voice_tts_end_time: dict = {}
+
+# Short common phrases that are almost certainly echo artifacts, not real user input.
+# If received within ECHO_GUARD_SECONDS of TTS finishing AND the transcript matches
+# one of these patterns, the message is silently discarded.
+_ECHO_PHRASES = {
+    "thank you", "thanks", "thank you.", "thanks.", "okay", "ok", "ok.",
+    "okay.", "you're welcome", "welcome", "great", "sure", "alright",
+    "all right", "got it", "yes", "no", "bye", "goodbye", "hello",
+    "hi", "hey", "please", "sorry", "excuse me", "you", "me",
+    "great, thank you", "great thank you", "thanks a lot", "thank you so much",
+}
+ECHO_GUARD_SECONDS = 4.0  # Discard echo-like transcripts within this window after TTS
+
+# Whisper commonly hallucinates these strings for silence / low-level noise.
+# Trained on YouTube data, it produces these when audio contains no real speech.
+# Always discard regardless of timing.
+_WHISPER_HALLUCINATIONS = {
+    ".", "..", "...", ",", "!", "?",
+    # Single words that are nearly always hallucinations in isolation
+    "you", "you.", "me", "me.", "um", "uh", "hmm", "hm", "oh", "ah",
+    # With punctuation
+    "you!", "you,", "you?",
+    # Common YouTube-trained hallucinations
+    "thank you.", "thanks.", "thank you!", "thanks!", "thanks for watching.",
+    "thanks for watching!", "thank you for watching.", "thank you for watching!",
+    "please like and subscribe.", "like and subscribe.", "subscribe.",
+    "bye.", "bye!", "bye-bye.", "bye-bye!", "goodbye.", "goodbye!",
+    "bye everyone.", "bye everyone!", "bye everybody.", "bye everybody!",
+    "goodbye everyone.", "goodbye everyone!", "goodbye everybody.",
+    "good night.", "good night!", "good night everyone.", "good night everyone!",
+    "see you.", "see you!", "see you later.", "see you later!",
+    "take care.", "take care!", "farewell.", "farewell!",
+    "okay.", "ok.", "alright.", "all right.", "great.", "sure.", "yes.", "no.",
+    "hmm.", "um.", "uh.", "ah.", "oh.", "mm-hmm.", "mm.", "hm.", "huh.",
+    # OpenAI Whisper specific hallucinations on near-silence
+    "you", "the", "a", "i", "",
+    # Repeated noise patterns
+    "[music]", "[applause]", "[laughter]", "(music)", "(applause)",
+}
+
+# Substring patterns — Whisper hallucinates these on silence / ambient audio.
+# Checked with `any(phrase in transcript.lower() for phrase in ...)`.
+_HALLUCINATION_SUBSTRINGS = {
+    "thank you for coming",
+    "thank you for being here",
+    "thank you all for coming",
+    "thanks for coming",
+    "we hope to see you again",
+    "hope to see you again",
+    "see you again in the future",
+    "see you in the next video",
+    "see you next time",
+    "see you in the next episode",
+    "don't forget to subscribe",
+    "please subscribe",
+    "please like and subscribe",
+    "like and subscribe",
+    "hit the subscribe button",
+    "click the subscribe",
+    "this video is sponsored",
+    "this episode is sponsored",
+    "brought to you by",
+    "copyright reserved",
+    "all rights reserved",
+    "i'll see you in the next",
+    "we'll see you next time",
+    "thanks for tuning in",
+    "thank you for tuning in",
+    "stay tuned",
+    "until next time",
+    "that's all for today",
+    "that's all for now",
+    "have a great day everyone",
+    "have a wonderful day",
+    "bye everyone",
+    "bye everybody",
+    "goodbye everyone",
+    "goodbye everybody",
+    "see you everyone",
+    "good night everyone",
+    "good night everybody",
+    "take care everyone",
+    "farewell everyone",
+}
+
+@router.post("/voice/token", response_model=VoiceTokenResponse)
+async def get_voice_token(request: VoiceTokenRequest):
+    """
+    Generate LiveKit access token for voice chat session
+
+    This endpoint:
+    1. Creates a LiveKit room for the session
+    2. Generates a JWT access token
+    3. Returns connection details for the client
+
+    The client uses this token to connect to LiveKit and start real-time audio streaming.
+
+    Args:
+        request: VoiceTokenRequest with session_id and optional participant_name
+
+    Returns:
+        VoiceTokenResponse with access token and connection details
+    """
+    try:
+        voice_service = get_voice_chat_service()
+
+        # Generate room name based on session
+        room_name = f"voice_{request.session_id}"
+
+        # Generate access token
+        access_token = await voice_service.generate_access_token(
+            room_name=room_name,
+            participant_identity=request.session_id,
+            participant_name=request.participant_name
+        )
+
+        # Register session
+        voice_service.register_session(request.session_id, room_name)
+
+        return VoiceTokenResponse(
+            access_token=access_token,
+            livekit_url=voice_service.config.livekit_url,
+            room_name=room_name,
+            participant_identity=request.session_id
+        )
+
+    except Exception as e:
+        print(f"[Voice Chat] Error generating token: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate voice token: {str(e)}")
+
+
+@router.post("/voice/message", response_model=VoiceMessageResponse)
+async def process_voice_message(request: VoiceMessageRequest):
+    """
+    Process voice message: STT → Chatbot → TTS
+
+    This endpoint handles the complete voice conversation pipeline:
+    1. Decode base64 audio data
+    2. Transcribe speech to text using OpenAI Whisper
+    3. Process text through chatbot logic
+    4. Generate speech response using OpenAI TTS
+    5. Return transcript, response text, and audio
+
+    Args:
+        request: VoiceMessageRequest with session_id and audio_data
+
+    Returns:
+        VoiceMessageResponse with transcript, response, and audio
+    """
+    start_time = time.time()
+
+    try:
+        # Lazy initialization
+        await ensure_initialized()
+
+        if not chatbot_manager:
+            raise HTTPException(status_code=503, detail="Chatbot not initialized")
+
+        voice_service = get_voice_chat_service()
+
+        # Decode audio data from base64
+        try:
+            audio_bytes = base64.b64decode(request.audio_data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid audio data: {str(e)}")
+
+        print(f"[Voice Chat] Processing voice message for session {request.session_id}")
+        print(f"[Voice Chat] Audio size: {len(audio_bytes)} bytes, format: {request.audio_format}")
+
+        # Define chatbot handler function
+        async def chatbot_handler(session_id: str, message: str) -> Dict[str, Any]:
+            """Handle chatbot processing for voice message"""
+            try:
+                # Process through existing chatbot logic
+                response_text, processing_time, sources_used = await chatbot_manager.chat(
+                    message=message,
+                    session_id=session_id,
+                    dynamic_url=None
+                )
+
+                return {
+                    "response": response_text,
+                    "metadata": {
+                        "sources_used": sources_used,
+                        "processing_time": processing_time
+                    }
+                }
+            except Exception as e:
+                print(f"[Voice Chat] Chatbot error: {e}")
+                import traceback
+                traceback.print_exc()
+                return {
+                    "response": "I'm sorry, I encountered an error processing your message.",
+                    "metadata": {"error": str(e)}
+                }
+
+        # Process voice message
+        print(f"[Voice Chat] Calling voice_service.handle_voice_message...")
+        result = await voice_service.handle_voice_message(
+            session_id=request.session_id,
+            audio_data=audio_bytes,
+            chatbot_handler=chatbot_handler,
+            audio_format=request.audio_format
+        )
+
+        print(f"[Voice Chat] handle_voice_message result: {result is not None}")
+
+        if not result:
+            print(f"[Voice Chat] ERROR: handle_voice_message returned None - check logs above for details")
+            raise HTTPException(status_code=500, detail="Failed to process voice message - check server logs for details")
+
+        # Encode audio response to base64
+        audio_base64 = base64.b64encode(result["audio_data"]).decode("utf-8")
+
+        processing_time = time.time() - start_time
+
+        print(f"[Voice Chat] Voice message processed in {processing_time:.2f}s")
+
+        return VoiceMessageResponse(
+            transcript=result["transcript"],
+            response_text=result["response_text"],
+            audio_data=audio_base64,
+            audio_format=result["audio_format"],
+            processing_time=processing_time,
+            metadata=result.get("metadata")
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Voice Chat] Error processing voice message: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Voice message processing failed: {str(e)}")
+
+
+@router.post("/voice/stream")
+async def stream_voice_message(request: VoiceMessageRequest):
+    """
+    Stream voice message processing via SSE:
+    1. Transcribe audio (STT) → immediately sends transcript event
+    2. Stream LLM response text → sends text_chunk events
+    3. Generate TTS for full response → sends audio event
+    4. Sends done event
+    """
+    try:
+        await ensure_initialized()
+
+        if not chatbot_manager:
+            raise HTTPException(status_code=503, detail="Chatbot not initialized")
+
+        try:
+            audio_bytes = base64.b64decode(request.audio_data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid audio data: {str(e)}")
+
+        voice_service = get_voice_chat_service()
+
+        async def generate():
+            # ── Queue + heartbeat pattern ─────────────────────────────────────
+            # All processing runs in a background asyncio task (_process) that
+            # puts SSE event dicts on a queue.  The generator reads from the queue
+            # with an 8-second timeout and yields a heartbeat on each timeout so
+            # the HTTP connection stays alive regardless of how long STT/LLM/TTS
+            # takes.  This prevents the frontend AbortController from firing and
+            # avoids "Response timed out" errors entirely.
+            import asyncio
+            _SENTINEL = object()
+            queue: asyncio.Queue = asyncio.Queue()
+            # Shared flag: True when _process sent an error fallback message.
+            # The done-event handler reads this to suppress stale explore_urls.
+            _had_error: list = [False]
+
+            async def _process():
+                try:
+                    # ── Step 1: STT ───────────────────────────────────────────
+                    print(f"[Voice Stream] Transcribing for session {request.session_id}")
+                    try:
+                        transcript = await asyncio.wait_for(
+                            voice_service.transcribe_audio(audio_bytes, request.audio_format),
+                            timeout=45.0
+                        )
+                    except asyncio.TimeoutError:
+                        # Transcription took too long — silently discard, don't
+                        # surface a visible error to the user (they'll just speak again)
+                        print(f"[Voice Stream] Transcription timed out — discarding silently")
+                        return
+
+                    # Silence / noise / hallucination checks — all silent discards
+                    if not transcript or not transcript.strip():
+                        print(f"[Voice Stream] Empty transcript — silence, discarding")
+                        return
+
+                    transcript_clean = transcript.strip()
+
+                    if transcript_clean.lower() in _WHISPER_HALLUCINATIONS or len(transcript_clean) <= 1:
+                        print(f"[Voice Stream] Whisper hallucination (exact): '{transcript_clean}'")
+                        return
+
+                    lower_t = transcript_clean.lower()
+
+                    # Substring hallucination check — catches multi-sentence ceremony phrases
+                    if any(phrase in lower_t for phrase in _HALLUCINATION_SUBSTRINGS):
+                        print(f"[Voice Stream] Whisper hallucination (pattern): '{transcript_clean[:80]}'")
+                        return
+
+                    # 3+ occurrences of "thank you" in one transcript = hallucination
+                    if lower_t.count('thank you') >= 3:
+                        print(f"[Voice Stream] Whisper hallucination (thank-you flood): '{transcript_clean[:80]}'")
+                        return
+
+                    words = transcript_clean.split()
+                    if len(words) >= 6:
+                        half = len(words) // 2
+                        if words[:half] == words[half:half * 2]:
+                            print(f"[Voice Stream] Repetition artifact: '{transcript_clean[:60]}'")
+                            return
+
+                    last_tts = _voice_tts_end_time.get(request.session_id, 0)
+                    if time.time() - last_tts < ECHO_GUARD_SECONDS and \
+                            transcript_clean.lower().rstrip('.!?,') in _ECHO_PHRASES:
+                        print(f"[Voice Stream] Echo guard: discarding '{transcript_clean}'")
+                        return
+
+                    print(f"[Voice Stream] Transcript: {transcript_clean[:100]}")
+                    await queue.put({'type': 'transcript', 'text': transcript_clean})
+
+                    # ── Step 2: LLM streaming ─────────────────────────────────
+                    sentence_buffer = ""
+                    chunk_count = 0
+                    tts_tasks = []
+                    sent_error_message = False
+                    print(f"[Voice Stream] Starting LLM stream...")
+                    try:
+                        # Use per-chunk wait_for so timeout fires even before the
+                        # first token arrives (the old inline check only triggered
+                        # after a chunk was already received).
+                        llm_iter = chatbot_manager.chat_stream(
+                            message=transcript_clean,
+                            session_id=request.session_id,
+                            dynamic_url=None
+                        ).__aiter__()
+                        stream_start = asyncio.get_event_loop().time()
+
+                        while True:
+                            try:
+                                chunk = await asyncio.wait_for(
+                                    llm_iter.__anext__(), timeout=25.0
+                                )
+                            except StopAsyncIteration:
+                                break
+                            except asyncio.TimeoutError:
+                                raise   # bubbles up to outer except
+
+                            # Belt-and-suspenders global wall-clock guard
+                            if asyncio.get_event_loop().time() - stream_start > 90.0:
+                                raise asyncio.TimeoutError()
+
+                            chunk_count += 1
+                            chunk_stripped = chunk.strip()
+                            if chunk_stripped.startswith('{'):
+                                try:
+                                    parsed = json.loads(chunk_stripped)
+                                    if parsed.get('credit_exhausted') or parsed.get('clarifying_question'):
+                                        msg = parsed.get('message') or parsed.get('question', '')
+                                        if msg:
+                                            await queue.put({'type': 'text_chunk', 'text': msg})
+                                            tts_tasks.append(asyncio.create_task(
+                                                voice_service.generate_speech(msg)))
+                                        break
+                                    if parsed.get('done'):
+                                        # Capture explore_url from the done chunk directly
+                                        # (covers cases where _last_explore_url may lag)
+                                        if parsed.get('explore_url'):
+                                            chatbot_manager._last_explore_url = parsed['explore_url']
+                                        break
+                                except json.JSONDecodeError:
+                                    pass
+                            else:
+                                sentence_buffer += chunk
+                                await queue.put({'type': 'text_chunk', 'text': chunk})
+
+                                is_sentence_end = any(sentence_buffer.rstrip().endswith(p)
+                                                      for p in ['.', '!', '?'])
+                                if is_sentence_end or '\n\n' in sentence_buffer or len(sentence_buffer) > 200:
+                                    seg = sentence_buffer.strip()
+                                    sentence_buffer = ""
+                                    # Strip URLs before TTS so they are not spoken aloud
+                                    seg_for_tts = re.sub(r'https?://\S+', '', seg).strip()
+                                    if seg_for_tts and len(seg_for_tts) > 10:
+                                        tts_tasks.append(asyncio.create_task(
+                                            voice_service.generate_speech(seg_for_tts)))
+
+                        print(f"[Voice Stream] LLM done. Chunks: {chunk_count}")
+
+                    except asyncio.TimeoutError:
+                        print(f"[Voice Stream] LLM timed out (chunk_count={chunk_count})")
+                        sent_error_message = True
+                        _had_error[0] = True
+                        graceful = "I'm taking a bit longer than usual — please try again."
+                        await queue.put({'type': 'text_chunk', 'text': graceful})
+                        tts_tasks.append(asyncio.create_task(voice_service.generate_speech(graceful)))
+
+                    except Exception as llm_err:
+                        print(f"[Voice Stream] LLM error: {llm_err}")
+                        sent_error_message = True
+                        _had_error[0] = True
+                        graceful = "Sorry, I had trouble with that. Please try again."
+                        await queue.put({'type': 'text_chunk', 'text': graceful})
+                        tts_tasks.append(asyncio.create_task(voice_service.generate_speech(graceful)))
+
+                    # Only send "no response" fallback if nothing else was sent
+                    if chunk_count == 0 and not sent_error_message:
+                        _had_error[0] = True
+                        graceful = "I didn't catch a response — please try again."
+                        await queue.put({'type': 'text_chunk', 'text': graceful})
+                        tts_tasks.append(asyncio.create_task(voice_service.generate_speech(graceful)))
+
+                    if sentence_buffer.strip() and len(sentence_buffer.strip()) > 10:
+                        remaining_for_tts = re.sub(r'https?://\S+', '', sentence_buffer).strip()
+                        if remaining_for_tts and len(remaining_for_tts) > 10:
+                            tts_tasks.append(asyncio.create_task(
+                                voice_service.generate_speech(remaining_for_tts)))
+
+                    # ── Step 3: audio from TTS (ran in parallel with LLM) ─────
+                    for task in tts_tasks:
+                        try:
+                            audio_data = await asyncio.wait_for(task, timeout=30.0)
+                            if audio_data:
+                                await queue.put({
+                                    'type': 'audio',
+                                    'data': base64.b64encode(audio_data).decode("utf-8")
+                                })
+                        except Exception as tts_err:
+                            print(f"[Voice Stream] TTS error: {tts_err}")
+
+                    _voice_tts_end_time[request.session_id] = time.time()
+                    print(f"[Voice Stream] Completed successfully")
+
+                except Exception as e:
+                    print(f"[Voice Stream] Background task error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                finally:
+                    await queue.put(_SENTINEL)
+
+            producer = asyncio.create_task(_process())
+            try:
+                while True:
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=8.0)
+                    except asyncio.TimeoutError:
+                        # Keep the SSE connection alive while backend is working
+                        yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                        continue
+
+                    if item is _SENTINEL:
+                        # Never attach an explore URL to error/fallback responses
+                        explore_url = '' if _had_error[0] else getattr(chatbot_manager, '_last_explore_url', '')
+                        done_data: dict = {'type': 'done'}
+                        if explore_url:
+                            done_data['explore_url'] = explore_url
+                        yield f"data: {json.dumps(done_data)}\n\n"
+                        break
+                    if isinstance(item, Exception):
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        break
+                    yield f"data: {json.dumps(item)}\n\n"
+            finally:
+                producer.cancel()
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Voice Stream] Outer error: {e}")
+        raise HTTPException(status_code=500, detail=f"Voice stream failed: {str(e)}")
+
+
+@router.get("/voice/sessions")
+async def get_voice_sessions():
+    """
+    Get active voice chat sessions
+
+    Returns statistics for all active voice chat sessions including:
+    - Session ID
+    - Room name
+    - Start time
+    - Message count
+
+    Returns:
+        List of VoiceSessionStats
+    """
+    try:
+        voice_service = get_voice_chat_service()
+        sessions = voice_service.get_active_sessions()
+
+        return {
+            "total_sessions": len(sessions),
+            "sessions": [
+                VoiceSessionStats(
+                    session_id=session_id,
+                    room_name=data["room_name"],
+                    started_at=data["started_at"].isoformat(),
+                    message_count=data["message_count"]
+                )
+                for session_id, data in sessions.items()
+            ]
+        }
+
+    except Exception as e:
+        print(f"[Voice Chat] Error getting sessions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/voice/session/{session_id}")
+async def close_voice_session(session_id: str):
+    """
+    Close a voice chat session
+
+    Unregisters the session and cleans up resources.
+
+    Args:
+        session_id: Session to close
+
+    Returns:
+        Success message
+    """
+    try:
+        voice_service = get_voice_chat_service()
+        voice_service.unregister_session(session_id)
+
+        return {
+            "status": "success",
+            "message": f"Voice session {session_id} closed"
+        }
+
+    except Exception as e:
+        print(f"[Voice Chat] Error closing session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/")
@@ -4533,6 +5795,9 @@ async def root():
             "GET /api/history/{session_id}": "Get conversation history",
             "GET /api/health": "Health check",
             "GET /api/redis/stats": "Redis statistics",
+            "POST /api/voice/token": "Get LiveKit access token for voice chat",
+            "POST /api/voice/message": "Process voice message (STT → Chat → TTS)",
+            "GET /api/voice/sessions": "Get active voice sessions",
             "GET /docs": "Interactive API documentation"
         }
     }
@@ -4542,6 +5807,61 @@ async def root():
 print("[DEBUG] About to include router...")
 app.include_router(router)
 print("[DEBUG] Router included successfully!")
+
+
+# ============================================================================
+# TEST ENDPOINT FOR HISTORY VERIFICATION
+# ============================================================================
+
+@router.post("/test/history")
+async def test_history(request: ChatRequest):
+    """
+    Test endpoint to verify conversation history is working
+
+    Returns the current history for the session
+    """
+    await ensure_initialized()
+
+    if not chatbot_manager:
+        raise HTTPException(status_code=503, detail="Chatbot not initialized")
+
+    session_id = request.session_id
+
+    # Get streaming history if exists
+    streaming_history = chatbot_manager._stream_history.get(session_id, [])
+
+    # Get LangGraph history from checkpointer
+    langgraph_messages = []
+    try:
+        if hasattr(chatbot_manager, 'app') and hasattr(chatbot_manager.app, 'checkpointer'):
+            checkpointer = chatbot_manager.app.checkpointer
+            if checkpointer:
+                # Try to get checkpoint
+                config = {"configurable": {"thread_id": session_id}}
+                checkpoint = checkpointer.get(config)
+                if checkpoint and 'channel_values' in checkpoint:
+                    messages = checkpoint['channel_values'].get('messages', [])
+                    for msg in messages:
+                        langgraph_messages.append({
+                            "type": type(msg).__name__,
+                            "content": msg.content if hasattr(msg, 'content') else str(msg)
+                        })
+    except Exception as e:
+        print(f"[TEST] Error getting LangGraph history: {e}")
+
+    # Build history text using our manager
+    from chatbot.utils.conversation_history_manager import build_conversation_history
+    history_text = build_conversation_history(streaming_history) if streaming_history else "No history"
+
+    return {
+        "session_id": session_id,
+        "streaming_history_count": len(streaming_history),
+        "streaming_history": streaming_history,
+        "langgraph_messages_count": len(langgraph_messages),
+        "langgraph_messages": langgraph_messages,
+        "formatted_history": history_text,
+        "message": "History retrieved successfully"
+    }
 
 
 # ============================================================================

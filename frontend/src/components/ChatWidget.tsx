@@ -4,6 +4,7 @@ import { ChatMessages } from "./ChatMessages";
 import { ChatFooter, type ChatFooterHandle } from "./ChatFooter";
 import genericQA from "../data/genericQA.json";
 import WhatsAppDropdown from "./WhatsAppDropdown";
+import VoiceChat from "./VoiceChat";
 
 export type ChatMessage = {
   id: string;
@@ -123,6 +124,7 @@ export default function ChatWidget() {
   const [suggestionsState, setSuggestionsState] = useState<SuggestionsState | null>(null);
   const [showTooltip, setShowTooltip] = useState(false);
   const [tooltipDismissed, setTooltipDismissed] = useState(false);
+  const [voiceMode, setVoiceMode] = useState(false);
 
   const [sessionId, setSessionId] = useState<string>(() => {
     if (typeof window === "undefined") return "";
@@ -159,6 +161,7 @@ export default function ChatWidget() {
   const currentUrlRef = useRef<string>("");
   const sessionIdRef = useRef<string>(sessionId);
   const footerRef = useRef<ChatFooterHandle | null>(null);
+  const isSendingRef = useRef<boolean>(false);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -380,14 +383,30 @@ export default function ChatWidget() {
     };
   }, [suggestionsState]);
 
-  const getApiBaseUrl = (): string => {
+  // Get API base URL - memoized to avoid re-renders
+  const apiBaseUrl = useMemo(() => {
     let url = "http://localhost:8000";
     if (typeof window !== "undefined" && (window as any).CHATBOT_CONFIG) {
       url = (window as any).CHATBOT_CONFIG.apiUrl || url;
     }
     // Remove trailing slash to prevent double slashes in API calls
     return url.replace(/\/$/, '');
-  };
+  }, []);
+
+  // Helper function for backward compatibility
+  const getApiBaseUrl = (): string => apiBaseUrl;
+
+  // Memoize VoiceChat component to prevent unmounting on parent re-renders
+  const voiceChatComponent = useMemo(() => {
+    console.log('[ChatWidget] Creating VoiceChat with apiUrl:', apiBaseUrl);
+    return (
+      <VoiceChat
+        key="voice-chat-stable"
+        sessionId={sessionId}
+        apiUrl={apiBaseUrl}
+      />
+    );
+  }, [sessionId, apiBaseUrl]); // Re-create if sessionId OR apiUrl changes
 
   // Check if query matches connect/help intent
   const isConnectHelpIntent = (query: string): boolean => {
@@ -1264,23 +1283,32 @@ export default function ChatWidget() {
     }
 
     try {
-      const response = await fetch(`${apiBaseUrl}/api/chat/stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: query,
-          session_id: sid,
-          dynamic_url: currentUrl,
-          ...extraData,
-        }),
-      });
+      // Create abort controller for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 second timeout
 
-      if (!response.ok) throw new Error("Stream request failed");
-      if (!response.body) throw new Error("No response body");
+      try {
+        const response = await fetch(`${apiBaseUrl}/api/chat/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: query,
+            session_id: sid,
+            dynamic_url: currentUrl,
+            ...extraData,
+          }),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) throw new Error("Stream request failed");
+        if (!response.body) throw new Error("No response body");
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let accumulatedText = "";
+      let lineBuffer = "";   // buffer incomplete SSE lines across reads
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1289,23 +1317,21 @@ export default function ChatWidget() {
           break;
         }
 
-        const chunk = decoder.decode(value, { stream: true });
-        console.log('[SSE] Raw chunk received:', chunk.substring(0, 200));
+        lineBuffer += decoder.decode(value, { stream: true });
 
-        const lines = chunk.split("\n");
-        console.log('[SSE] Split into', lines.length, 'lines');
+        // Split on newlines but keep the incomplete last piece in the buffer
+        const lines = lineBuffer.split("\n");
+        lineBuffer = lines.pop() ?? "";   // last element may be incomplete
 
         for (const line of lines) {
-          // Debug: log all SSE lines
-          if (line.trim()) {
-            console.log('[SSE] Line:', line.substring(0, 100));
-          }
+          if (!line.startsWith("data: ")) continue;
 
-          if (line.startsWith("data: ")) {
-            try {
-              const jsonStr = line.slice(6);
-              console.log('[SSE] Parsing JSON:', jsonStr.substring(0, 100));
+          try {
+              const jsonStr = line.slice(6).trim();
+              if (!jsonStr) continue;
               const data = JSON.parse(jsonStr);
+
+              if (data.heartbeat) continue; // keepalive — backend is still processing
 
               if (data.error) {
                 throw new Error(data.error);
@@ -1381,11 +1407,32 @@ export default function ChatWidget() {
             } catch (parseError) {}
           }
         }
-      }
 
       return accumulatedText;
-    } catch (error) {
+      } catch (fetchError: any) {
+        clearTimeout(timeoutId);
+
+        // Handle timeout specifically
+        if (fetchError.name === 'AbortError') {
+          throw new Error("Request timed out. The server is taking too long to respond. Please try again.");
+        }
+
+        throw fetchError;
+      }
+    } catch (error: any) {
       console.error("Streaming error:", error);
+
+      // Show user-friendly error message
+      if (error.message && error.message.includes('timed out')) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId
+              ? { ...m, text: "⏱️ The request timed out. Please try again or rephrase your question." }
+              : m
+          )
+        );
+      }
+
       throw error;
     }
   }
@@ -1399,7 +1446,10 @@ export default function ChatWidget() {
   void _handleLeadFormChange; void _submitLeadForm; void _skipLeadForm; void _initializeSession;
 
   async function handleSend(text: string, slotValues?: SlotValues, skipGenericCheck = false) {
-    if (isSending) return;
+    // Use ref for synchronous guard — React state update is async and too slow
+    if (isSendingRef.current) return;
+    isSendingRef.current = true;
+    setIsSending(true);
 
     const userId = `user-${Date.now()}`;
     const assistantId = `assistant-${Date.now() + 1}`;
@@ -1413,38 +1463,32 @@ export default function ChatWidget() {
     // Check if this is a generic question (only if not skipping)
     if (!skipGenericCheck) {
       const genericResponse = await checkGenericQA(text);
-      
+
       // Handle special init call case
       if (genericResponse === 'INIT_CALL') {
         console.log('[handleSend] INIT_CALL case - showing loader and closing suggestions');
-        // Close suggestions immediately
         setSuggestedQuestions([]);
-        // Show loader
-        setIsSending(true);
         setMessages((prev) => [
           ...prev,
           { id: assistantId, role: "assistant" as const, text: "" },
         ]);
-        console.log('[handleSend] Added loader message, calling f');
-        // Call init and update the message
         await callInitAndShowQuestions(assistantId);
+        isSendingRef.current = false;
         setIsSending(false);
         return;
       }
-      
+
       if (genericResponse) {
-        // For generic questions, close suggestions first
         setSuggestedQuestions([]);
-        // Show generic response immediately
         setMessages((prev) => [...prev, genericResponse]);
+        isSendingRef.current = false;
+        setIsSending(false);
         return;
       }
     }
 
     // Not a generic question, proceed with streaming API
-    // Show loader first (add assistant message), then close suggestions
     console.log('[ChatWidget] Starting to show loader and close suggestions');
-    setIsSending(true);
     setMessages((prev) => {
       const newMessages = [
         ...prev,
@@ -1477,6 +1521,7 @@ export default function ChatWidget() {
         )
       );
     } finally {
+      isSendingRef.current = false;
       setIsSending(false);
     }
   }
@@ -1873,10 +1918,56 @@ export default function ChatWidget() {
         >
           <ChatHeader onClose={() => setOpen(false)} />
 
-          {/* Input Field - AWS Style (at top, below header) */}
+          {/* Voice/Text Mode Toggle */}
+          <div className="px-4 py-2 bg-white border-b border-gray-100 flex items-center justify-between">
+            <span className="text-xs font-medium text-gray-600">Chat Mode:</span>
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => setVoiceMode(false)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-all duration-200 ${
+                  !voiceMode
+                    ? 'bg-orange-500 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                <span className="flex items-center space-x-1">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                  </svg>
+                  <span>Text</span>
+                </span>
+              </button>
+              <button
+                onClick={() => setVoiceMode(true)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-all duration-200 ${
+                  voiceMode
+                    ? 'bg-orange-500 text-white shadow-sm shadow-orange-400/40'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                <span className="flex items-center space-x-1">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                  </svg>
+                  <span>Voice</span>
+                </span>
+              </button>
+            </div>
+          </div>
 
-          {/* Welcome Section with Suggested Questions - AWS Style */}
-          {questionCards.length > 0 && messages.length <= 1 && (
+          {/* Voice Chat - always mounted so messages survive mode switches */}
+          <div style={{ display: voiceMode ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden' }}>
+            {voiceChatComponent}
+          </div>
+
+          {/* Text Chat - always mounted; display:contents is invisible to layout */}
+          {/* Conditional Rendering: Text Chat */}
+          <div style={{ display: voiceMode ? 'none' : 'contents' }}>
+            <>
+              {/* Input Field - AWS Style (at top, below header) */}
+
+              {/* Welcome Section with Suggested Questions - AWS Style */}
+              {questionCards.length > 0 && messages.length <= 1 && (
             <div className="px-4 py-4 bg-white border-b border-gray-100">
               <p className="text-sm font-medium text-gray-700 mb-2">
                 Want help getting started?
@@ -2155,6 +2246,10 @@ export default function ChatWidget() {
               </div>
             </div>
           )}
+          </>
+          </div>
+          {/* End Conditional Rendering */}
+
           {showWhatsAppDropdown && waDropdownRect && (
             <WhatsAppDropdown
               rect={waDropdownRect}

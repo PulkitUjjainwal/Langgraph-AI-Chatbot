@@ -141,7 +141,8 @@ class ChatbotAgent:
         ]
 
         response = self.llm.invoke(llm_messages)
-        response_text = response.content
+        import re as _re
+        response_text = _re.sub(r'<think>.*?</think>', '', response.content, flags=_re.DOTALL).strip()
 
         elapsed = time.time() - start_time
         print(f"  [OK] Generated response in {elapsed:.2f}s")
@@ -272,15 +273,18 @@ class ChatbotAgent:
         return context
 
     def _build_conversation_history(self, messages: list) -> str:
-        """Build formatted conversation history from messages"""
-        conversation_history = []
-        for msg in messages:
-            if isinstance(msg, HumanMessage):
-                conversation_history.append(f"User: {msg.content}")
-            elif isinstance(msg, AIMessage):
-                conversation_history.append(f"Assistant: {msg.content}")
+        """
+        Build formatted conversation history from messages using smart history manager
 
-        return "\n".join(conversation_history[-4:]) if conversation_history else ""
+        Now supports:
+        - Configurable context window (default 20 messages)
+        - Token-aware truncation
+        - Smart summarization for long conversations
+        - Preservation of recent important context
+        """
+        from chatbot.utils.conversation_history_manager import build_conversation_history_from_settings
+
+        return build_conversation_history_from_settings(messages, self.settings)
 
     def _detect_industry(self, query: str, context: str) -> dict:
         """

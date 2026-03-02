@@ -108,10 +108,59 @@ class Settings(BaseSettings):
     faq_enabled: bool = Field(default=True, env="FAQ_ENABLED")
 
     # ============================================================================
+    # JWT AUTHENTICATION
+    # ============================================================================
+    jwt_secret_key: str = Field(
+        default="CHANGE_ME_IN_PRODUCTION_MIN_32_CHARS",
+        env="JWT_SECRET_KEY"
+    )
+    jwt_algorithm: str = Field(default="HS256", env="JWT_ALGORITHM")
+    jwt_access_token_expire_minutes: int = Field(
+        default=60,
+        env="JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
+        ge=1
+    )
+    jwt_refresh_token_expire_days: int = Field(
+        default=30,
+        env="JWT_REFRESH_TOKEN_EXPIRE_DAYS",
+        ge=1
+    )
+
+    # Super admin email whitelist (only these emails can be super_admin)
+    # Store as string in env, parse to list
+    super_admin_emails_raw: Optional[str] = Field(
+        default=None,
+        env="SUPER_ADMIN_EMAILS",
+        exclude=True  # Don't include in model dict
+    )
+
+    @property
+    def super_admin_emails(self) -> list[str]:
+        """Parse super admin emails from comma-separated string"""
+        if self.super_admin_emails_raw:
+            return [email.strip() for email in self.super_admin_emails_raw.split(',') if email.strip()]
+        return ["admin@marketinside.com", "superadmin@marketinside.com"]
+
+    # ============================================================================
     # SESSION MANAGEMENT
     # ============================================================================
     session_timeout_minutes: int = Field(default=30, ge=1)
     max_sessions: int = Field(default=1000, ge=1)
+
+    # ============================================================================
+    # CONVERSATION HISTORY CONFIGURATION
+    # ============================================================================
+    # Maximum number of messages to keep in conversation history
+    max_history_messages: int = Field(default=20, env="MAX_HISTORY_MESSAGES", ge=4, le=100)
+
+    # Maximum characters for conversation history to prevent token overflow
+    max_history_chars: int = Field(default=4000, env="MAX_HISTORY_CHARS", ge=1000, le=20000)
+
+    # Enable smart summarization for very long conversations
+    enable_history_summarization: bool = Field(default=True, env="ENABLE_HISTORY_SUMMARIZATION")
+
+    # Number of recent messages to always keep (never summarize)
+    recent_messages_to_keep: int = Field(default=6, env="RECENT_MESSAGES_TO_KEEP", ge=2, le=20)
 
     # ============================================================================
     # PERFORMANCE & OPTIMIZATION

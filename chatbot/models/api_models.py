@@ -316,6 +316,205 @@ class FeedbackStatsResponse(BaseModel):
         }
 
 
+# ============================================================================
+# FEEDBACK MANAGEMENT MODELS (Admin/Dashboard)
+# ============================================================================
+
+class FeedbackListItem(BaseModel):
+    """Single feedback item for list view"""
+    id: int
+    session_id: str
+    feedback_type: str
+    rating: Optional[int] = None
+    comment: Optional[str] = None
+    user_query: Optional[str] = None
+    assistant_message: Optional[str] = None
+    page_url: Optional[str] = None
+    created_at: str
+    conversation_length: Optional[int] = None
+
+
+class FeedbackListResponse(BaseModel):
+    """Paginated list of feedbacks"""
+    feedbacks: List[FeedbackListItem]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    filters_applied: Dict[str, Any]
+
+
+class FeedbackDetailConversation(BaseModel):
+    """Conversation message in feedback detail"""
+    role: str
+    content: str
+    message_order: int
+    message_id: Optional[str] = None
+
+
+class FeedbackDetailResponse(BaseModel):
+    """Full feedback details with conversation"""
+    id: int
+    session_id: str
+    feedback_type: str
+    rating: Optional[int] = None
+    comment: Optional[str] = None
+    message_id: Optional[str] = None
+    user_query: Optional[str] = None
+    assistant_message: Optional[str] = None
+    page_url: Optional[str] = None
+    user_agent: Optional[str] = None
+    ip_address: Optional[str] = None
+    created_at: str
+    conversation: List[FeedbackDetailConversation]
+
+
+class FeedbackDashboardStats(BaseModel):
+    """Dashboard statistics"""
+    total_feedback: int
+    thumbs_up_count: int
+    thumbs_down_count: int
+    rating_count: int
+    comment_count: int
+    avg_rating: Optional[float] = None
+    satisfaction_rate: Optional[float] = None  # thumbs_up / (thumbs_up + thumbs_down) * 100
+    period_days: int
+
+
+class FeedbackDailyStats(BaseModel):
+    """Daily feedback statistics"""
+    date: str
+    thumbs_up: int = 0
+    thumbs_down: int = 0
+    rating: int = 0
+    comment: int = 0
+    total: int = 0
+    avg_rating: Optional[float] = None
+
+
+class FeedbackTimeSeriesResponse(BaseModel):
+    """Time series data for charts"""
+    data: List[FeedbackDailyStats]
+    period_days: int
+    start_date: str
+    end_date: str
+
+
+class FeedbackTopPagesResponse(BaseModel):
+    """Top pages with feedback"""
+    pages: List[Dict[str, Any]]
+    period_days: int
+
+
+class SessionFeedbackResponse(BaseModel):
+    """All feedback from a specific session"""
+    session_id: str
+    feedbacks: List[FeedbackDetailResponse]
+    total: int
+
+
+class FeedbackExportResponse(BaseModel):
+    """Export response with data"""
+    format: str
+    total_records: int
+    data: List[Dict[str, Any]]
+
+
+# ============================================================================
+# VOICE CHAT MODELS
+# ============================================================================
+
+class VoiceTokenRequest(BaseModel):
+    """Request model for voice chat token generation"""
+    session_id: str = Field(..., description="Unique session identifier")
+    participant_name: Optional[str] = Field(None, description="Display name for participant")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user_123",
+                "participant_name": "John Doe"
+            }
+        }
+
+
+class VoiceTokenResponse(BaseModel):
+    """Response model for voice chat token"""
+    access_token: str = Field(..., description="LiveKit JWT access token")
+    livekit_url: str = Field(..., description="LiveKit server WebSocket URL")
+    room_name: str = Field(..., description="Room name to join")
+    participant_identity: str = Field(..., description="Participant identity")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "livekit_url": "wss://your-project.livekit.cloud",
+                "room_name": "voice_user_123",
+                "participant_identity": "user_123"
+            }
+        }
+
+
+class VoiceMessageRequest(BaseModel):
+    """Request model for voice message processing"""
+    session_id: str = Field(..., description="Session identifier")
+    audio_data: str = Field(..., description="Base64 encoded audio data")
+    audio_format: Optional[str] = Field("webm", description="Audio format (webm, mp3, wav)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user_123",
+                "audio_data": "UklGRiQAAABXQVZFZm10IBAAAAABAAEA...",
+                "audio_format": "webm"
+            }
+        }
+
+
+class VoiceMessageResponse(BaseModel):
+    """Response model for voice message processing"""
+    transcript: str = Field(..., description="Transcribed user speech")
+    response_text: str = Field(..., description="Bot's text response")
+    audio_data: str = Field(..., description="Base64 encoded audio response")
+    audio_format: str = Field(..., description="Audio format of response")
+    processing_time: float = Field(..., description="Processing time in seconds")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "transcript": "What is Export Genius?",
+                "response_text": "Export Genius is a global trade intelligence platform...",
+                "audio_data": "SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2Z...",
+                "audio_format": "mp3",
+                "processing_time": 3.45,
+                "metadata": {
+                    "sources_used": ["Knowledge Base"],
+                    "credits_remaining": 47
+                }
+            }
+        }
+
+
+class VoiceSessionStats(BaseModel):
+    """Voice chat session statistics"""
+    session_id: str
+    room_name: str
+    started_at: str
+    message_count: int
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user_123",
+                "room_name": "voice_user_123",
+                "started_at": "2025-02-12T10:30:00Z",
+                "message_count": 5
+            }
+        }
+
+
 class OdooContextRequest(BaseModel):
     """Request model for sending chatbot history to Odoo"""
     session_id: str = Field(..., description="Unique session identifier for the chatbot session")
