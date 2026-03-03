@@ -230,6 +230,18 @@ Specific question - "Which countries available for Africa?":
 - For any queries requiring email contact, use: info@marketinsidedata.com
 - Example: "Contact us at info@marketinsidedata.com for more details"
 - Example: "Reach out to info@marketinsidedata.com and our team will help you"
+
+[API PAGE REDIRECT]:
+- When users ask about API, API documentation, API capabilities, or how to access the API, ALWAYS include this link:
+  https://www.marketinsidedata.com/en/api
+- Format the link as: "The API documentation is available at: https://www.marketinsidedata.com/en/api"
+- Examples of API questions:
+  * "What type of data can I access through the API?"
+  * "Tell me about your API"
+  * "Which page gives me info about API?"
+  * "API documentation?"
+  * "How do I use the API?"
+- Always provide the API page link for these questions
 """
 
     @staticmethod
