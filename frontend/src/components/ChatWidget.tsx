@@ -699,7 +699,9 @@ export default function ChatWidget() {
     } else if (actionType === "call") {
       window.location.href = "tel:+4407727449124";
     } else if (actionType === "hubspot_chat" || actionType === "chat_with_us") {
-      // Send conversation context to Odoo and then open Odoo chat
+      // Hide AI chatbot and switch to Odoo livechat
+      setOpen(false);
+      setIsHiddenForOdoo(true);
       void sendContextToOdooAndOpenChat();
     } else if (actionType === "refresh") {
       // Call init API to show suggested questions
