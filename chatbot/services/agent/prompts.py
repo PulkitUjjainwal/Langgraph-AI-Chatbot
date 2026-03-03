@@ -221,6 +221,18 @@ Specific question - "Which countries available for Africa?":
 """
 
     @staticmethod
+    def build_contact_info_instruction() -> str:
+        """Build contact information instruction"""
+        return """
+[CONTACT INFORMATION]:
+- When users ask for contact information, email, or how to reach out, ALWAYS provide: info@marketinsidedata.com
+- When directing users to contact support or the team, use: info@marketinsidedata.com
+- For any queries requiring email contact, use: info@marketinsidedata.com
+- Example: "Contact us at info@marketinsidedata.com for more details"
+- Example: "Reach out to info@marketinsidedata.com and our team will help you"
+"""
+
+    @staticmethod
     def build_response_structure(query_type: str = "standard") -> str:
         """Build response structure guidelines"""
 
@@ -284,6 +296,7 @@ CRITICAL RULES:
         value_proposition = cls.build_value_proposition(config.site_name)
         accuracy_instruction = cls.build_accuracy_instruction()
         company_data_instruction = cls.build_company_data_instruction(config.source_url) if config.has_dynamic_content else ""
+        contact_info_instruction = cls.build_contact_info_instruction()
         response_structure = cls.build_response_structure(config.query_type)
         country_list_formatting = cls.build_country_list_formatting()
 
@@ -331,7 +344,7 @@ EXAMPLE — RIGHT: "Vietnam imported $1.2B of HS code 94 (furniture) in 2023, ma
 
 {scope_restriction}{brand_identity}{personality}
 {history_section}CONTEXT INFORMATION:
-{config.context}{accuracy_instruction}{company_data_instruction}
+{config.context}{accuracy_instruction}{company_data_instruction}{contact_info_instruction}
 {value_proposition}
 {country_list_formatting}
 {industry_section}{response_structure}
