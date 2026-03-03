@@ -5,6 +5,7 @@ import { ChatFooter, type ChatFooterHandle } from "./ChatFooter";
 import genericQA from "../data/genericQA.json";
 import WhatsAppDropdown from "./WhatsAppDropdown";
 // import VoiceChat from "./VoiceChat"; // Commented out - will add back later
+import whatsappQr from  "../../public/whatsapp-qr.avif"
 
 export type ChatMessage = {
   id: string;
@@ -2291,7 +2292,7 @@ export default function ChatWidget() {
 
                 <div className="bg-slate-50 p-4 rounded-2xl border-2 border-slate-100">
                   <div className="w-64 h-64 bg-white rounded-xl shadow-sm flex items-center justify-center border border-slate-200 overflow-hidden mx-auto">
-                    <img src="/assets/whatsapp-qr.png" alt="WhatsApp QR Code" className="w-full h-full p-4 object-contain" />
+                    <img src={whatsappQr} alt="WhatsApp QR Code" className="w-full h-full p-4 object-contain" />
                   </div>
 
                   <p className="mt-4 text-center text-sm text-slate-600">Open WhatsApp on your phone and scan this code to start chatting with us.</p>
