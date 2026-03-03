@@ -699,7 +699,9 @@ export default function ChatWidget() {
     } else if (actionType === "call") {
       window.location.href = "tel:+4407727449124";
     } else if (actionType === "hubspot_chat" || actionType === "chat_with_us") {
-      // Send conversation context to Odoo and then open Odoo chat
+      // Hide AI chatbot and switch to Odoo livechat
+      setOpen(false);
+      setIsHiddenForOdoo(true);
       void sendContextToOdooAndOpenChat();
     } else if (actionType === "refresh") {
       // Call init API to show suggested questions
@@ -724,6 +726,10 @@ export default function ChatWidget() {
     // We MUST open it this way so Odoo calls get_session for THIS channel —
     // if we call get_session ourselves we'd get a different channel/agent.
     const openOdoo = (): boolean => {
+      // Remove the initial CSS hide so Odoo is visible before we click its button
+      const _hideEl = document.getElementById('odoo-init-hide');
+      if (_hideEl) { _hideEl.remove(); console.log('[ODOO] initial hide style removed'); }
+
       // Odoo 17 renders a <div class="o-livechat-root"> with a shadow root.
       // NOTE: selector must use "." prefix (class), NOT a bare tag name.
       const host = document.querySelector(".o-livechat-root") as (HTMLElement & { shadowRoot?: ShadowRoot }) | null;
@@ -1688,6 +1694,9 @@ export default function ChatWidget() {
     setTooltipDismissed(true);
   };
 
+  // Controls visibility toggle between AI chatbot and Odoo livechat
+  const [isHiddenForOdoo, setIsHiddenForOdoo] = useState(false);
+
   // Options menu state
   const [showOptionsMenu, setShowOptionsMenu] = useState(false);
   const [showWhatsAppSubmenu, setShowWhatsAppSubmenu] = useState(false);
@@ -1706,10 +1715,13 @@ export default function ChatWidget() {
   };
 
   const handleChatWithUs = () => {
-    console.log('[ChatWidget] Chat with us clicked');
-    // Send conversation context to Odoo and then open Odoo chat
-    void sendContextToOdooAndOpenChat();
+    console.log('[ChatWidget] Chat with us clicked — switching to Odoo livechat');
+    // Close AI chatbot panel and hide the entire widget
+    setOpen(false);
     setShowOptionsMenu(false);
+    setIsHiddenForOdoo(true);
+    // Send conversation context to Odoo and open the Odoo chat
+    void sendContextToOdooAndOpenChat();
   };
 
   const handleCallUs = () => {
@@ -1800,6 +1812,9 @@ export default function ChatWidget() {
     // Close options menu
     setShowOptionsMenu(false);
   };
+
+  // When user has switched to Odoo livechat, hide the AI chatbot entirely
+  if (isHiddenForOdoo) return null;
 
   return (
     <>
