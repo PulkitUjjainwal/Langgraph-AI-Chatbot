@@ -158,6 +158,9 @@ export default function ChatWidget() {
   const [_creditExhausted, setCreditExhausted] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
 
+  // Odoo live chat ready state (10-second loading delay)
+  const [isOdooReady, setIsOdooReady] = useState(false);
+
   // Refs
   const currentUrlRef = useRef<string>("");
   const sessionIdRef = useRef<string>(sessionId);
@@ -257,6 +260,22 @@ export default function ChatWidget() {
       setTimeout(() => {
         footerRef.current?.focus();
       }, 100);
+    }
+  }, [open]);
+
+  // Odoo live chat loading delay (10 seconds)
+  useEffect(() => {
+    if (open) {
+      // Reset to not ready when opening
+      setIsOdooReady(false);
+
+      // Set ready after 10 seconds to allow Odoo to fully load
+      const timer = setTimeout(() => {
+        setIsOdooReady(true);
+        console.log('[ODOO] Live chat ready - button enabled');
+      }, 10000);
+
+      return () => clearTimeout(timer);
     }
   }, [open]);
 
@@ -710,9 +729,7 @@ export default function ChatWidget() {
     } else if (actionType === "call") {
       window.location.href = "tel:+4407727449124";
     } else if (actionType === "hubspot_chat" || actionType === "chat_with_us") {
-      // Hide AI chatbot and switch to Odoo livechat
-      setOpen(false);
-      setIsHiddenForOdoo(true);
+      // Try to open Odoo livechat - only hide AI chatbot if successful
       void sendContextToOdooAndOpenChat();
     } else if (actionType === "refresh") {
       // Call init API to show suggested questions
@@ -737,6 +754,7 @@ export default function ChatWidget() {
     // We MUST open it this way so Odoo calls get_session for THIS channel —
     // if we call get_session ourselves we'd get a different channel/agent.
     const openOdoo = (): boolean => {
+      console.log("[ODOO] Searching for Odoo live chat widget...");
       // Remove the initial CSS hide so Odoo is visible before we click its button
       const _hideEl = document.getElementById('odoo-init-hide');
       if (_hideEl) { _hideEl.remove(); console.log('[ODOO] initial hide style removed'); }
@@ -797,9 +815,16 @@ export default function ChatWidget() {
 
     const clicked = openOdoo();
     if (!clicked) {
-      // Nothing to do — Odoo widget not on this page
+      // Odoo widget not found - show error and keep AI chatbot open
+      console.error("[ODOO] Odoo livechat widget not found on this page");
+      alert("Live chat is not available at the moment. Please try WhatsApp or email support instead.");
       return;
     }
+
+    // Odoo opened successfully - now hide the AI chatbot
+    console.log("[ODOO] Odoo opened successfully, hiding AI chatbot");
+    setOpen(false);
+    setIsHiddenForOdoo(true);
 
     // ── Step 2: Start listening for session BEFORE sending message ───────────
     // We set up the promise NOW so we don't miss the event that fires when
@@ -1727,11 +1752,9 @@ export default function ChatWidget() {
 
   const handleChatWithUs = () => {
     console.log('[ChatWidget] Chat with us clicked — switching to Odoo livechat');
-    // Close AI chatbot panel and hide the entire widget
-    setOpen(false);
+    // Close options menu first
     setShowOptionsMenu(false);
-    setIsHiddenForOdoo(true);
-    // Send conversation context to Odoo and open the Odoo chat
+    // Try to open Odoo - it will hide the AI chatbot only if successful
     void sendContextToOdooAndOpenChat();
   };
 
@@ -2050,6 +2073,7 @@ export default function ChatWidget() {
             onDelayedFeedbackSubmit={handleDelayedFeedbackSubmit}
             sessionId={sessionId}
             pageUrl={currentUrl}
+            isOdooReady={isOdooReady}
           />
 
           {/* Data Collection UI (if needed) */}
@@ -2198,15 +2222,29 @@ export default function ChatWidget() {
                   <div className="space-y-1">
                     <button
                       onClick={handleChatWithUs}
-                      className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 rounded-xl transition-colors cursor-pointer"
+                      disabled={!isOdooReady}
+                      className={`w-full flex items-center gap-3 px-4 py-3 text-sm rounded-xl transition-colors ${
+                        !isOdooReady
+                          ? 'bg-gray-100 text-gray-400 cursor-not-allowed opacity-60'
+                          : 'text-gray-700 hover:bg-gray-50 cursor-pointer'
+                      }`}
                     >
-                      <div className="flex items-center justify-center w-10 h-10 rounded-full bg-orange-100">
-                        <svg className="h-5 w-5 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                        </svg>
+                      <div className={`flex items-center justify-center w-10 h-10 rounded-full ${
+                        !isOdooReady ? 'bg-gray-200' : 'bg-orange-100'
+                      }`}>
+                        {!isOdooReady ? (
+                          <svg className="h-5 w-5 text-gray-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                        ) : (
+                          <svg className="h-5 w-5 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                          </svg>
+                        )}
                       </div>
                       <div className="text-left">
-                        <p className="font-medium">Talk to Live Agent</p>
+                        <p className="font-medium">{!isOdooReady ? 'Loading...' : 'Talk to Live Agent'}</p>
                         <p className="text-xs text-gray-500">Talk to our support team</p>
                       </div>
                     </button>
