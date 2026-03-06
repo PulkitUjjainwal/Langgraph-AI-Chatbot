@@ -141,6 +141,11 @@ button:focus-visible {
   box-shadow: 0 0 0 2px var(--chat-accent);
 }
 
+/* All buttons should have pointer cursor */
+button {
+  cursor: pointer;
+}
+
 /* AWS-style tooltip notification */
 .tooltip-notification {
   animation: slideInRight 0.4s ease-out forwards;
@@ -426,6 +431,86 @@ button:focus-visible {
 .clarifying-suggestion:nth-child(2) { animation-delay: 0.15s; }
 .clarifying-suggestion:nth-child(3) { animation-delay: 0.2s; }
 .clarifying-suggestion:nth-child(4) { animation-delay: 0.25s; }
+
+/* Responsive Chat Widget Dimensions */
+:root, :host {
+  --chat-widget-width: 380px;
+  --chat-widget-height: 580px;
+  --chat-widget-max-width: 380px;
+  --chat-widget-max-height: 580px;
+  --chat-widget-bottom: 96px; /* bottom-24 = 24 * 4px */
+  --chat-widget-right: 20px; /* right-5 = 5 * 4px */
+}
+
+/* Media query for smaller screens (height <= 700px) */
+@media (max-height: 700px) {
+  :root, :host {
+    --chat-widget-height: calc(100vh - 140px);
+    --chat-widget-max-height: calc(100vh - 140px);
+    --chat-widget-bottom: 70px;
+  }
+}
+
+/* Media query for very small screens (height <= 600px) like 1280x600 */
+@media (max-height: 600px) {
+  :root, :host {
+    --chat-widget-height: calc(100vh - 100px);
+    --chat-widget-max-height: calc(100vh - 100px);
+    --chat-widget-bottom: 50px;
+  }
+}
+
+/* Media query for extra small height (height <= 500px) */
+@media (max-height: 500px) {
+  :root, :host {
+    --chat-widget-height: calc(100vh - 80px);
+    --chat-widget-max-height: calc(100vh - 80px);
+    --chat-widget-bottom: 40px;
+  }
+}
+
+/* Media query for mobile screens (width <= 640px) */
+@media (max-width: 640px) {
+  :root, :host {
+    --chat-widget-width: calc(100vw - 40px);
+    --chat-widget-max-width: calc(100vw - 40px);
+    --chat-widget-height: calc(100vh - 120px);
+    --chat-widget-max-height: calc(100vh - 120px);
+    --chat-widget-right: 20px;
+    --chat-widget-bottom: 60px;
+  }
+}
+
+/* Media query for very small mobile screens */
+@media (max-width: 400px) {
+  :root, :host {
+    --chat-widget-width: calc(100vw - 20px);
+    --chat-widget-max-width: calc(100vw - 20px);
+    --chat-widget-right: 10px;
+  }
+}
+
+/* Ensure chat messages area is properly scrollable on all screen sizes */
+@media (max-height: 600px) {
+  .chat-messages-container {
+    max-height: calc(var(--chat-widget-height) - 200px);
+  }
+}
+
+/* Responsive font sizes for very small screens */
+@media (max-width: 380px) {
+  .chat-bubble {
+    font-size: 13px;
+  }
+}
+
+/* Ensure buttons and interactive elements are touch-friendly on mobile */
+@media (max-width: 640px) {
+  button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
 
 @theme {
   --color-chat-primary: var(--chat-primary);

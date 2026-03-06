@@ -2710,7 +2710,7 @@ IMPORTANT
                     "message": restricted_message,
                     "actions": [
                         {"type": "schedule_demo", "label": "Schedule a Demo"},
-                        {"type": "chat_with_us", "label": "Chat"},
+                        {"type": "chat_with_us", "label": "Talk to Live Agent"},
                         {"type": "whatsapp", "label": "WhatsApp"},
                         {"type": "continue_chat", "label": "Continue Chat"}
                     ],
@@ -2758,7 +2758,7 @@ IMPORTANT
                             "message": support_message,
                             "actions": [
                                 {"type": "schedule_demo", "label": "Schedule a Demo"},
-                                {"type": "chat_with_us", "label": "Chat"},
+                                {"type": "chat_with_us", "label": "Talk to Live Agent"},
                                 {"type": "whatsapp", "label": "WhatsApp"},
                                 {"type": "continue_chat", "label": "Continue Chat"}
                             ],
@@ -2815,7 +2815,7 @@ IMPORTANT
                         "message": restricted_message,
                         "actions": [
                             {"type": "schedule_demo", "label": "Schedule a Demo"},
-                            {"type": "chat_with_us", "label": "Chat"},
+                            {"type": "chat_with_us", "label": "Talk to Live Agent"},
                             {"type": "whatsapp", "label": "WhatsApp"},
                             {"type": "continue_chat", "label": "Continue Chat"}
                         ],
@@ -3733,7 +3733,7 @@ async def chat_stream(request: ChatRequest):
                 "message": "I'd be happy to connect you with our team! Choose the option that works best for you:",
                 "actions": [
                     {"type": "schedule_demo", "label": "Schedule a Demo"},
-                    {"type": "chat_with_us", "label": "Chat"},
+                    {"type": "chat_with_us", "label": "Talk to Live Agent"},
                     {"type": "whatsapp", "label": "WhatsApp"},
                     {"type": "continue_chat", "label": "Continue Chat"}
                 ],

@@ -1,4 +1,4 @@
-import { useState, forwardRef, useImperativeHandle } from "react";
+import { useState, forwardRef, useImperativeHandle, useRef } from "react";
 
 type Props = {
   onSend: (text: string) => void;
@@ -10,6 +10,7 @@ type Props = {
 export type ChatFooterHandle = {
   setMessage: (text: string) => void;
   send: () => void;
+  focus: () => void;
 };
 
 export const ChatFooter = forwardRef<ChatFooterHandle, Props>(function ChatFooter(
@@ -17,6 +18,7 @@ export const ChatFooter = forwardRef<ChatFooterHandle, Props>(function ChatFoote
   ref
 ) {
   const [message, setMessage] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
 
   function handleSend() {
     if (isSending) return;
@@ -29,6 +31,7 @@ export const ChatFooter = forwardRef<ChatFooterHandle, Props>(function ChatFoote
   useImperativeHandle(ref, () => ({
     setMessage: (text: string) => setMessage(text),
     send: () => handleSend(),
+    focus: () => inputRef.current?.focus(),
   }), [message, isSending]);
 
   const isTop = position === "bottom";
@@ -40,7 +43,7 @@ export const ChatFooter = forwardRef<ChatFooterHandle, Props>(function ChatFoote
         {/* Options Menu Button */}
         <button
           onClick={onOpenOptionsMenu}
-          className="flex items-center justify-center h-10 w-10 rounded-full bg-gray-100 hover:bg-gray-200 transition-all duration-200"
+          className="flex items-center justify-center h-10 w-10 rounded-full bg-gray-100 hover:bg-gray-200 transition-all duration-200 cursor-pointer"
           aria-label="More options"
         >
           <svg className="h-5 w-5 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -50,6 +53,7 @@ export const ChatFooter = forwardRef<ChatFooterHandle, Props>(function ChatFoote
 
         <div className="flex-1 relative">
           <input
+            ref={inputRef}
             type="text"
             value={message}
             onChange={(e) => setMessage(e.target.value)}
@@ -67,7 +71,7 @@ export const ChatFooter = forwardRef<ChatFooterHandle, Props>(function ChatFoote
               text-gray-900 placeholder-gray-500
               focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500
               transition-all duration-200
-              ${isSending ? "opacity-60 cursor-not-allowed bg-gray-50" : "bg-white"}
+              ${isSending ? "opacity-60 cursor-not-allowed bg-gray-50" : "bg-white cursor-text"}
             `}
           />
 
@@ -82,6 +86,7 @@ export const ChatFooter = forwardRef<ChatFooterHandle, Props>(function ChatFoote
               bg-orange-500 text-white
               hover:bg-orange-600
               transition-all duration-200
+              cursor-pointer
               disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-orange-500
             `}
             aria-label="Send message"

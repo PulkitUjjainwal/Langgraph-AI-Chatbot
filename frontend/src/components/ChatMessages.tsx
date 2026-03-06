@@ -76,7 +76,7 @@ function CreditExhaustionCard({
                   onAction(action.type);
                 }
               }}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 transform hover:scale-105 shadow-sm ${buttonStyle}`}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 transform hover:scale-105 shadow-sm cursor-pointer ${buttonStyle}`}
             >
               {icon}
               <span>{action.label}</span>
@@ -654,7 +654,7 @@ export function ChatMessages({
   return (
     <div
       ref={containerRef}
-      className="flex-1 space-y-3 overflow-y-auto px-4 py-4 bg-white"
+      className="flex-1 space-y-3 overflow-y-auto px-4 py-4 bg-white cursor-default"
       style={{ scrollBehavior: "smooth" }}
     >
       {messages.map((msg, index) => {
@@ -696,7 +696,7 @@ export function ChatMessages({
               {/* Don't show message bubble for credit exhaustion (CreditExhaustionCard handles it) */}
               {!msg.isCreditExhausted && (
                 <div
-                  className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed overflow-hidden ${
+                  className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed overflow-hidden cursor-text ${
                     msg.role === "user"
                       ? "bg-gray-100 text-chat-text rounded-bl-md"
                       : "bg-gradient-to-br from-gray-700 to-gray-800 text-white rounded-br-md"
@@ -804,7 +804,7 @@ export function ChatMessages({
                           onActionClick?.(action.type, userQuery);
                         }
                       }}
-                      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 transform hover:scale-105 ${buttonStyle}`}
+                      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 transform hover:scale-105 cursor-pointer ${buttonStyle}`}
                     >
                       {icon}
                       <span>{action.label}</span>
@@ -825,7 +825,7 @@ export function ChatMessages({
                         bg-white border-2 border-orange-300 text-orange-700
                         hover:bg-orange-50 hover:border-orange-500
                         transition-all duration-200 transform hover:scale-105
-                        shadow-sm hover:shadow-md"
+                        shadow-sm hover:shadow-md cursor-pointer"
                     >
                       {suggestion}
                     </button>
@@ -860,7 +860,7 @@ export function ChatMessages({
                       <button
                         onClick={() => handleFeedback(msg.id, 'up', index)}
                         disabled={feedbackState[msg.id]?.submitting}
-                        className="feedback-btn group flex items-center gap-1 px-2 py-1 rounded-md transition-all duration-200 hover:bg-green-50 text-gray-400 hover:text-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="feedback-btn group flex items-center gap-1 px-2 py-1 rounded-md transition-all duration-200 hover:bg-green-50 text-gray-400 hover:text-green-600 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                         title="Yes, this was helpful"
                       >
                         {feedbackState[msg.id]?.submitting && feedbackState[msg.id]?.type === 'up' ? (

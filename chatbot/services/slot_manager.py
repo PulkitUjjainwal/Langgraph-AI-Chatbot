@@ -715,7 +715,7 @@ class SlotManager:
             "message": message,
             "actions": [
                 {"type": "schedule_demo", "label": "Schedule a Demo"},
-                {"type": "chat_with_us", "label": "Chat"},
+                {"type": "chat_with_us", "label": "Talk to Live Agent"},
                 {"type": "whatsapp", "label": "WhatsApp"},
                 {"type": "continue_chat", "label": "Continue Chat"}
             ]

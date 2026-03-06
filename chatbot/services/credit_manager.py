@@ -273,7 +273,7 @@ class CreditManager:
                 },
                 {
                     "type": "chat_with_us",
-                    "label": "Chat with Us",
+                    "label": "Talk to Live Agent",
                     "description": "Talk to our support team"
                 },
                 {

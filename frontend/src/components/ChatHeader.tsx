@@ -15,28 +15,28 @@ function MiLogo({ className = "" }: { className?: string }) {
 export function ChatHeader({ onClose }: Props) {
   return (
     <div
-      className="px-5 py-4"
+      className="px-5 py-4 cursor-pointer"
       style={{ background: 'linear-gradient(135deg, #374151 0%, #1f2937 100%)' }}
     >
       {/* Top row with logo, title and close button */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 cursor-pointer">
           {/* MI Logo */}
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white backdrop-blur-sm border border-white/20 overflow-hidden">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white backdrop-blur-sm border border-white/20 overflow-hidden cursor-pointer">
             <MiLogo className="h-8 w-8" />
           </div>
 
           {/* Title Section */}
-          <div className="flex flex-col">
-            <div className="flex items-center gap-2">
-              <span className="text-lg font-semibold text-white tracking-wide">
+          <div className="flex flex-col cursor-pointer">
+            <div className="flex items-center gap-2 cursor-pointer">
+              <span className="text-lg font-semibold text-white tracking-wide cursor-pointer">
                 ASK MI
               </span>
-              <span className="px-2 py-0.5 text-[10px] font-bold bg-orange-500 text-white rounded-full uppercase tracking-wider">
+              <span className="px-2 py-0.5 text-[10px] font-bold bg-orange-500 text-white rounded-full uppercase tracking-wider cursor-pointer">
                 AI
               </span>
             </div>
-            <span className="text-[11px] text-gray-300">
+            <span className="text-[11px] text-gray-300 cursor-pointer">
               Market Inside Assistant
             </span>
           </div>
@@ -45,7 +45,7 @@ export function ChatHeader({ onClose }: Props) {
         {/* Close Button */}
         <button
           onClick={onClose}
-          className="flex h-9 w-9 items-center justify-center rounded-xl text-gray-300 hover:bg-white/10 hover:text-white transition-all duration-200"
+          className="flex h-9 w-9 items-center justify-center rounded-xl text-gray-300 hover:bg-white/10 hover:text-white transition-all duration-200 cursor-pointer"
           aria-label="Close chat"
         >
           <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -55,7 +55,7 @@ export function ChatHeader({ onClose }: Props) {
       </div>
 
       {/* Description */}
-      <p className="text-xs text-gray-300 mt-3 leading-relaxed">
+      <p className="text-xs text-gray-300 mt-3 leading-relaxed cursor-pointer">
         Get instant answers about global trade data, buyers, suppliers, and market insights.
       </p>
     </div>
