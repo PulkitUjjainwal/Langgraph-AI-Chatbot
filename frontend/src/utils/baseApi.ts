@@ -1,4 +1,4 @@
-const BaseUrl = "http://localhost:8000/api/v1/";
+const BaseUrl = "http://localhost:8003/api/v1/";
 export async function baseApi(urlPart: string, init?: RequestInit): Promise<any> {
 
     // return {

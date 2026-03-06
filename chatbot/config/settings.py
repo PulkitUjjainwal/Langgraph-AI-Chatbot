@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     redis_ttl_days: int = Field(default=7, env="REDIS_TTL_DAYS", ge=1)
 
     # ============================================================================
-    # MYSQL CONFIGURATION (for FAQ system)
+    # MYSQL CONFIGURATION (for FAQ system - DEPRECATED, migrate to PostgreSQL)
     # ============================================================================
     mysql_host: str = Field(default="localhost", env="MYSQL_HOST")
     mysql_port: int = Field(default=3306, env="MYSQL_PORT", ge=1, le=65535)
@@ -106,6 +106,37 @@ class Settings(BaseSettings):
     mysql_database: str = Field(default="chatbot", env="MYSQL_DATABASE")
     mysql_pool_size: int = Field(default=5, env="MYSQL_POOL_SIZE", ge=1, le=20)
     faq_enabled: bool = Field(default=True, env="FAQ_ENABLED")
+    mysql_enabled: bool = Field(default=False, env="MYSQL_ENABLED")  # Disable after migration
+
+    # ============================================================================
+    # POSTGRESQL CONFIGURATION
+    # ============================================================================
+    postgres_host: str = Field(default="localhost", env="POSTGRES_HOST")
+    postgres_port: int = Field(default=5432, env="POSTGRES_PORT", ge=1, le=65535)
+    postgres_user: str = Field(default="postgres", env="POSTGRES_USER")
+    postgres_password: str = Field(default="", env="POSTGRES_PASSWORD")
+    postgres_database: str = Field(default="chatbot", env="POSTGRES_DATABASE")
+    postgres_pool_min_size: int = Field(default=5, env="POSTGRES_POOL_MIN_SIZE", ge=1, le=50)
+    postgres_pool_max_size: int = Field(default=20, env="POSTGRES_POOL_MAX_SIZE", ge=1, le=100)
+    postgres_enabled: bool = Field(default=True, env="POSTGRES_ENABLED")
+
+    # ============================================================================
+    # VECTOR SEARCH CONFIGURATION
+    # ============================================================================
+    # Vector dimension for embeddings (nomic-embed-text uses 768)
+    vector_dimension: int = Field(default=768, env="VECTOR_DIMENSION", ge=128, le=4096)
+
+    # Use pgvector for dynamic embeddings (FAISS still used for static KB)
+    use_pgvector: bool = Field(default=True, env="USE_PGVECTOR")
+
+    # pgvector index type: 'hnsw' (faster, more memory) or 'ivfflat' (slower, less memory)
+    pgvector_index_type: str = Field(default="hnsw", env="PGVECTOR_INDEX_TYPE")
+
+    # TTL for dynamic embeddings in hours (default 7 days = 168 hours)
+    embedding_ttl_hours: int = Field(default=168, env="EMBEDDING_TTL_HOURS", ge=1)
+
+    # Similarity threshold for vector search (0-1, higher = more strict)
+    similarity_threshold: float = Field(default=0.7, env="SIMILARITY_THRESHOLD", ge=0.0, le=1.0)
 
     # ============================================================================
     # JWT AUTHENTICATION

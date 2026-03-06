@@ -386,7 +386,7 @@ export default function ChatWidget() {
 
   // Get API base URL - memoized to avoid re-renders
   const apiBaseUrl = useMemo(() => {
-    let url = "http://localhost:8000";
+    let url = "http://localhost:8003";
     if (typeof window !== "undefined" && (window as any).CHATBOT_CONFIG) {
       url = (window as any).CHATBOT_CONFIG.apiUrl || url;
     }

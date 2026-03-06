@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Callback Country Dropdown Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .test-container {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .instructions {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .instructions h3 {
+            margin-top: 0;
+            color: #856404;
+        }
+        .instructions ol {
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+        .instructions li {
+            margin: 5px 0;
+        }
+        .success {
+            background: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+        }
+        .test-button {
+            display: inline-block;
+            padding: 12px 24px;
+            background: #ff6600;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .test-button:hover {
+            background: #ff8833;
+        }
+        .console-log {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            margin: 20px 0;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .log-entry {
+            margin: 3px 0;
+            padding: 2px 0;
+            border-bottom: 1px solid #333;
+        }
+        .version {
+            font-size: 12px;
+            color: #666;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="test-container">
+        <h1>🧪 Callback Country Dropdown Test</h1>
+        <p><strong>Build Time:</strong> <?php echo date('Y-m-d H:i:s'); ?></p>
+        <p><strong>Cache Buster:</strong> <span id="timestamp"></span></p>
+
+        <div class="instructions">
+            <h3>📋 Testing Instructions</h3>
+            <ol>
+                <li><strong>Open browser console</strong> (F12 → Console tab)</li>
+                <li>Click the "<strong>Test Callback UI</strong>" button below</li>
+                <li>Click the <strong>country dropdown</strong> (shows 🇺🇸 +1)</li>
+                <li>Select a different country (e.g., 🇮🇳 India)</li>
+                <li><strong>Watch this page and console logs</strong></li>
+            </ol>
+        </div>
+
+        <div class="instructions success">
+            <h3>✅ Success Criteria</h3>
+            <p><strong>When you select India, you should see:</strong></p>
+            <ul>
+                <li>Button changes to: <strong>🇮🇳 +91</strong></li>
+                <li>Placeholder changes to: <strong>98765 43210</strong></li>
+                <li>Example shows: <strong>India: +91 98765 43210</strong></li>
+                <li>Console shows: <strong>[Country Select] Changing to India</strong></li>
+                <li>Debug counter increases (e.g., "Update: 1", "Update: 2")</li>
+            </ul>
+        </div>
+
+        <button class="test-button" onclick="openCallback()">🚀 Test Callback UI</button>
+
+        <div class="console-log" id="logs">
+            <div class="log-entry">[System] Test page loaded</div>
+            <div class="log-entry">[System] Waiting for user to click test button...</div>
+        </div>
+
+        <p class="version">
+            <strong>Widget Version:</strong> <span id="widget-version">Loading...</span><br>
+            <strong>Last Modified:</strong> <span id="widget-modified">Checking...</span>
+        </p>
+    </div>
+
+    <script>
+        // Display timestamp for cache busting verification
+        document.getElementById('timestamp').textContent = Date.now();
+
+        // Intercept console.log to display on page
+        const logsDiv = document.getElementById('logs');
+        const originalLog = console.log;
+
+        console.log = function(...args) {
+            originalLog.apply(console, args);
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            logEntry.textContent = args.map(arg =>
+                typeof arg === 'object' ? JSON.stringify(arg) : arg
+            ).join(' ');
+            logsDiv.appendChild(logEntry);
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+        };
+
+        // Load widget with cache busting
+        const timestamp = Date.now();
+        const script = document.createElement('script');
+        script.type = 'module';
+        script.src = `/api/chat-widget.js?v=${timestamp}`;
+        script.onload = function() {
+            console.log('[System] Widget loaded successfully');
+            console.log('[System] Widget timestamp:', timestamp);
+            checkWidgetVersion();
+        };
+        script.onerror = function() {
+            console.log('[ERROR] Failed to load widget');
+        };
+        document.head.appendChild(script);
+
+        // Check widget file info
+        async function checkWidgetVersion() {
+            try {
+                const response = await fetch(`/api/chat-widget.js?v=${Date.now()}`, { method: 'HEAD' });
+                const lastModified = response.headers.get('last-modified');
+                const contentLength = response.headers.get('content-length');
+
+                document.getElementById('widget-version').textContent =
+                    `${Math.round(contentLength / 1024)} KB`;
+                document.getElementById('widget-modified').textContent =
+                    lastModified || 'Unknown';
+
+                console.log('[Widget Info] Size:', contentLength, 'bytes');
+                console.log('[Widget Info] Last-Modified:', lastModified);
+            } catch (err) {
+                console.log('[ERROR] Failed to check widget info:', err);
+            }
+        }
+
+        // Open callback UI
+        function openCallback() {
+            console.log('[Test] Opening callback UI...');
+
+            // Check if widget is loaded
+            if (!window.customElements.get('chatbot-widget')) {
+                console.log('[ERROR] Chatbot widget not loaded yet. Wait a moment and try again.');
+                alert('Widget is still loading. Please wait a moment and try again.');
+                return;
+            }
+
+            console.log('[Test] Widget is loaded, creating instance...');
+
+            // Create or get widget
+            let widget = document.querySelector('chatbot-widget');
+            if (!widget) {
+                widget = document.createElement('chatbot-widget');
+                widget.setAttribute('api-url', 'http://localhost:8003');
+                widget.setAttribute('session-id', 'test-' + Date.now());
+                document.body.appendChild(widget);
+                console.log('[Test] Created new widget instance');
+            }
+
+            // Wait for widget to initialize
+            setTimeout(() => {
+                console.log('[Test] Triggering callback UI...');
+
+                // Trigger voice mode then callback
+                const voiceButton = widget.shadowRoot?.querySelector('[title="Voice Chat"]');
+                if (voiceButton) {
+                    voiceButton.click();
+                    console.log('[Test] Clicked voice chat button');
+
+                    setTimeout(() => {
+                        const callButton = widget.shadowRoot?.querySelector('button:has([title="Call Team"])') ||
+                                         widget.shadowRoot?.querySelector('button:contains("Call Team")') ||
+                                         Array.from(widget.shadowRoot?.querySelectorAll('button') || [])
+                                             .find(b => b.textContent.includes('Call Team'));
+
+                        if (callButton) {
+                            callButton.click();
+                            console.log('[Test] Clicked Call Team button');
+                            console.log('[Test] ✅ Callback UI should now be visible!');
+                            console.log('[Test] 👉 Now click the country dropdown and select a country');
+                        } else {
+                            console.log('[Test] Call Team button not found, showing directly...');
+                            // Try to directly trigger callback
+                            const event = new CustomEvent('show-callback');
+                            widget.shadowRoot?.dispatchEvent(event);
+                        }
+                    }, 500);
+                } else {
+                    console.log('[ERROR] Voice chat button not found');
+                    console.log('[INFO] Available buttons:',
+                        Array.from(widget.shadowRoot?.querySelectorAll('button') || [])
+                            .map(b => b.textContent)
+                    );
+                }
+            }, 500);
+        }
+
+        // Log page load
+        console.log('[System] Test page initialized');
+        console.log('[System] Current time:', new Date().toISOString());
+    </script>
+</body>
+</html>

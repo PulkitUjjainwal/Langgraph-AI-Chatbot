@@ -1,0 +1,180 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector extension
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: chatbot-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chatbot_password_123}
+      POSTGRES_DB: chatbot
+      # Performance tuning
+      POSTGRES_SHARED_BUFFERS: 1GB
+      POSTGRES_WORK_MEM: 64MB
+      POSTGRES_MAINTENANCE_WORK_MEM: 256MB
+      POSTGRES_EFFECTIVE_CACHE_SIZE: 4GB
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./chatbot/database/postgres_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - chatbot-network
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=1GB"
+      - "-c"
+      - "work_mem=64MB"
+      - "-c"
+      - "maintenance_work_mem=256MB"
+      - "-c"
+      - "effective_cache_size=4GB"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "max_connections=100"
+
+  # Redis for caching and LangGraph checkpoints
+  redis:
+    image: redis:7-alpine
+    container_name: chatbot-redis
+    ports:
+      - "${REDIS_PORT:-6380}:6379"  # Using 6380 on host to avoid conflicts
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - chatbot-network
+
+  # Chatbot API (FastAPI)
+  chatbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chatbot-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # API Configuration
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+
+      # PostgreSQL Configuration
+      POSTGRES_ENABLED: "true"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chatbot_password_123}
+      POSTGRES_DATABASE: chatbot
+      POSTGRES_POOL_MIN_SIZE: 5
+      POSTGRES_POOL_MAX_SIZE: 20
+
+      # Vector Search Configuration
+      VECTOR_DIMENSION: 768
+      USE_PGVECTOR: "true"
+      PGVECTOR_INDEX_TYPE: hnsw
+      EMBEDDING_TTL_HOURS: 168
+      SIMILARITY_THRESHOLD: 0.7
+
+      # Redis Configuration
+      REDIS_HOST: redis
+      REDIS_PORT: 6379  # Internal port (inside container)
+      REDIS_DB: 0
+      REDIS_TTL_DAYS: 7
+
+      # LLM Configuration
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v3.1:671b-cloud}
+
+      # Site Configuration
+      SITE_ID: ${SITE_ID:-exportgenius}
+      SITE_NAME: ${SITE_NAME:-Export Genius}
+
+      # Performance
+      MAX_HISTORY_MESSAGES: 20
+      MAX_HISTORY_CHARS: 4000
+      ENABLE_PERFORMANCE_LOGGING: "true"
+
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-CHANGE_ME_IN_PRODUCTION_MIN_32_CHARS}
+
+      # API Tokens
+      EXPORT_GENIUS_BEARER_TOKEN: ${EXPORT_GENIUS_BEARER_TOKEN}
+      MARKETINSIDE_BEARER_TOKEN: ${MARKETINSIDE_BEARER_TOKEN}
+
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./chatbot:/app/chatbot
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - chatbot-network
+    command: uvicorn fastapi_chatbot:app --host 0.0.0.0 --port 8000
+
+  # pgAdmin (Optional - for database management)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: chatbot-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@chatbot.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - chatbot-network
+    profiles:
+      - admin  # Only start with: docker-compose --profile admin up
+
+  # Redis Commander (Optional - for Redis management)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: chatbot-redis-commander
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "${REDIS_COMMANDER_PORT:-8081}:8081"
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - chatbot-network
+    profiles:
+      - admin  # Only start with: docker-compose --profile admin up
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+
+networks:
+  chatbot-network:
+    driver: bridge

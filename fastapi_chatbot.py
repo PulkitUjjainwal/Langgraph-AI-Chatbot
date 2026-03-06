@@ -87,7 +87,8 @@ from langchain_ollama import ChatOllama
 # from openai_embeddings import get_openai_embeddings
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import ToolNode, tools_condition
+# Compatibility shim for older langgraph versions
+from chatbot.utils.langgraph_compat import ToolNode, tools_condition
 
 # Import modular components for prompt building
 from chatbot.services.agent.prompts import PromptBuilder, PromptConfig
