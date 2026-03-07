@@ -8,13 +8,15 @@ function CreditExhaustionCard({
   actions,
   onAction,
   onOpenWhatsAppDropdown,
-  isOdooReady
+  isOdooReady,
+  isOdooChecked
 }: {
   message: string;
   actions: ChatMessage["actions"];
   onAction: (type: string) => void;
   onOpenWhatsAppDropdown?: (anchorEl: HTMLElement, originalQuery?: string) => void;
   isOdooReady?: boolean;
+  isOdooChecked?: boolean;
 }) {
   return (
     <div className="credit-exhaustion-card bg-gradient-to-br from-orange-50 to-amber-50 rounded-2xl border border-orange-200 p-5 my-3 mx-2">
@@ -52,10 +54,15 @@ function CreditExhaustionCard({
               </svg>
             );
           } else if (action.type === "chat_with_us") {
-            const isChatDisabled = !isOdooReady;
+            // Determine button state based on check status and availability
+            const isStillChecking = !isOdooChecked;
+            const isUnavailable = isOdooChecked && !isOdooReady;
+            const isChatDisabled = isStillChecking || isUnavailable;
+
             buttonStyle = isChatDisabled
               ? "bg-gray-400 text-white cursor-not-allowed opacity-60"
               : "bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white";
+
             icon = isChatDisabled ? (
               <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
@@ -75,7 +82,15 @@ function CreditExhaustionCard({
             );
           }
 
-          const isDisabled = action.type === "chat_with_us" && !isOdooReady;
+          // Determine if button should be disabled and what text to show
+          const isStillChecking = action.type === "chat_with_us" && !isOdooChecked;
+          const isUnavailable = action.type === "chat_with_us" && isOdooChecked && !isOdooReady;
+          const isDisabled = action.type === "chat_with_us" && (isStillChecking || isUnavailable);
+
+          // Don't render the button if Odoo is confirmed unavailable
+          if (isUnavailable) {
+            return null; // Skip rendering this button
+          }
 
           return (
             <button
@@ -95,7 +110,7 @@ function CreditExhaustionCard({
               } shadow-sm ${buttonStyle}`}
             >
               {icon}
-              <span>{isDisabled ? "Loading..." : action.label}</span>
+              <span>{isStillChecking ? "Loading..." : action.label}</span>
             </button>
           );
         })}
@@ -164,6 +179,7 @@ type Props = {
   sessionId?: string;
   pageUrl?: string;
   isOdooReady?: boolean;
+  isOdooChecked?: boolean;
 };
 
 export type FeedbackSubmitData = {
@@ -325,7 +341,8 @@ export function ChatMessages({
   onDelayedFeedbackSubmit,
   sessionId = '',
   pageUrl = '',
-  isOdooReady = false
+  isOdooReady = false,
+  isOdooChecked = false
 }: Props) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -746,6 +763,7 @@ export function ChatMessages({
                   onAction={(type) => onActionClick?.(type)}
                   onOpenWhatsAppDropdown={(el) => onOpenWhatsAppDropdown?.(el)}
                   isOdooReady={isOdooReady}
+                  isOdooChecked={isOdooChecked}
                 />
               )}
 
@@ -782,7 +800,10 @@ export function ChatMessages({
                       </svg>
                     );
                   } else if (action.type === "hubspot_chat" || action.type === "chat_with_us") {
-                    const isChatDisabled = !isOdooReady;
+                    const isStillChecking = !isOdooChecked;
+                    const isUnavailable = isOdooChecked && !isOdooReady;
+                    const isChatDisabled = isStillChecking || isUnavailable;
+
                     buttonStyle = isChatDisabled
                       ? "bg-gray-400 text-white cursor-not-allowed opacity-60 shadow-md"
                       : "bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white shadow-md hover:shadow-lg";
@@ -820,7 +841,16 @@ export function ChatMessages({
                     );
                   }
 
-                  const isDisabled = (action.type === "chat_with_us" || action.type === "hubspot_chat") && !isOdooReady;
+                  // Check if this is a chat button and handle states
+                  const isChatButton = action.type === "chat_with_us" || action.type === "hubspot_chat";
+                  const isStillChecking = isChatButton && !isOdooChecked;
+                  const isUnavailable = isChatButton && isOdooChecked && !isOdooReady;
+                  const isDisabled = isChatButton && (isStillChecking || isUnavailable);
+
+                  // Don't render chat button if Odoo is confirmed unavailable
+                  if (isUnavailable) {
+                    return null;
+                  }
 
                   return (
                     <button
@@ -840,7 +870,7 @@ export function ChatMessages({
                       } ${buttonStyle}`}
                     >
                       {icon}
-                      <span>{isDisabled ? "Loading..." : action.label}</span>
+                      <span>{isStillChecking ? "Loading..." : action.label}</span>
                     </button>
                   );
                 })}

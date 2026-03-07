@@ -7,6 +7,30 @@ import WhatsAppDropdown from "./WhatsAppDropdown";
 // import VoiceChat from "./VoiceChat"; // Commented out - will add back later
 import whatsappQr from  "../../public/whatsapp-qr.avif"
 
+// Extend Window interface for Odoo-related properties
+declare global {
+  interface Window {
+    __odoo_available__?: {
+      can_load_livechat: boolean;
+      checked: boolean;
+      serverUrl?: string;
+    };
+    __odoo_session__?: {
+      guest_token?: string;
+      channel_id?: number;
+    };
+    odoo?: {
+      __session_info__?: {
+        livechatData?: {
+          can_load_livechat: boolean;
+          serverUrl?: string;
+          options?: any;
+        };
+      };
+    };
+  }
+}
+
 export type ChatMessage = {
   id: string;
   role: "assistant" | "user";
@@ -158,8 +182,27 @@ export default function ChatWidget() {
   const [_creditExhausted, setCreditExhausted] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
 
-  // Odoo live chat ready state (10-second loading delay)
-  const [isOdooReady, setIsOdooReady] = useState(false);
+  // Odoo live chat availability states
+  const [isOdooReady, setIsOdooReady] = useState(() => {
+    // Check if Odoo availability is already cached from DelayedLiveChat
+    if (typeof window !== 'undefined') {
+      const cached = (window as any).__odoo_available__;
+      if (cached?.checked) {
+        console.log('[ODOO] Initial state from cache:', cached.can_load_livechat ? 'AVAILABLE' : 'UNAVAILABLE');
+        return cached.can_load_livechat === true;
+      }
+    }
+    return false;
+  });
+
+  const [isOdooChecked, setIsOdooChecked] = useState(() => {
+    // Check if we already know the Odoo status
+    if (typeof window !== 'undefined') {
+      const cached = (window as any).__odoo_available__;
+      return cached?.checked || false;
+    }
+    return false;
+  });
 
   // Refs
   const currentUrlRef = useRef<string>("");
@@ -263,19 +306,53 @@ export default function ChatWidget() {
     }
   }, [open]);
 
-  // Odoo live chat loading delay (10 seconds)
+  // Odoo live chat availability check
   useEffect(() => {
     if (open) {
-      // Reset to not ready when opening
-      setIsOdooReady(false);
+      // Check if Odoo availability has already been determined
+      const checkOdooAvailability = () => {
+        const odooAvailable = (window as any).__odoo_available__;
+        if (odooAvailable?.checked) {
+          const canLoad = odooAvailable.can_load_livechat === true;
+          setIsOdooReady(canLoad);
+          setIsOdooChecked(true);
+          console.log('[ODOO] Availability from cache:', canLoad ? 'AVAILABLE' : 'UNAVAILABLE');
+          return true;
+        }
+        return false;
+      };
 
-      // Set ready after 10 seconds to allow Odoo to fully load
-      const timer = setTimeout(() => {
-        setIsOdooReady(true);
-        console.log('[ODOO] Live chat ready - button enabled');
-      }, 10000);
+      // Try immediate check first - if already cached, we're done!
+      if (!checkOdooAvailability()) {
+        // Data not cached yet, need to wait for it
+        console.log('[ODOO] Waiting for availability check...');
 
-      return () => clearTimeout(timer);
+        // Listen for availability check event
+        const handleAvailabilityChecked = (event: Event) => {
+          const customEvent = event as CustomEvent<{ can_load_livechat: boolean }>;
+          const canLoad = customEvent.detail?.can_load_livechat === true;
+          console.log('[ODOO] ✓ Event received! Setting states:', { isOdooReady: canLoad, isOdooChecked: true });
+          setIsOdooReady(canLoad);
+          setIsOdooChecked(true);
+          console.log('[ODOO] Button state:', canLoad ? 'ENABLED ✅' : 'HIDDEN ❌ (unavailable)');
+        };
+
+        window.addEventListener('odoo:availability-checked', handleAvailabilityChecked);
+
+        // Fallback: Set ready after 15 seconds if no event received (legacy behavior)
+        const fallbackTimer = setTimeout(() => {
+          if (!(window as any).__odoo_available__?.checked) {
+            console.warn('[ODOO] Availability check timeout - assuming unavailable');
+            setIsOdooReady(false);
+            setIsOdooChecked(true);
+          }
+        }, 15000);
+
+        return () => {
+          window.removeEventListener('odoo:availability-checked', handleAvailabilityChecked);
+          clearTimeout(fallbackTimer);
+        };
+      }
     }
   }, [open]);
 
@@ -746,6 +823,14 @@ export default function ChatWidget() {
   // Send conversation context to Odoo and open Odoo chat
   const sendContextToOdooAndOpenChat = async () => {
     console.log("[ODOO] Chat with us clicked — session_id:", sessionIdRef.current);
+
+    // Check if Odoo is available before attempting to open
+    const odooAvailable = (window as any).__odoo_available__;
+    if (odooAvailable?.checked && !odooAvailable.can_load_livechat) {
+      console.error("[ODOO] Odoo livechat is not available (can_load_livechat=false)");
+      alert("Live chat is currently unavailable. Please try WhatsApp or email support instead.");
+      return;
+    }
 
     const apiOrigin = new URL(import.meta.env.VITE_API_URL || "https://chatbot.exportgenius.in").origin;
 
@@ -2074,6 +2159,7 @@ export default function ChatWidget() {
             sessionId={sessionId}
             pageUrl={currentUrl}
             isOdooReady={isOdooReady}
+            isOdooChecked={isOdooChecked}
           />
 
           {/* Data Collection UI (if needed) */}
@@ -2220,34 +2306,37 @@ export default function ChatWidget() {
 
                   {/* Menu Items */}
                   <div className="space-y-1">
-                    <button
-                      onClick={handleChatWithUs}
-                      disabled={!isOdooReady}
-                      className={`w-full flex items-center gap-3 px-4 py-3 text-sm rounded-xl transition-colors ${
-                        !isOdooReady
-                          ? 'bg-gray-100 text-gray-400 cursor-not-allowed opacity-60'
-                          : 'text-gray-700 hover:bg-gray-50 cursor-pointer'
-                      }`}
-                    >
-                      <div className={`flex items-center justify-center w-10 h-10 rounded-full ${
-                        !isOdooReady ? 'bg-gray-200' : 'bg-orange-100'
-                      }`}>
-                        {!isOdooReady ? (
-                          <svg className="h-5 w-5 text-gray-400 animate-spin" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                          </svg>
-                        ) : (
-                          <svg className="h-5 w-5 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                          </svg>
-                        )}
-                      </div>
-                      <div className="text-left">
-                        <p className="font-medium">{!isOdooReady ? 'Loading...' : 'Talk to Live Agent'}</p>
-                        <p className="text-xs text-gray-500">Talk to our support team</p>
-                      </div>
-                    </button>
+                    {/* Only show Live Agent button if Odoo is available OR still checking */}
+                    {(!isOdooChecked || isOdooReady) && (
+                      <button
+                        onClick={handleChatWithUs}
+                        disabled={!isOdooReady}
+                        className={`w-full flex items-center gap-3 px-4 py-3 text-sm rounded-xl transition-colors ${
+                          !isOdooReady
+                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed opacity-60'
+                            : 'text-gray-700 hover:bg-gray-50 cursor-pointer'
+                        }`}
+                      >
+                        <div className={`flex items-center justify-center w-10 h-10 rounded-full ${
+                          !isOdooReady ? 'bg-gray-200' : 'bg-orange-100'
+                        }`}>
+                          {!isOdooReady ? (
+                            <svg className="h-5 w-5 text-gray-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                          ) : (
+                            <svg className="h-5 w-5 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                            </svg>
+                          )}
+                        </div>
+                        <div className="text-left">
+                          <p className="font-medium">{!isOdooReady ? 'Checking availability...' : 'Talk to Live Agent'}</p>
+                          <p className="text-xs text-gray-500">Talk to our support team</p>
+                        </div>
+                      </button>
+                    )}
 
                     <button
                       onClick={handleCallUs}
