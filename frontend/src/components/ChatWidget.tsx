@@ -10,11 +10,6 @@ import whatsappQr from  "../../public/whatsapp-qr.avif"
 // Extend Window interface for Odoo-related properties
 declare global {
   interface Window {
-    __odoo_available__?: {
-      can_load_livechat: boolean;
-      checked: boolean;
-      serverUrl?: string;
-    };
     __odoo_session__?: {
       guest_token?: string;
       channel_id?: number;
@@ -182,28 +177,6 @@ export default function ChatWidget() {
   const [_creditExhausted, setCreditExhausted] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
 
-  // Odoo live chat availability states
-  const [isOdooReady, setIsOdooReady] = useState(() => {
-    // Check if Odoo availability is already cached from DelayedLiveChat
-    if (typeof window !== 'undefined') {
-      const cached = (window as any).__odoo_available__;
-      if (cached?.checked) {
-        console.log('[ODOO] Initial state from cache:', cached.can_load_livechat ? 'AVAILABLE' : 'UNAVAILABLE');
-        return cached.can_load_livechat === true;
-      }
-    }
-    return false;
-  });
-
-  const [isOdooChecked, setIsOdooChecked] = useState(() => {
-    // Check if we already know the Odoo status
-    if (typeof window !== 'undefined') {
-      const cached = (window as any).__odoo_available__;
-      return cached?.checked || false;
-    }
-    return false;
-  });
-
   // Refs
   const currentUrlRef = useRef<string>("");
   const sessionIdRef = useRef<string>(sessionId);
@@ -269,6 +242,259 @@ export default function ChatWidget() {
   };
 }, []);
 
+  // Load Odoo Live Chat scripts immediately with chatbot
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    // Check if Odoo scripts already loaded
+    const odooScriptsLoaded = document.querySelector('script[src*="odoo.com/im_livechat"]');
+    if (odooScriptsLoaded) {
+      console.log('[Odoo] Scripts already loaded');
+      return;
+    }
+
+    console.log('[Odoo] Loading scripts with chatbot...');
+
+    // Session interceptor - MUST load BEFORE Odoo scripts
+    const interceptorScript = document.createElement('script');
+    interceptorScript.id = 'odoo-session-interceptor';
+    interceptorScript.textContent = `
+      (function(){
+        // Hide Odoo livechat initially until user requests it
+        (function(){
+          var hs = document.createElement('style');
+          hs.id = 'odoo-init-hide';
+          hs.textContent = '.o-livechat-root, o-livechat-root, #im_livechat_container { display: none !important; }';
+          document.head.appendChild(hs);
+          console.log('[Odoo] Initial hide style injected');
+        })();
+
+        // Extract guest_token from Odoo get_session response
+        function extractGuestToken(result){
+          var sd = result.store_data || {};
+          if(sd.Store && sd.Store.guest_token) return sd.Store.guest_token;
+          var guestBlock = sd['res.guest'];
+          if(guestBlock){
+            var records = Array.isArray(guestBlock) ? guestBlock : Object.values(guestBlock);
+            for(var i=0;i<records.length;i++){
+              var r = records[i];
+              if(r && (r.access_token || r.guest_token))
+                return r.access_token || r.guest_token;
+            }
+          }
+          if(result.guest_token) return result.guest_token;
+          for(var key in sd){
+            var block = sd[key];
+            if(!block || typeof block !== 'object') continue;
+            var items = Array.isArray(block) ? block : Object.values(block);
+            for(var j=0;j<items.length;j++){
+              var item = items[j];
+              if(item && typeof item === 'object' && (item.guest_token || item.access_token)){
+                return item.guest_token || item.access_token;
+              }
+            }
+          }
+          return null;
+        }
+
+        function extractChannelId(result){
+          if(typeof result.channel_id === 'number' && result.channel_id > 0) return result.channel_id;
+          var sd = result.store_data || {};
+          if(sd.Store && typeof sd.Store.channel_id === 'number' && sd.Store.channel_id > 0)
+            return sd.Store.channel_id;
+          var dc = sd['discuss.channel'];
+          if(dc){
+            var recs = Array.isArray(dc) ? dc : Object.values(dc);
+            for(var i=0;i<recs.length;i++){
+              var r = recs[i];
+              if(r && r.id && typeof r.id === 'number' && r.id > 0) return r.id;
+            }
+          }
+          return null;
+        }
+
+        function handleOdooSession(json){
+          try{
+            var result = json && json.result;
+            if(!result) return;
+            var guestToken = extractGuestToken(result);
+            var channelId = extractChannelId(result);
+            console.log('[Odoo] Session extracted — channelId:', channelId, 'guestToken found:', !!guestToken);
+            if(!guestToken || typeof channelId !== 'number' || channelId <= 0){
+              console.warn('[Odoo] Invalid session data');
+              return;
+            }
+            if(window.__odoo_session__ && window.__odoo_session__.guest_token) return;
+            console.log('[Odoo] Session captured — channel_id:', channelId);
+            window.__odoo_session__ = { guest_token: guestToken, channel_id: channelId };
+            window.dispatchEvent(new CustomEvent('odoo:session-ready', {
+              detail: { guest_token: guestToken, channel_id: channelId }
+            }));
+          }catch(err){
+            console.warn('[Odoo] handleOdooSession error:', err);
+          }
+        }
+
+        // Intercept fetch
+        var _origFetch = window.fetch.bind(window);
+        window.fetch = function(input, init){
+          var requestUrl = '';
+          try{ requestUrl = (typeof input === 'string') ? input : (input && (input.url || String(input))) || ''; }catch(e){}
+          return _origFetch(input, init).then(function(resp){
+            try{
+              if(requestUrl.indexOf('/im_livechat/cors/get_session') !== -1){
+                resp.clone().json().then(handleOdooSession).catch(function(){});
+              }
+            }catch(e){}
+            return resp;
+          });
+        };
+
+        // Intercept XHR
+        (function(){
+          var NativeXHR = window.XMLHttpRequest;
+          function PatchedXHR(){
+            var xhr = new NativeXHR();
+            xhr.addEventListener('readystatechange', function(){
+              try{
+                if(xhr.readyState === 4 && xhr.responseURL){
+                  if(xhr.responseURL.indexOf('/im_livechat/cors/get_session') !== -1){
+                    handleOdooSession(JSON.parse(xhr.responseText));
+                  }
+                }
+              }catch(e){}
+            }, false);
+            return xhr;
+          }
+          PatchedXHR.prototype = NativeXHR.prototype;
+          window.XMLHttpRequest = PatchedXHR;
+        })();
+
+        // Handle openOdooChat event
+        window.addEventListener('openOdooChat', function(){
+          console.log('[Odoo] openOdooChat event received');
+
+          // Remove hide style first
+          var hs = document.getElementById('odoo-init-hide');
+          if(hs){
+            hs.remove();
+            console.log('[Odoo] Hide style removed');
+          }
+
+          // Function to find and click Odoo button
+          function tryClickOdoo(){
+            // Try shadow DOM first (Odoo 17)
+            var host = document.querySelector('.o-livechat-root');
+            if(host && host.shadowRoot){
+              console.log('[Odoo] Found shadow root');
+              var shadowSelectors = [
+                '.o-mail-ChatHub-bubbleBtn.btn.shadow',
+                '.o-mail-ChatHub-bubbleBtn:not(.o-mail-ChatHub-optionsBtn)',
+                'button[part="openChatButton"]',
+                '.o-livechat-LivechatButton',
+                'button:not(.o-mail-ChatHub-optionsBtn):not(.o-mail-ChatBubble-close)'
+              ];
+
+              for(var i=0;i<shadowSelectors.length;i++){
+                var btn = host.shadowRoot.querySelector(shadowSelectors[i]);
+                if(btn){
+                  console.log('[Odoo] Clicking shadow button:', shadowSelectors[i]);
+                  btn.click();
+                  return true;
+                }
+              }
+
+              // Fallback: click any button in shadow root
+              var anyBtn = host.shadowRoot.querySelector('button');
+              if(anyBtn){
+                console.log('[Odoo] Clicking fallback shadow button');
+                anyBtn.click();
+                return true;
+              }
+            }
+
+            // Try regular DOM selectors
+            var selectors = [
+              '.o-livechat-LivechatButton',
+              'button[part="openChatButton"]',
+              '.o_livechat_button',
+              '.o_im_livechat_button',
+              '#o_livechat_button',
+              'button.o-mail-LivechatButton'
+            ];
+
+            for(var j=0;j<selectors.length;j++){
+              var el = document.querySelector(selectors[j]);
+              if(el){
+                console.log('[Odoo] Clicking DOM button:', selectors[j]);
+                el.click();
+                return true;
+              }
+            }
+
+            // Last resort: scan all shadow roots
+            var all = document.querySelectorAll('*');
+            for(var k=0;k<all.length;k++){
+              var root = all[k].shadowRoot;
+              if(!root) continue;
+              var shadowBtn = root.querySelector('button');
+              if(shadowBtn && shadowBtn.textContent && shadowBtn.textContent.length < 50){
+                console.log('[Odoo] Clicking button in shadow root of:', all[k].tagName);
+                shadowBtn.click();
+                return true;
+              }
+            }
+
+            return false;
+          }
+
+          // Try immediately
+          if(tryClickOdoo()){
+            console.log('[Odoo] ✓ Button clicked successfully');
+            return;
+          }
+
+          // If not found, wait a bit for Odoo to render
+          console.log('[Odoo] Button not found, waiting for Odoo to render...');
+          var attempts = 0;
+          var maxAttempts = 10;
+          var retryInterval = setInterval(function(){
+            attempts++;
+            if(tryClickOdoo()){
+              console.log('[Odoo] ✓ Button clicked after', attempts, 'attempts');
+              clearInterval(retryInterval);
+              return;
+            }
+            if(attempts >= maxAttempts){
+              console.warn('[Odoo] Button not found after', maxAttempts, 'attempts');
+              clearInterval(retryInterval);
+            }
+          }, 300);
+        });
+
+        console.log('[Odoo] Session interceptor installed');
+      })();
+    `;
+    document.head.appendChild(interceptorScript);
+
+    // Load Odoo assets_embed.js
+    const embedScript = document.createElement('script');
+    embedScript.src = 'https://export-genius-pvt.odoo.com/im_livechat/assets_embed.js';
+    embedScript.async = true;
+    embedScript.onload = () => console.log('[Odoo] assets_embed.js loaded');
+    embedScript.onerror = () => console.error('[Odoo] Failed to load assets_embed.js');
+    document.head.appendChild(embedScript);
+
+    // Load Odoo loader
+    const loaderScript = document.createElement('script');
+    loaderScript.src = 'https://export-genius-pvt.odoo.com/im_livechat/loader/1';
+    loaderScript.async = true;
+    loaderScript.onload = () => console.log('[Odoo] loader/1 loaded');
+    loaderScript.onerror = () => console.error('[Odoo] Failed to load loader/1');
+    document.head.appendChild(loaderScript);
+
+    console.log('[Odoo] Scripts injected and loading...');
+  }, []); // Run once on mount
 
   // Show initial welcome message
   useEffect(() => {
@@ -303,56 +529,6 @@ export default function ChatWidget() {
       setTimeout(() => {
         footerRef.current?.focus();
       }, 100);
-    }
-  }, [open]);
-
-  // Odoo live chat availability check
-  useEffect(() => {
-    if (open) {
-      // Check if Odoo availability has already been determined
-      const checkOdooAvailability = () => {
-        const odooAvailable = (window as any).__odoo_available__;
-        if (odooAvailable?.checked) {
-          const canLoad = odooAvailable.can_load_livechat === true;
-          setIsOdooReady(canLoad);
-          setIsOdooChecked(true);
-          console.log('[ODOO] Availability from cache:', canLoad ? 'AVAILABLE' : 'UNAVAILABLE');
-          return true;
-        }
-        return false;
-      };
-
-      // Try immediate check first - if already cached, we're done!
-      if (!checkOdooAvailability()) {
-        // Data not cached yet, need to wait for it
-        console.log('[ODOO] Waiting for availability check...');
-
-        // Listen for availability check event
-        const handleAvailabilityChecked = (event: Event) => {
-          const customEvent = event as CustomEvent<{ can_load_livechat: boolean }>;
-          const canLoad = customEvent.detail?.can_load_livechat === true;
-          console.log('[ODOO] ✓ Event received! Setting states:', { isOdooReady: canLoad, isOdooChecked: true });
-          setIsOdooReady(canLoad);
-          setIsOdooChecked(true);
-          console.log('[ODOO] Button state:', canLoad ? 'ENABLED ✅' : 'HIDDEN ❌ (unavailable)');
-        };
-
-        window.addEventListener('odoo:availability-checked', handleAvailabilityChecked);
-
-        // Fallback: Set ready after 15 seconds if no event received (legacy behavior)
-        const fallbackTimer = setTimeout(() => {
-          if (!(window as any).__odoo_available__?.checked) {
-            console.warn('[ODOO] Availability check timeout - assuming unavailable');
-            setIsOdooReady(false);
-            setIsOdooChecked(true);
-          }
-        }, 15000);
-
-        return () => {
-          window.removeEventListener('odoo:availability-checked', handleAvailabilityChecked);
-          clearTimeout(fallbackTimer);
-        };
-      }
     }
   }, [open]);
 
@@ -824,90 +1000,30 @@ export default function ChatWidget() {
   const sendContextToOdooAndOpenChat = async () => {
     console.log("[ODOO] Chat with us clicked — session_id:", sessionIdRef.current);
 
-    // Check if Odoo is available before attempting to open
-    const odooAvailable = (window as any).__odoo_available__;
-    if (odooAvailable?.checked && !odooAvailable.can_load_livechat) {
-      console.error("[ODOO] Odoo livechat is not available (can_load_livechat=false)");
-      alert("Live chat is currently unavailable. Please try WhatsApp or email support instead.");
-      return;
-    }
-
     const apiOrigin = new URL(import.meta.env.VITE_API_URL || "https://chatbot.exportgenius.in").origin;
 
-    // ── Step 1: Click the Odoo chatbox button ────────────────────────────────
-    // The button lives inside the shadow DOM of <o-livechat-root>.
-    // We MUST open it this way so Odoo calls get_session for THIS channel —
-    // if we call get_session ourselves we'd get a different channel/agent.
+    // ── Step 1: Trigger Odoo chat open event ──────────────────────────────────
+    // The session interceptor (loaded with chatbot) handles finding and clicking the button
     const openOdoo = (): boolean => {
-      console.log("[ODOO] Searching for Odoo live chat widget...");
-      // Remove the initial CSS hide so Odoo is visible before we click its button
-      const _hideEl = document.getElementById('odoo-init-hide');
-      if (_hideEl) { _hideEl.remove(); console.log('[ODOO] initial hide style removed'); }
+      console.log("[ODOO] Dispatching openOdooChat event...");
+      window.dispatchEvent(new CustomEvent('openOdooChat'));
 
-      // Odoo 17 renders a <div class="o-livechat-root"> with a shadow root.
-      // NOTE: selector must use "." prefix (class), NOT a bare tag name.
-      const host = document.querySelector(".o-livechat-root") as (HTMLElement & { shadowRoot?: ShadowRoot }) | null;
-      if (host?.shadowRoot) {
-        // Priority order: bubble button (avatar) → openChatButton part → LivechatButton class → any non-utility button
-        const btn = host.shadowRoot.querySelector(
-          ".o-mail-ChatHub-bubbleBtn.btn.shadow, " +
-          ".o-mail-ChatHub-bubbleBtn:not(.o-mail-ChatHub-optionsBtn), " +
-          "button[part='openChatButton'], " +
-          ".o-livechat-LivechatButton, " +
-          "button:not(.o-mail-ChatHub-optionsBtn):not(.o-mail-ChatBubble-close)"
-        ) as HTMLElement | null;
-        if (btn) {
-          console.log("[ODOO] Shadow button found, clicking:", btn.getAttribute("part") || btn.className);
-          btn.click();
-          return true;
+      // Give Odoo a moment to open, then check if it exists
+      setTimeout(() => {
+        const odooWidget = document.querySelector('.o-livechat-root');
+        if (!odooWidget) {
+          console.warn("[ODOO] Odoo widget not found - may not be loaded yet");
         }
-        // Shadow root exists but no usable button found — click host as fallback
-        host.click();
-        console.log("[ODOO] Clicked .o-livechat-root host (no inner button matched)");
-        return true;
-      }
+      }, 500);
 
-      // Fallback: regular DOM (older Odoo versions or non-shadow rendering)
-      for (const sel of [
-        ".o-livechat-LivechatButton",
-        "button[part='openChatButton']",
-        ".o_livechat_button",
-        ".o_im_livechat_button",
-        "#o_livechat_button"
-      ]) {
-        const btn = document.querySelector(sel) as HTMLElement | null;
-        if (btn) { console.log("[ODOO] Clicked DOM button:", sel); btn.click(); return true; }
-      }
-
-      // Last resort: scan all shadow roots
-      const all = document.querySelectorAll("*");
-      for (let j = 0; j < all.length; j++) {
-        const root = (all[j] as HTMLElement & { shadowRoot?: ShadowRoot }).shadowRoot;
-        if (!root) continue;
-        const anyBtn = root.querySelector(
-          ".o-mail-ChatHub-bubbleBtn:not(.o-mail-ChatHub-optionsBtn), button[part='openChatButton'], .o-livechat-LivechatButton"
-        ) as HTMLElement | null;
-        if (anyBtn) {
-          console.log("[ODOO] Clicked shadow button in:", all[j].tagName, anyBtn.className);
-          anyBtn.click();
-          return true;
-        }
-      }
-
-      console.warn("[ODOO] Odoo livechat button not found in DOM or shadowDOM");
-      return false;
+      return true; // Assume success - event listener will handle it
     };
 
-    const clicked = openOdoo();
-    if (!clicked) {
-      // Odoo widget not found - show error and keep AI chatbot open
-      console.error("[ODOO] Odoo livechat widget not found on this page");
-      alert("Live chat is not available at the moment. Please try WhatsApp or email support instead.");
-      return;
-    }
+    // Trigger Odoo to open
+    openOdoo();
 
-    // Odoo opened successfully - now hide the AI chatbot
-    console.log("[ODOO] Odoo opened successfully, hiding AI chatbot");
+    // Hide the AI chatbot
+    console.log("[ODOO] Odoo opening, hiding AI chatbot");
     setOpen(false);
     setIsHiddenForOdoo(true);
 
@@ -2158,8 +2274,6 @@ export default function ChatWidget() {
             onDelayedFeedbackSubmit={handleDelayedFeedbackSubmit}
             sessionId={sessionId}
             pageUrl={currentUrl}
-            isOdooReady={isOdooReady}
-            isOdooChecked={isOdooChecked}
           />
 
           {/* Data Collection UI (if needed) */}
@@ -2306,37 +2420,20 @@ export default function ChatWidget() {
 
                   {/* Menu Items */}
                   <div className="space-y-1">
-                    {/* Only show Live Agent button if Odoo is available OR still checking */}
-                    {(!isOdooChecked || isOdooReady) && (
-                      <button
-                        onClick={handleChatWithUs}
-                        disabled={!isOdooReady}
-                        className={`w-full flex items-center gap-3 px-4 py-3 text-sm rounded-xl transition-colors ${
-                          !isOdooReady
-                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed opacity-60'
-                            : 'text-gray-700 hover:bg-gray-50 cursor-pointer'
-                        }`}
-                      >
-                        <div className={`flex items-center justify-center w-10 h-10 rounded-full ${
-                          !isOdooReady ? 'bg-gray-200' : 'bg-orange-100'
-                        }`}>
-                          {!isOdooReady ? (
-                            <svg className="h-5 w-5 text-gray-400 animate-spin" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
-                          ) : (
-                            <svg className="h-5 w-5 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                            </svg>
-                          )}
-                        </div>
-                        <div className="text-left">
-                          <p className="font-medium">{!isOdooReady ? 'Checking availability...' : 'Talk to Live Agent'}</p>
-                          <p className="text-xs text-gray-500">Talk to our support team</p>
-                        </div>
-                      </button>
-                    )}
+                    <button
+                      onClick={handleChatWithUs}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 rounded-xl transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center justify-center w-10 h-10 rounded-full bg-orange-100">
+                        <svg className="h-5 w-5 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                        </svg>
+                      </div>
+                      <div className="text-left">
+                        <p className="font-medium">Talk to Live Agent</p>
+                        <p className="text-xs text-gray-500">Talk to our support team</p>
+                      </div>
+                    </button>
 
                     <button
                       onClick={handleCallUs}
