@@ -5074,6 +5074,142 @@ async def get_conversation_by_session(session_id: str):
         raise HTTPException(status_code=500, detail="Failed to get conversation")
 
 
+@router.get("/conversation/list/sessions")
+async def get_conversations_list(
+    limit: int = 20,
+    offset: int = 0,
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    has_feedback: Optional[bool] = None,
+    lead_captured: Optional[bool] = None,
+    session_status: Optional[str] = None,
+    sort_by: str = "started_at",
+    sort_order: str = "desc",
+    current_user: dict = Depends(require_auth)
+):
+    """
+    Get paginated list of all conversation sessions with advanced filters.
+
+    Requires authentication. Returns sessions with metadata for analytics dashboard.
+    """
+    try:
+        history_service = await get_conversation_history_service()
+        await history_service.initialize()
+
+        result = await history_service.get_sessions_list(
+            limit=min(limit, 100),  # Cap at 100
+            offset=offset,
+            search=search,
+            start_date=start_date,
+            end_date=end_date,
+            has_feedback=has_feedback,
+            lead_captured=lead_captured,
+            session_status=session_status,
+            sort_by=sort_by,
+            sort_order=sort_order
+        )
+
+        if "error" in result:
+            raise HTTPException(status_code=503, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ConversationHistory] List sessions error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get conversations list")
+
+
+@router.get("/conversation/analytics/timeseries")
+async def get_conversation_timeseries(
+    days: int = 30,
+    current_user: dict = Depends(require_auth)
+):
+    """
+    Get time series data for conversation analytics.
+
+    Returns daily breakdown of sessions, messages, feedback, and leads.
+    Requires authentication.
+    """
+    try:
+        history_service = await get_conversation_history_service()
+        await history_service.initialize()
+
+        result = await history_service.get_time_series_data(days=days)
+
+        if "error" in result:
+            raise HTTPException(status_code=503, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ConversationHistory] Time series error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get time series data")
+
+
+@router.get("/conversation/analytics/engagement")
+async def get_conversation_engagement(
+    days: int = 30,
+    current_user: dict = Depends(require_auth)
+):
+    """
+    Get user engagement metrics and breakdown by device, browser, location.
+
+    Returns comprehensive engagement analytics for the specified period.
+    Requires authentication.
+    """
+    try:
+        history_service = await get_conversation_history_service()
+        await history_service.initialize()
+
+        result = await history_service.get_user_engagement_metrics(days=days)
+
+        if "error" in result:
+            raise HTTPException(status_code=503, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ConversationHistory] Engagement metrics error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get engagement metrics")
+
+
+@router.get("/conversation/analytics/queries")
+async def get_popular_queries(
+    days: int = 30,
+    limit: int = 10,
+    current_user: dict = Depends(require_auth)
+):
+    """
+    Get popular query types and user intents.
+
+    Returns most common queries and intents detected in conversations.
+    Requires authentication.
+    """
+    try:
+        history_service = await get_conversation_history_service()
+        await history_service.initialize()
+
+        result = await history_service.get_popular_queries(days=days, limit=limit)
+
+        if "error" in result:
+            raise HTTPException(status_code=503, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ConversationHistory] Popular queries error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get popular queries")
+
+
 # ============================================================================
 # AUTHENTICATION ENDPOINTS
 # ============================================================================

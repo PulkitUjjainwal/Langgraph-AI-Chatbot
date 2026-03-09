@@ -530,6 +530,343 @@ class ConversationHistoryService:
             print(f"[ConversationHistory] Update session flags error: {e}")
             return False
 
+    async def get_sessions_list(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        search: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        has_feedback: Optional[bool] = None,
+        lead_captured: Optional[bool] = None,
+        session_status: Optional[str] = None,
+        sort_by: str = "started_at",
+        sort_order: str = "desc"
+    ) -> Dict[str, Any]:
+        """
+        Get paginated list of conversation sessions with filters.
+
+        Args:
+            limit: Number of sessions per page
+            offset: Pagination offset
+            search: Search in session_id or IP address
+            start_date: Filter sessions from this date
+            end_date: Filter sessions until this date
+            has_feedback: Filter by feedback flag
+            lead_captured: Filter by lead flag
+            session_status: Filter by status
+            sort_by: Column to sort by
+            sort_order: Sort order (asc/desc)
+
+        Returns:
+            Dict with sessions list, total count, and pagination info
+        """
+        if not self._available:
+            return {"error": "MySQL not available", "sessions": [], "total": 0}
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    # Build WHERE clause
+                    where_conditions = []
+                    params = []
+
+                    if search:
+                        where_conditions.append("(session_id LIKE %s OR ip_address LIKE %s)")
+                        params.extend([f"%{search}%", f"%{search}%"])
+
+                    if start_date:
+                        where_conditions.append("started_at >= %s")
+                        params.append(start_date)
+
+                    if end_date:
+                        where_conditions.append("started_at <= %s")
+                        params.append(end_date)
+
+                    if has_feedback is not None:
+                        where_conditions.append("has_feedback = %s")
+                        params.append(has_feedback)
+
+                    if lead_captured is not None:
+                        where_conditions.append("lead_captured = %s")
+                        params.append(lead_captured)
+
+                    if session_status:
+                        where_conditions.append("session_status = %s")
+                        params.append(session_status)
+
+                    where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+
+                    # Get total count
+                    await cur.execute(f"""
+                        SELECT COUNT(*) as total
+                        FROM conversation_sessions
+                        WHERE {where_clause}
+                    """, params)
+
+                    total = (await cur.fetchone())['total']
+
+                    # Get sessions with pagination
+                    valid_sort_columns = ['started_at', 'ended_at', 'message_count', 'session_id']
+                    sort_column = sort_by if sort_by in valid_sort_columns else 'started_at'
+                    order = 'DESC' if sort_order.lower() == 'desc' else 'ASC'
+
+                    await cur.execute(f"""
+                        SELECT
+                            id, session_id, started_at, ended_at, last_activity,
+                            message_count, user_message_count, assistant_message_count,
+                            initial_url, user_agent, ip_address,
+                            device_type, browser_name, browser_version,
+                            os_name, os_version, country, region, city,
+                            timezone, language, has_feedback, lead_captured,
+                            session_status, created_at, updated_at
+                        FROM conversation_sessions
+                        WHERE {where_clause}
+                        ORDER BY {sort_column} {order}
+                        LIMIT %s OFFSET %s
+                    """, params + [limit, offset])
+
+                    sessions = await cur.fetchall()
+
+                    # Convert timestamps to ISO format
+                    for session in sessions:
+                        for field in ['started_at', 'ended_at', 'last_activity', 'created_at', 'updated_at']:
+                            if session.get(field):
+                                session[field] = session[field].isoformat()
+
+                    return {
+                        "sessions": sessions,
+                        "total": total,
+                        "limit": limit,
+                        "offset": offset,
+                        "has_more": (offset + limit) < total
+                    }
+
+        except Exception as e:
+            print(f"[ConversationHistory] Get sessions list error: {e}")
+            return {"error": str(e), "sessions": [], "total": 0}
+
+    async def get_time_series_data(self, days: int = 30) -> Dict[str, Any]:
+        """
+        Get daily time series data for conversation analytics.
+
+        Args:
+            days: Number of days to include
+
+        Returns:
+            Dict with daily breakdown of sessions and messages
+        """
+        if not self._available:
+            return {"error": "MySQL not available"}
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("""
+                        SELECT
+                            DATE(started_at) as date,
+                            COUNT(*) as session_count,
+                            SUM(message_count) as message_count,
+                            AVG(message_count) as avg_messages,
+                            SUM(CASE WHEN has_feedback = TRUE THEN 1 ELSE 0 END) as feedback_count,
+                            SUM(CASE WHEN lead_captured = TRUE THEN 1 ELSE 0 END) as lead_count,
+                            AVG(TIMESTAMPDIFF(MINUTE, started_at, COALESCE(ended_at, last_activity))) as avg_duration
+                        FROM conversation_sessions
+                        WHERE started_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        GROUP BY DATE(started_at)
+                        ORDER BY date ASC
+                    """, (days,))
+
+                    rows = await cur.fetchall()
+
+                    # Convert dates to ISO format
+                    for row in rows:
+                        if row.get('date'):
+                            row['date'] = row['date'].isoformat()
+                        if row.get('avg_messages'):
+                            row['avg_messages'] = round(row['avg_messages'], 2)
+                        if row.get('avg_duration'):
+                            row['avg_duration'] = round(row['avg_duration'], 2)
+
+                    return {
+                        "period_days": days,
+                        "data": rows
+                    }
+
+        except Exception as e:
+            print(f"[ConversationHistory] Time series error: {e}")
+            return {"error": str(e)}
+
+    async def get_user_engagement_metrics(self, days: int = 30) -> Dict[str, Any]:
+        """
+        Get user engagement metrics.
+
+        Args:
+            days: Number of days to include
+
+        Returns:
+            Dict with engagement statistics
+        """
+        if not self._available:
+            return {"error": "MySQL not available"}
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    # Get engagement distribution
+                    await cur.execute("""
+                        SELECT
+                            CASE
+                                WHEN message_count <= 2 THEN 'Very Low (1-2)'
+                                WHEN message_count <= 5 THEN 'Low (3-5)'
+                                WHEN message_count <= 10 THEN 'Medium (6-10)'
+                                WHEN message_count <= 20 THEN 'High (11-20)'
+                                ELSE 'Very High (20+)'
+                            END as engagement_level,
+                            COUNT(*) as session_count
+                        FROM conversation_sessions
+                        WHERE started_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        GROUP BY engagement_level
+                        ORDER BY MIN(message_count)
+                    """, (days,))
+
+                    engagement_distribution = await cur.fetchall()
+
+                    # Get device breakdown
+                    await cur.execute("""
+                        SELECT
+                            device_type,
+                            COUNT(*) as count,
+                            AVG(message_count) as avg_messages
+                        FROM conversation_sessions
+                        WHERE started_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        AND device_type IS NOT NULL
+                        GROUP BY device_type
+                        ORDER BY count DESC
+                    """, (days,))
+
+                    device_breakdown = await cur.fetchall()
+
+                    for item in device_breakdown:
+                        if item.get('avg_messages'):
+                            item['avg_messages'] = round(item['avg_messages'], 2)
+
+                    # Get browser breakdown
+                    await cur.execute("""
+                        SELECT
+                            browser_name,
+                            COUNT(*) as count
+                        FROM conversation_sessions
+                        WHERE started_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        AND browser_name IS NOT NULL
+                        GROUP BY browser_name
+                        ORDER BY count DESC
+                        LIMIT 10
+                    """, (days,))
+
+                    browser_breakdown = await cur.fetchall()
+
+                    # Get location breakdown (top countries)
+                    await cur.execute("""
+                        SELECT
+                            country,
+                            COUNT(*) as session_count,
+                            AVG(message_count) as avg_messages
+                        FROM conversation_sessions
+                        WHERE started_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        AND country IS NOT NULL
+                        GROUP BY country
+                        ORDER BY session_count DESC
+                        LIMIT 10
+                    """, (days,))
+
+                    location_breakdown = await cur.fetchall()
+
+                    for item in location_breakdown:
+                        if item.get('avg_messages'):
+                            item['avg_messages'] = round(item['avg_messages'], 2)
+
+                    return {
+                        "period_days": days,
+                        "engagement_distribution": engagement_distribution,
+                        "device_breakdown": device_breakdown,
+                        "browser_breakdown": browser_breakdown,
+                        "location_breakdown": location_breakdown
+                    }
+
+        except Exception as e:
+            print(f"[ConversationHistory] User engagement error: {e}")
+            return {"error": str(e)}
+
+    async def get_popular_queries(self, days: int = 30, limit: int = 10) -> Dict[str, Any]:
+        """
+        Get popular query types and intents.
+
+        Args:
+            days: Number of days to include
+            limit: Max number of results
+
+        Returns:
+            Dict with popular queries and intents
+        """
+        if not self._available:
+            return {"error": "MySQL not available"}
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    # Get popular query types
+                    await cur.execute("""
+                        SELECT
+                            query_type,
+                            COUNT(*) as count,
+                            AVG(processing_time) as avg_processing_time,
+                            AVG(credits_used) as avg_credits
+                        FROM conversation_messages cm
+                        JOIN conversation_sessions cs ON cm.session_id = cs.session_id
+                        WHERE cs.started_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        AND query_type IS NOT NULL
+                        AND role = 'user'
+                        GROUP BY query_type
+                        ORDER BY count DESC
+                        LIMIT %s
+                    """, (days, limit))
+
+                    query_types = await cur.fetchall()
+
+                    for item in query_types:
+                        if item.get('avg_processing_time'):
+                            item['avg_processing_time'] = round(item['avg_processing_time'], 2)
+                        if item.get('avg_credits'):
+                            item['avg_credits'] = round(item['avg_credits'], 2)
+
+                    # Get popular intents
+                    await cur.execute("""
+                        SELECT
+                            intent_detected,
+                            COUNT(*) as count
+                        FROM conversation_messages cm
+                        JOIN conversation_sessions cs ON cm.session_id = cs.session_id
+                        WHERE cs.started_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        AND intent_detected IS NOT NULL
+                        AND role = 'user'
+                        GROUP BY intent_detected
+                        ORDER BY count DESC
+                        LIMIT %s
+                    """, (days, limit))
+
+                    intents = await cur.fetchall()
+
+                    return {
+                        "period_days": days,
+                        "query_types": query_types,
+                        "intents": intents
+                    }
+
+        except Exception as e:
+            print(f"[ConversationHistory] Popular queries error: {e}")
+            return {"error": str(e)}
+
     async def close(self):
         """Close database connections"""
         if self._pool:
