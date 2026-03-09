@@ -255,6 +255,17 @@ class FeedbackRequest(BaseModel):
     page_url: Optional[str] = Field(None, description="Page URL where feedback was given")
     conversation: Optional[List[ConversationMessageModel]] = Field(None, description="Full conversation history")
 
+    # Device & Browser Information
+    device_type: Optional[str] = Field(None, description="Device type: mobile, tablet, desktop")
+    browser_name: Optional[str] = Field(None, description="Browser name")
+    browser_version: Optional[str] = Field(None, description="Browser version")
+    os_name: Optional[str] = Field(None, description="Operating system name")
+    os_version: Optional[str] = Field(None, description="Operating system version")
+
+    # Language & Timezone
+    timezone: Optional[str] = Field(None, description="User timezone")
+    language: Optional[str] = Field(None, description="Browser language preference")
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -878,5 +889,97 @@ class Config:
                 "message_count": 5,
                 "odoo_channel_id": 17,
                 "error": None
+            }
+        }
+
+# ============================================================================
+# CONVERSATION HISTORY MODELS
+# ============================================================================
+
+class SaveConversationRequest(BaseModel):
+    """Request model for saving conversation history"""
+    session_id: str = Field(..., description="Session identifier")
+    initial_url: Optional[str] = Field(None, description="Initial page URL where chat started")
+    page_urls: Optional[List[str]] = Field(None, description="List of all pages visited during session")
+    user_agent: Optional[str] = Field(None, description="Browser user agent")
+    ip_address: Optional[str] = Field(None, description="User IP address")
+    has_feedback: Optional[bool] = Field(False, description="Whether user provided feedback")
+    lead_captured: Optional[bool] = Field(False, description="Whether lead was captured")
+
+    # Device & Browser Information
+    device_type: Optional[str] = Field(None, description="Device type: mobile, tablet, desktop")
+    browser_name: Optional[str] = Field(None, description="Browser name")
+    browser_version: Optional[str] = Field(None, description="Browser version")
+    os_name: Optional[str] = Field(None, description="Operating system name")
+    os_version: Optional[str] = Field(None, description="Operating system version")
+
+    # Language & Timezone
+    timezone: Optional[str] = Field(None, description="User timezone")
+    language: Optional[str] = Field(None, description="Browser language preference")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user123",
+                "initial_url": "https://marketinsidedata.com/",
+                "page_urls": [
+                    "https://marketinsidedata.com/",
+                    "https://marketinsidedata.com/about"
+                ],
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+                "ip_address": "192.168.1.1",
+                "has_feedback": False,
+                "lead_captured": False,
+                "device_type": "desktop",
+                "browser_name": "Chrome",
+                "browser_version": "120.0.0.0",
+                "os_name": "Windows",
+                "os_version": "10",
+                "timezone": "America/New_York",
+                "language": "en-US"
+            }
+        }
+
+
+class SaveConversationResponse(BaseModel):
+    """Response model for save conversation endpoint"""
+    success: bool = Field(..., description="Whether conversation was saved successfully")
+    session_id: str = Field(..., description="Session identifier")
+    message_count: int = Field(..., description="Number of messages saved")
+    storage: Optional[str] = Field(None, description="Storage type: 'mysql' or 'file'")
+    message: str = Field(..., description="Response message")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "session_id": "user123",
+                "message_count": 12,
+                "storage": "mysql",
+                "message": "Conversation history saved successfully"
+            }
+        }
+
+
+class ConversationStatsResponse(BaseModel):
+    """Response model for conversation statistics"""
+    period_days: int = Field(..., description="Number of days in the stats period")
+    total_sessions: int = Field(..., description="Total number of sessions")
+    total_messages: int = Field(..., description="Total number of messages")
+    avg_messages_per_session: float = Field(..., description="Average messages per session")
+    sessions_with_feedback: int = Field(..., description="Sessions with feedback")
+    sessions_with_leads: int = Field(..., description="Sessions with leads captured")
+    avg_duration_minutes: float = Field(..., description="Average session duration in minutes")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "period_days": 30,
+                "total_sessions": 1500,
+                "total_messages": 9000,
+                "avg_messages_per_session": 6.0,
+                "sessions_with_feedback": 450,
+                "sessions_with_leads": 200,
+                "avg_duration_minutes": 8.5
             }
         }

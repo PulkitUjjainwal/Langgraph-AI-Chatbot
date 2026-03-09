@@ -103,6 +103,7 @@ from chatbot.models.api_models import (
     LeadSkipRequest, LeadSkipResponse,
     LeadStatsResponse,
     FeedbackRequest, FeedbackResponse, FeedbackStatsResponse,
+    SaveConversationRequest, SaveConversationResponse, ConversationStatsResponse,
     OdooContextRequest, OdooContextResponse,
     VoiceTokenRequest, VoiceTokenResponse,
     VoiceMessageRequest, VoiceMessageResponse,
@@ -115,6 +116,15 @@ from chatbot.database.feedback_service import (
     FeedbackService, FeedbackData, FeedbackType,
     get_feedback_service, init_feedback_service
 )
+
+# Import Conversation History Service
+from chatbot.database.conversation_history_service import (
+    ConversationHistoryService, ConversationSession, ConversationMessage,
+    SessionStatus, get_conversation_history_service, init_conversation_history_service
+)
+
+# Import Geolocation Service
+from chatbot.utils.geolocation import get_location_from_ip
 
 # Import Authentication
 from chatbot.auth.dependencies import require_auth, require_super_admin, get_auth_db_service
@@ -163,7 +173,7 @@ from chatbot.services.retrieval.hybrid_retriever import HybridRetriever as Modul
 from chatbot.services.retrieval.dynamic_content import DynamicContentManager
 
 from decimal import Decimal
-from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Response, Depends, Form
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Response, Depends, Form, Request
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -3144,7 +3154,7 @@ if query is for platform
                     self.redis.save_message(session_id, {
                         "role": "assistant",
                         "content": full_response,
-                        "intent": intent,
+                        "intent_detected": intent,
                         "explore_url": explore_url if explore_url else None
                     })
                     print(f"  [STREAM] Messages saved to Redis")
@@ -4748,6 +4758,320 @@ async def get_negative_feedback(limit: int = 50):
     except Exception as e:
         print(f"[Feedback] Get negative error: {e}")
         raise HTTPException(status_code=500, detail="Failed to get negative feedback")
+
+
+# ============================================================================
+# CONVERSATION HISTORY ENDPOINTS
+# ============================================================================
+
+@router.post("/conversation/save", response_model=SaveConversationResponse)
+async def save_conversation_history(
+    request: SaveConversationRequest,
+    background_tasks: BackgroundTasks,
+    http_request: Request
+):
+    """
+    Save complete conversation history for a session.
+
+    This endpoint is typically called when:
+    - User explicitly ends the session (closes chat, navigates away)
+    - Session times out
+    - Browser unload event fires
+
+    Uses background tasks to avoid blocking the response.
+    Saves ALL conversations regardless of feedback status.
+    """
+    try:
+        # Get client IP address from request
+        client_ip = request.ip_address
+        if not client_ip:
+            # Try to get from X-Forwarded-For header (if behind proxy)
+            forwarded_for = http_request.headers.get("X-Forwarded-For")
+            if forwarded_for:
+                client_ip = forwarded_for.split(",")[0].strip()
+            else:
+                # Get from client directly
+                if http_request.client:
+                    client_ip = http_request.client.host
+
+        # Add to background tasks for non-blocking processing
+        background_tasks.add_task(
+            _save_conversation_background,
+            request.session_id,
+            request.initial_url,
+            request.page_urls,
+            request.user_agent,
+            client_ip,
+            request.has_feedback,
+            request.lead_captured,
+            request.device_type,
+            request.browser_name,
+            request.browser_version,
+            request.os_name,
+            request.os_version,
+            request.timezone,
+            request.language
+        )
+
+        return SaveConversationResponse(
+            success=True,
+            session_id=request.session_id,
+            message_count=0,  # Will be updated in background
+            storage="queued",
+            message="Conversation is being saved in the background"
+        )
+
+    except Exception as e:
+        print(f"[ConversationHistory] Error queuing save: {e}")
+        return SaveConversationResponse(
+            success=False,
+            session_id=request.session_id,
+            message_count=0,
+            storage=None,
+            message="Failed to queue conversation save"
+        )
+
+
+async def _save_conversation_background(
+    session_id: str,
+    initial_url: Optional[str] = None,
+    page_urls: Optional[List[str]] = None,
+    user_agent: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    has_feedback: bool = False,
+    lead_captured: bool = False,
+    device_type: Optional[str] = None,
+    browser_name: Optional[str] = None,
+    browser_version: Optional[str] = None,
+    os_name: Optional[str] = None,
+    os_version: Optional[str] = None,
+    timezone: Optional[str] = None,
+    language: Optional[str] = None
+):
+    """
+    Background task to save conversation history.
+    Retrieves messages from Redis and saves to MySQL.
+    Includes device, browser, OS, and location information.
+    """
+    print(f"[ConversationHistory] ===== SAVE STARTED =====")
+    print(f"[ConversationHistory] Session ID: {session_id}")
+    print(f"[ConversationHistory] Device: {device_type}, Browser: {browser_name} {browser_version}")
+    print(f"[ConversationHistory] OS: {os_name} {os_version}")
+    print(f"[ConversationHistory] Location: {timezone}, Language: {language}")
+
+    try:
+        # Get conversation history from Redis
+        global redis_manager
+        if not redis_manager:
+            print(f"[ConversationHistory] ERROR: Redis manager not initialized")
+            return
+
+        print(f"[ConversationHistory] Redis manager available: {redis_manager is not None}")
+
+        # Use the get_messages method from RedisMemoryManager to retrieve from session:{session_id}:messages
+        messages_data = redis_manager.get_messages(session_id, limit=1000)
+
+        print(f"[ConversationHistory] Retrieved {len(messages_data) if messages_data else 0} messages from Redis")
+
+        if not messages_data:
+            print(f"[ConversationHistory] WARNING: No history found for session {session_id}")
+            print(f"[ConversationHistory] This means either:")
+            print(f"[ConversationHistory]   1. User hasn't sent any messages")
+            print(f"[ConversationHistory]   2. Messages expired from Redis")
+            print(f"[ConversationHistory]   3. Wrong session_id")
+            return
+
+        # Convert to ConversationMessage objects
+        messages = []
+        for i, msg_dict in enumerate(messages_data):
+            messages.append(ConversationMessage(
+                role=msg_dict.get("role", "user"),
+                content=msg_dict.get("content", ""),
+                message_order=i,
+                message_id=msg_dict.get("message_id"),
+                processing_time=msg_dict.get("processing_time"),
+                sources_used=msg_dict.get("sources_used"),
+                intent_detected=msg_dict.get("intent_detected"),
+                query_type=msg_dict.get("query_type"),
+                credits_used=msg_dict.get("credits_used")
+            ))
+
+        if not messages:
+            print(f"[ConversationHistory] No messages to save for session {session_id}")
+            return
+
+        # Get location from IP address
+        country = None
+        region = None
+        city = None
+        location_timezone = None
+
+        if ip_address:
+            try:
+                location_data = await get_location_from_ip(ip_address)
+                country = location_data.get('country')
+                region = location_data.get('region')
+                city = location_data.get('city')
+                location_timezone = location_data.get('timezone')
+                print(f"[ConversationHistory] Got location for {ip_address}: {city}, {region}, {country}")
+            except Exception as e:
+                print(f"[ConversationHistory] Failed to get location for {ip_address}: {e}")
+
+        # Create ConversationSession object
+        conversation = ConversationSession(
+            session_id=session_id,
+            messages=messages,
+            started_at=datetime.now(),  # Could be improved by storing actual start time
+            ended_at=datetime.now(),
+            last_activity=datetime.now(),
+            initial_url=initial_url,
+            page_urls=page_urls,
+            user_agent=user_agent,
+            ip_address=ip_address,
+            has_feedback=has_feedback,
+            lead_captured=lead_captured,
+            session_status=SessionStatus.ENDED,
+            # Device & Browser
+            device_type=device_type,
+            browser_name=browser_name,
+            browser_version=browser_version,
+            os_name=os_name,
+            os_version=os_version,
+            # Location
+            country=country,
+            region=region,
+            city=city,
+            timezone=location_timezone or timezone,  # Use location timezone if available, otherwise frontend timezone
+            language=language
+        )
+
+        # Save to database
+        print(f"[ConversationHistory] Initializing history service...")
+        history_service = await get_conversation_history_service()
+        success = await history_service.initialize()
+        print(f"[ConversationHistory] History service initialized: {success}")
+        print(f"[ConversationHistory] History service available: {history_service.is_available}")
+
+        print(f"[ConversationHistory] Calling save_conversation...")
+        result = await history_service.save_conversation(conversation)
+
+        print(f"[ConversationHistory] Save result: {result}")
+
+        if result.get("success"):
+            print(f"[ConversationHistory] ✓ SUCCESS: Saved session {session_id}: {result.get('message_count')} messages ({result.get('storage')})")
+            print(f"[ConversationHistory] ===== SAVE COMPLETED =====")
+        else:
+            print(f"[ConversationHistory] ✗ FAILED: Could not save session {session_id}")
+            print(f"[ConversationHistory] ===== SAVE FAILED =====")
+
+    except Exception as e:
+        print(f"[ConversationHistory] ✗ EXCEPTION during save for {session_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"[ConversationHistory] ===== SAVE ERROR =====")
+
+
+@router.post("/conversation/test-save/{session_id}")
+async def test_save_conversation(session_id: str):
+    """
+    Test endpoint to manually trigger conversation save for a session.
+
+    This is useful for debugging. Call this after chatting to force save.
+
+    Example: POST /api/conversation/test-save/your_session_id_here
+    """
+    try:
+        # Call the background save function directly (not in background)
+        await _save_conversation_background(
+            session_id=session_id,
+            initial_url="https://test.com",
+            page_urls=["https://test.com"],
+            user_agent="Test User Agent",
+            ip_address="127.0.0.1",
+            has_feedback=False,
+            lead_captured=False,
+            device_type="desktop",
+            browser_name="Chrome",
+            browser_version="120.0",
+            os_name="Windows",
+            os_version="10",
+            timezone="America/New_York",
+            language="en-US"
+        )
+
+        return {
+            "success": True,
+            "message": f"Triggered save for session {session_id}. Check server logs for details.",
+            "session_id": session_id
+        }
+
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
+@router.get("/conversation/stats", response_model=ConversationStatsResponse)
+async def get_conversation_stats(days: int = 30):
+    """
+    Get conversation statistics for analysis.
+
+    Returns aggregated session data for the specified period.
+    Useful for analytics dashboards and monitoring.
+    """
+    try:
+        history_service = await get_conversation_history_service()
+        await history_service.initialize()
+
+        stats = await history_service.get_session_stats(days=days)
+
+        if "error" in stats:
+            raise HTTPException(status_code=503, detail=stats["error"])
+
+        return ConversationStatsResponse(
+            period_days=stats.get("period_days", days),
+            total_sessions=stats.get("total_sessions", 0),
+            total_messages=stats.get("total_messages", 0),
+            avg_messages_per_session=stats.get("avg_messages_per_session", 0.0),
+            sessions_with_feedback=stats.get("sessions_with_feedback", 0),
+            sessions_with_leads=stats.get("sessions_with_leads", 0),
+            avg_duration_minutes=stats.get("avg_duration_minutes", 0.0)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ConversationHistory] Stats error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get conversation stats")
+
+
+@router.get("/conversation/{session_id}")
+async def get_conversation_by_session(session_id: str):
+    """
+    Get full conversation history for a specific session.
+
+    Returns session metadata and all messages.
+    Useful for debugging and analysis.
+    """
+    try:
+        history_service = await get_conversation_history_service()
+        await history_service.initialize()
+
+        session = await history_service.get_session(session_id)
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        return session
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ConversationHistory] Get session error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get conversation")
 
 
 # ============================================================================

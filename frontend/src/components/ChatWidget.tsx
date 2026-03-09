@@ -4,6 +4,7 @@ import { ChatMessages } from "./ChatMessages";
 import { ChatFooter, type ChatFooterHandle } from "./ChatFooter";
 import genericQA from "../data/genericQA.json";
 import WhatsAppDropdown from "./WhatsAppDropdown";
+import { getDeviceInfoForAPI } from "../utils/deviceDetection";
 // import VoiceChat from "./VoiceChat"; // Commented out - will add back later
 import whatsappQr from  "../../public/whatsapp-qr.avif"
 
@@ -668,7 +669,7 @@ export default function ChatWidget() {
 
   // Get API base URL - memoized to avoid re-renders
   const apiBaseUrl = useMemo(() => {
-    let url = "http://localhost:8000";
+    let url = "http://localhost:8003";
     if (typeof window !== "undefined" && (window as any).CHATBOT_CONFIG) {
       url = (window as any).CHATBOT_CONFIG.apiUrl || url;
     }
@@ -2011,6 +2012,9 @@ export default function ChatWidget() {
   const handleResetConversation = async () => {
     console.log('[ChatWidget] Reset conversation clicked');
 
+    // Save current conversation before resetting
+    await saveConversationHistory();
+
     // Call backend to reset session
     const oldSessionId = sessionIdRef.current;
     if (oldSessionId) {
@@ -2047,6 +2051,124 @@ export default function ChatWidget() {
     // Close options menu
     setShowOptionsMenu(false);
   };
+
+  // Save conversation history to database
+  const saveConversationHistory = async () => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId || messages.length === 0) {
+      console.log('[ChatWidget] No conversation to save');
+      return;
+    }
+
+    try {
+      const apiBaseUrl = getApiBaseUrl();
+
+      // Collect page URLs visited during this session
+      const pageUrls = [window.location.href];
+
+      // Get comprehensive device and browser information
+      const deviceInfo = getDeviceInfoForAPI();
+
+      // Check if feedback was provided
+      const hasFeedback = false; // TODO: Track feedback state
+
+      // Check if lead was captured
+      const hasLead = leadCaptured;
+
+      // Get initial URL
+      const initialUrl = window.location.href;
+
+      console.log(`[ChatWidget] Saving conversation history for session ${sessionId}`, {
+        device: deviceInfo.device_type,
+        browser: `${deviceInfo.browser_name} ${deviceInfo.browser_version}`,
+        os: `${deviceInfo.os_name} ${deviceInfo.os_version}`,
+        location: deviceInfo.timezone,
+      });
+
+      const response = await fetch(`${apiBaseUrl}/api/conversation/save`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          initial_url: initialUrl,
+          page_urls: pageUrls,
+          user_agent: deviceInfo.user_agent,
+          has_feedback: hasFeedback,
+          lead_captured: hasLead,
+          // Device & Browser Information
+          device_type: deviceInfo.device_type,
+          browser_name: deviceInfo.browser_name,
+          browser_version: deviceInfo.browser_version,
+          os_name: deviceInfo.os_name,
+          os_version: deviceInfo.os_version,
+          timezone: deviceInfo.timezone,
+          language: deviceInfo.language,
+        }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log('[ChatWidget] Conversation history saved:', result);
+      } else {
+        console.error('[ChatWidget] Failed to save conversation history:', response.statusText);
+      }
+    } catch (error) {
+      console.error('[ChatWidget] Error saving conversation history:', error);
+      // Don't throw - this is a non-critical operation
+    }
+  };
+
+  // Save conversation on page unload
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      // Save conversation history when user leaves
+      // Note: This uses sendBeacon for better reliability on page unload
+      const sessionId = sessionIdRef.current;
+      if (sessionId && messages.length > 0) {
+        const apiBaseUrl = getApiBaseUrl();
+
+        // Get comprehensive device and browser information
+        const deviceInfo = getDeviceInfoForAPI();
+
+        const data = JSON.stringify({
+          session_id: sessionId,
+          initial_url: window.location.href,
+          page_urls: [window.location.href],
+          user_agent: deviceInfo.user_agent,
+          has_feedback: false,
+          lead_captured: leadCaptured,
+          // Device & Browser Information
+          device_type: deviceInfo.device_type,
+          browser_name: deviceInfo.browser_name,
+          browser_version: deviceInfo.browser_version,
+          os_name: deviceInfo.os_name,
+          os_version: deviceInfo.os_version,
+          timezone: deviceInfo.timezone,
+          language: deviceInfo.language,
+        });
+
+        // Use sendBeacon for reliability - it works even when page is unloading
+        const sent = navigator.sendBeacon(
+          `${apiBaseUrl}/api/conversation/save`,
+          new Blob([data], { type: 'application/json' })
+        );
+
+        console.log(`[ChatWidget] Beacon sent on unload: ${sent}`, deviceInfo);
+      }
+    };
+
+    // Add event listeners for various exit scenarios
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handleBeforeUnload);
+
+    // Cleanup
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handleBeforeUnload);
+    };
+  }, [messages, leadCaptured]);
 
   // When user has switched to Odoo livechat, hide the AI chatbot entirely
   if (isHiddenForOdoo) return null;

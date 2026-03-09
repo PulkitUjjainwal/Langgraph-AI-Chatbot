@@ -49,6 +49,18 @@ class FeedbackData:
     user_agent: Optional[str] = None
     ip_address: Optional[str] = None
     conversation: Optional[List[ConversationMessage]] = None
+    # Device & Browser Information
+    device_type: Optional[str] = None
+    browser_name: Optional[str] = None
+    browser_version: Optional[str] = None
+    os_name: Optional[str] = None
+    os_version: Optional[str] = None
+    # Location Information
+    country: Optional[str] = None
+    region: Optional[str] = None
+    city: Optional[str] = None
+    timezone: Optional[str] = None
+    language: Optional[str] = None
 
 
 class FeedbackService:
@@ -160,8 +172,10 @@ class FeedbackService:
                         INSERT INTO feedback (
                             session_id, feedback_type, rating, comment,
                             message_id, assistant_message, user_query,
-                            page_url, user_agent, ip_address
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            page_url, user_agent, ip_address,
+                            device_type, browser_name, browser_version, os_name, os_version,
+                            country, region, city, timezone, language
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         feedback.session_id,
                         feedback.feedback_type.value if isinstance(feedback.feedback_type, FeedbackType) else feedback.feedback_type,
@@ -172,7 +186,17 @@ class FeedbackService:
                         feedback.user_query,
                         feedback.page_url,
                         feedback.user_agent,
-                        feedback.ip_address
+                        feedback.ip_address,
+                        feedback.device_type,
+                        feedback.browser_name,
+                        feedback.browser_version,
+                        feedback.os_name,
+                        feedback.os_version,
+                        feedback.country,
+                        feedback.region,
+                        feedback.city,
+                        feedback.timezone,
+                        feedback.language
                     ))
 
                     feedback_id = cur.lastrowid
@@ -221,6 +245,16 @@ class FeedbackService:
                 "page_url": feedback.page_url,
                 "user_agent": feedback.user_agent,
                 "ip_address": feedback.ip_address,
+                "device_type": feedback.device_type,
+                "browser_name": feedback.browser_name,
+                "browser_version": feedback.browser_version,
+                "os_name": feedback.os_name,
+                "os_version": feedback.os_version,
+                "country": feedback.country,
+                "region": feedback.region,
+                "city": feedback.city,
+                "timezone": feedback.timezone,
+                "language": feedback.language,
                 "conversation": [
                     (msg if isinstance(msg, dict) else {"role": msg.role, "content": msg.content})
                     for msg in (feedback.conversation or [])

@@ -28,6 +28,20 @@ CREATE TABLE IF NOT EXISTS feedback (
     user_agent VARCHAR(500) DEFAULT NULL COMMENT 'Browser user agent',
     ip_address VARCHAR(45) DEFAULT NULL COMMENT 'User IP (IPv4 or IPv6)',
 
+    -- Device & Browser Information
+    device_type VARCHAR(50) DEFAULT NULL COMMENT 'Device type: mobile, tablet, desktop',
+    browser_name VARCHAR(100) DEFAULT NULL COMMENT 'Browser name: Chrome, Firefox, Safari, etc.',
+    browser_version VARCHAR(50) DEFAULT NULL COMMENT 'Browser version',
+    os_name VARCHAR(100) DEFAULT NULL COMMENT 'Operating system name',
+    os_version VARCHAR(50) DEFAULT NULL COMMENT 'Operating system version',
+
+    -- Location Information
+    country VARCHAR(100) DEFAULT NULL COMMENT 'Country from IP geolocation',
+    region VARCHAR(100) DEFAULT NULL COMMENT 'Region/State from IP geolocation',
+    city VARCHAR(100) DEFAULT NULL COMMENT 'City from IP geolocation',
+    timezone VARCHAR(50) DEFAULT NULL COMMENT 'User timezone',
+    language VARCHAR(50) DEFAULT NULL COMMENT 'Browser language preference',
+
     -- Timestamps
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
