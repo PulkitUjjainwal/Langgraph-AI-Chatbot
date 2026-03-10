@@ -1104,7 +1104,7 @@ def create_chatbot_node():
         else:
             return "Ask about their specific product, target country, or business goal"
 
-    def chatbot_node(state: AgentState) -> AgentState:
+    async def chatbot_node(state: AgentState) -> AgentState:
         """Generate response with smart context injection"""
         global session_source_url  # For including source URL in responses
         start_time = time.time()
@@ -1208,6 +1208,33 @@ def create_chatbot_node():
         # ========================================================================
         # Get the source URL for including in response (global declared at top of function)
         current_source_url = session_source_url.get("current", "") if dynamic_content else ""
+
+        # ========================================================================
+        # CRITICAL: FINAL URL FIX BEFORE SHOWING TO USER (chatbot_node)
+        # Extract intent from URL and apply mirror/detailed fix
+        # ========================================================================
+        if current_source_url and "marketinsidedata.com" in current_source_url:
+            print(f"\n{'🔧'*35}")
+            print(f"[FINAL URL FIX - CHATBOT_NODE] URL before: {current_source_url}")
+
+            # Detect intent from URL path
+            detected_intent = "unknown"
+            if "/search-data/" in current_source_url:
+                detected_intent = "search_trade_data"
+            elif "/country/" in current_source_url:
+                detected_intent = "search_country_data"
+            elif "/cntry/" in current_source_url:
+                detected_intent = "country_to_country"
+            elif "/chapter/" in current_source_url:
+                detected_intent = "hs_code"
+
+            if detected_intent != "unknown":
+                # Apply fix - params will be extracted from URL inside the function
+                current_source_url = await self._fix_url_data_type(current_source_url, detected_intent, {})
+                print(f"[FINAL URL FIX - CHATBOT_NODE] URL after: {current_source_url}")
+                session_source_url["current"] = current_source_url
+
+            print(f"{'🔧'*35}\n")
 
         prompt_config = PromptConfig(
             site_name=Config.SITE_NAME,
@@ -1468,6 +1495,271 @@ class ChatbotManager:
         except Exception as e:
             print(f"  [ERROR] Failed to fetch country data_type: {e}")
             return "mirror"
+
+    async def _fix_url_data_type(self, url: str, intent: str, params: Dict[str, Any]) -> str:
+        """
+        Fix URL to use correct data_type (mirror_import/mirror_export vs import/export)
+        based on country availability.
+
+        Args:
+            url: Generated URL
+            intent: Detected intent
+            params: Extracted parameters
+
+        Returns:
+            Fixed URL with correct type parameter
+        """
+        import re
+        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+        print(f"\n{'='*70}")
+        print(f"[URL FIX] ⚡ FUNCTION CALLED")
+        print(f"[URL FIX] Input URL: {url}")
+        print(f"[URL FIX] Intent: {intent}")
+        print(f"[URL FIX] Params: {params}")
+        print(f"{'='*70}\n")
+
+        try:
+            # Extract country and current direction from URL based on intent
+            country = None
+            current_direction = None
+
+            if intent == "search_trade_data":
+                # URL pattern: /search-data/trade?type=import&country=taiwan&product=used%20phone
+                parsed_url = urlparse(url)
+                query_params = parse_qs(parsed_url.query)
+                country = query_params.get('country', [None])[0]
+                current_type = query_params.get('type', [None])[0]
+
+                if country and current_type in ['import', 'export', 'mirror_import', 'mirror_export']:
+                    current_direction = 'import' if 'import' in current_type else 'export'
+                else:
+                    print(f"  [URL FIX] ❌ Can't fix - missing params or invalid type")
+                    print(f"  [URL FIX] country='{country}', current_type='{current_type}'")
+                    return url  # Can't fix if missing required params
+
+            elif intent == "search_country_data":
+                # URL pattern: /country/taiwan/imports
+                match = re.search(r'/country/([^/]+)/(imports|exports)', url.lower())
+                if match:
+                    country = match.group(1)
+                    current_direction = 'import' if match.group(2) == 'imports' else 'export'
+                else:
+                    return url
+
+            elif intent == "country_to_country":
+                # URL pattern: /cntry/Taiwan-import-China
+                match = re.search(r'/cntry/([^/-]+)-(import|export)-', url)
+                if match:
+                    country = match.group(1).lower().replace('%20', '-').replace(' ', '-')
+                    current_direction = match.group(2)
+                else:
+                    return url
+
+            elif intent == "hs_code":
+                # URL pattern: /chapter/taiwan-import-hs-code-27
+                match = re.search(r'/chapter/([^/-]+)-(import|export)-', url.lower())
+                if match:
+                    country = match.group(1)
+                    current_direction = match.group(2)
+                else:
+                    return url
+            else:
+                return url
+
+            if not country or not current_direction:
+                print(f"  [URL FIX] ❌ Can't fix - missing country or direction")
+                print(f"  [URL FIX] country='{country}', current_direction='{current_direction}'")
+                return url
+
+            # Get available data types for this country
+            print(f"  [URL FIX] ✅ Extracted country='{country}', direction='{current_direction}'")
+            print(f"  [URL FIX] 🌐 Checking availability via API...")
+
+            import httpx
+            api_url = "https://api-dp.marketinsidedata.com/api/v1/users/detailed-mirror-countries-list"
+            headers = {
+                "Content-Type": "application/json",
+                "Origin": "https://www.marketinsidedata.com",
+                "accept": "application/json",
+                "Authorization": f"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMwNzk0OWNiLWZmODItNGVkOS1hNzZhLWMxOGRmOThiZDZkYyIsImlhdCI6MTcwNDU0OTU4MH0.sMR6ZZ52KNkiXG8V-Y6JxjkscCOOEDY7DPEFc5nMU88",
+            }
+
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(api_url, json={}, headers=headers)
+
+                print(f"  [URL FIX] API response status: {resp.status_code}")
+
+                if resp.status_code != 200:
+                    print(f"  [URL FIX] ❌ API returned {resp.status_code}, keeping URL as-is")
+                    return url
+
+                data = resp.json()
+                print(f"  [URL FIX] ✅ API returned data")
+                print(f"  [URL FIX] Response type: {type(data)}")
+                print(f"  [URL FIX] Response keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
+
+                # Handle different response formats
+                # API returns: {"success": true, "message": [{country1}, {country2}, ...]}
+                if isinstance(data, list):
+                    countries_list = data
+                elif isinstance(data, dict):
+                    # Try different possible keys in order of likelihood
+                    if "message" in data and isinstance(data["message"], list):
+                        # CORRECT format: {"success": true, "message": [...]}
+                        countries_list = data["message"]
+                        print(f"  [URL FIX] Found countries in 'message' key")
+                    elif "data" in data and isinstance(data["data"], list):
+                        countries_list = data["data"]
+                        print(f"  [URL FIX] Found countries in 'data' key")
+                    elif "countries" in data and isinstance(data["countries"], list):
+                        countries_list = data["countries"]
+                        print(f"  [URL FIX] Found countries in 'countries' key")
+                    elif "result" in data and isinstance(data["result"], list):
+                        countries_list = data["result"]
+                        print(f"  [URL FIX] Found countries in 'result' key")
+                    else:
+                        # Data might be the dict itself containing country data
+                        print(f"  [URL FIX] Data is dict but no list found in any key")
+                        print(f"  [URL FIX] Available keys: {list(data.keys())}")
+                        print(f"  [URL FIX] ❌ Invalid API response format, keeping URL as-is")
+                        return url
+                else:
+                    print(f"  [URL FIX] ❌ Invalid API response type: {type(data)}, keeping URL as-is")
+                    return url
+
+                if not isinstance(countries_list, list):
+                    print(f"  [URL FIX] ❌ countries_list is not a list: {type(countries_list)}, keeping URL as-is")
+                    return url
+
+                print(f"  [URL FIX] ✅ Got {len(countries_list)} countries from API")
+
+                # Find matching country
+                country_lower = country.lower().strip().replace('-', ' ')
+                available_types = []
+
+                for c in countries_list:
+                    if not isinstance(c, dict):
+                        continue
+
+                    c_name = (c.get("country_name") or "").strip().lower()
+                    c_code = (c.get("country_code") or "").strip().upper()
+
+                    # Match by name or code
+                    if (c_name == country_lower or
+                        c_name.replace(" ", "-") == country.lower() or
+                        (len(country) == 2 and c_code == country.upper())):
+                        available_types = c.get("data_type", [])
+                        print(f"  [URL FIX] Found country '{c_name}' (code: {c_code}) with types: {available_types}")
+                        break
+
+                if not available_types:
+                    print(f"  [URL FIX] No data types found for '{country}', keeping URL as-is")
+                    return url
+
+                # Determine the correct type parameter
+                is_import = current_direction == 'import'
+                use_mirror = False
+
+                print(f"  [URL FIX] Direction: {current_direction}, is_import={is_import}")
+                print(f"  [URL FIX] Available types for '{country}': {available_types}")
+
+                if is_import:
+                    # Check import data availability
+                    has_detailed = "detailed_import" in available_types
+                    has_mirror = "mirror_import" in available_types
+
+                    print(f"  [URL FIX] has_detailed_import={has_detailed}, has_mirror_import={has_mirror}")
+
+                    if has_detailed:
+                        use_mirror = False
+                        print(f"  [URL FIX] ✅ '{country}' has detailed_import - will use type=import")
+                    elif has_mirror:
+                        use_mirror = True
+                        print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_import (no detailed)")
+                        print(f"  [URL FIX] 🔧 Will change type to mirror_import")
+                    else:
+                        print(f"  [URL FIX] ❌ '{country}' has no import data, keeping URL as-is")
+                        return url
+                else:
+                    # Check export data availability
+                    has_detailed = "detailed_export" in available_types
+                    has_mirror = "mirror_export" in available_types
+
+                    print(f"  [URL FIX] has_detailed_export={has_detailed}, has_mirror_export={has_mirror}")
+
+                    if has_detailed:
+                        use_mirror = False
+                        print(f"  [URL FIX] ✅ '{country}' has detailed_export - will use type=export")
+                    elif has_mirror:
+                        use_mirror = True
+                        print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_export (no detailed)")
+                        print(f"  [URL FIX] 🔧 Will change type to mirror_export")
+                    else:
+                        print(f"  [URL FIX] ❌ '{country}' has no export data, keeping URL as-is")
+                        return url
+
+                print(f"  [URL FIX] DECISION: use_mirror={use_mirror}")
+
+                # Update URL based on intent and availability
+                if intent == "search_trade_data":
+                    # Update query parameter: type=import -> type=mirror_import
+                    print(f"  [URL FIX] ✅ Intent is search_trade_data, proceeding with URL update")
+                    parsed_url = urlparse(url)
+                    query_params = parse_qs(parsed_url.query)
+
+                    old_type = query_params.get('type', [''])[0]
+                    print(f"  [URL FIX] Current URL type parameter: '{old_type}'")
+
+                    if use_mirror:
+                        new_type = f"mirror_{current_direction}"
+                        print(f"  [URL FIX] Country needs MIRROR data, new_type='{new_type}'")
+                    else:
+                        new_type = current_direction
+                        print(f"  [URL FIX] Country has DETAILED data, new_type='{new_type}'")
+
+                    if old_type != new_type:
+                        print(f"  [URL FIX] ⚡ UPDATING URL TYPE: '{old_type}' → '{new_type}'")
+                        # Flatten query params for proper encoding
+                        flat_params = {k: v[0] if isinstance(v, list) and len(v) == 1 else v
+                                       for k, v in query_params.items()}
+                        flat_params['type'] = new_type
+
+                        # Use quote_via=quote to encode spaces as %20 (not +)
+                        from urllib.parse import quote
+                        new_query = urlencode(flat_params, quote_via=quote)
+
+                        url = urlunparse((
+                            parsed_url.scheme,
+                            parsed_url.netloc,
+                            parsed_url.path,
+                            parsed_url.params,
+                            new_query,
+                            parsed_url.fragment
+                        ))
+                        print(f"  [URL FIX] ✅ URL UPDATED SUCCESSFULLY!")
+                        print(f"  [URL FIX] NEW URL: {url}")
+                    else:
+                        print(f"  [URL FIX] ℹ Type already correct: '{new_type}' (no change needed)")
+
+                # Note: For country_data, country_to_country, and hs_code intents,
+                # the URLs don't have a "type" query parameter in the URL itself.
+                # The type is embedded in the path (/imports vs /exports) or determined server-side.
+                # The API client (unified_api_client.py) handles the detailed vs mirror
+                # selection when making the actual API calls.
+
+                print(f"\n{'='*70}")
+                print(f"[URL FIX] ✅ FUNCTION COMPLETE - Returning URL: {url}")
+                print(f"{'='*70}\n")
+                return url
+
+        except Exception as e:
+            print(f"\n{'='*70}")
+            print(f"[URL FIX] ❌ ERROR OCCURRED: {e}")
+            print(f"{'='*70}\n")
+            import traceback
+            traceback.print_exc()
+            return url  # Return original URL on error
 
     def _create_workflow(self):
         """Create LangGraph workflow with guardrail node"""
@@ -1908,7 +2200,7 @@ GLOBAL RULES
 - Country names must be lowercase and URL-safe (use %20 for spaces)
 - product must be URL-safe (lowercase, spaces replaced with %20)
 - hs_code must be numeric only
-- For search_trade_data: Use "import" or "export" (NOT "mirror_import" or "mirror_export")
+- For search_trade_data: Use "import" or "export" (the system will automatically adjust to mirror_import/mirror_export based on country availability)
 - For hs_code and country_to_country: Use "import" or "export"
 - Default language path: /en/
 
@@ -1944,6 +2236,12 @@ CRITICAL EXAMPLES - Use search_trade_data when PRODUCT is mentioned:
 "top coal importers in India" → params: {country: "india", product: "coal", entity_type: "importer", direction: "import"}
 "steel exporters" → params: {product: "steel", entity_type: "exporter", direction: "export"}
 "oil suppliers in China" → params: {country: "china", product: "oil", entity_type: "suppliers", direction: "import"}
+
+IMPORTANT: Extract country when mentioned with "from", "in", "to", or "of":
+"I need supplies from Taiwan" → params: {country: "taiwan", entity_type: "suppliers", direction: "import"} (NO product yet - will ask)
+"suppliers from India" → params: {country: "india", entity_type: "suppliers", direction: "import"} (NO product yet - will ask)
+"exporters in China" → params: {country: "china", entity_type: "exporter", direction: "export"} (NO product yet - will ask)
+"importers of steel" → params: {product: "steel", entity_type: "importer", direction: "import"} (NO country yet - will ask)
 
 Use search_country_data when NO product (general overview):
 "top importers in Indonesia" → intent: search_country_data (no product!)
@@ -2181,6 +2479,13 @@ IMPORTANT
                         )
                         url = url.replace(segment, fixed_segment)
                         print(f"  [INTENT] Fixed HS code URL (added default direction 'import'): {url}")
+
+        # ============================================================================
+        # FIX URLs: Check country availability and update type parameter
+        # (mirror_import/mirror_export vs import/export)
+        # ============================================================================
+        if url and intent in ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]:
+            url = await self._fix_url_data_type(url, intent, params)
 
         print(f"  [INTENT] Detected: intent={intent}, confidence={confidence:.2f}, params={params}")
 
@@ -2539,6 +2844,9 @@ IMPORTANT
                     normalized_answer = message.lower().strip().replace("-", " ")
                     is_conversational = any(phrase in normalized_answer for phrase in conversational_phrases)
 
+                    # Also validate if answer is actually a valid country
+                    is_valid_country = slot_mgr.is_valid_country(normalized_answer)
+
                     if is_conversational:
                         print(f"  [STREAM] Rejected conversational response '{message}' for slot '{pending_slot}'")
                         print(f"  [STREAM] User is asking for suggestions, not providing a valid country")
@@ -2567,6 +2875,58 @@ IMPORTANT
                             "suggestions": suggestions
                         })
                         return
+
+                    elif not is_valid_country:
+                        # User gave something that's NOT a country (like "used phone" when we asked for country)
+                        print(f"  [STREAM] ❌ SLOT MISMATCH: User said '{message}' but we asked for '{pending_slot}'")
+                        print(f"  [STREAM] '{message}' is NOT a valid country name!")
+
+                        # Check if it might be a product instead
+                        might_be_product = (
+                            len(message.split()) <= 3 and  # Short phrase
+                            message.lower() not in ["yes", "no", "ok", "okay", "sure", "maybe"]  # Not a yes/no
+                        )
+
+                        if might_be_product and prev_intent == "search_trade_data":
+                            # User probably meant to give us the PRODUCT, not the country
+                            print(f"  [STREAM] 💡 SMART FIX: '{message}' looks like a product, not a country")
+                            print(f"  [STREAM] Clearing pending slot and re-running intent detection")
+
+                            # Clear the pending slot to prevent auto-fill
+                            prev_state.last_asked_slot = None
+                            slot_mgr._save_state(session_id, prev_state)
+
+                            # Let it fall through to normal intent detection
+                            # This will treat "used phone" as a new query
+                            is_slot_answer = False
+                            # Continue to normal intent detection below
+                        else:
+                            # Can't figure out what user meant - ask for country again
+                            print(f"  [STREAM] Re-asking for '{pending_slot}' with clarification")
+
+                            # Save user message
+                            if self.redis:
+                                self.redis.save_message(session_id, {"role": "user", "content": message})
+
+                            # Ask again with clarification
+                            question_text = f"'{message}' doesn't look like a country name. Which country are you interested in?"
+                            suggestions = ["Taiwan", "India", "USA", "China", "Germany"]
+
+                            # Save assistant response
+                            if self.redis:
+                                self.redis.save_message(session_id, {
+                                    "role": "assistant",
+                                    "content": question_text,
+                                    "is_clarifying": True
+                                })
+
+                            yield json.dumps({
+                                "clarifying_question": True,
+                                "question": question_text,
+                                "slot_name": pending_slot,
+                                "suggestions": suggestions
+                            })
+                            return
 
         # ========================================================================
         # STEP 1: Detect intent and extract params
@@ -2800,6 +3160,13 @@ IMPORTANT
                 explore_url = slot_mgr.generate_url(intent, slot_state.slots) or intent_url
                 print(f"  [STREAM] Generated explore_url: {explore_url}")
 
+                # Fix URL to use correct data_type (mirror vs detailed) based on country availability
+                if explore_url and not explore_url.startswith("CONTINENT:") and not explore_url.startswith("RESTRICTED:"):
+                    print(f"  [STREAM] ⚡ ABOUT TO CALL _fix_url_data_type")
+                    print(f"  [STREAM] ⚡ URL BEFORE FIX: {explore_url}")
+                    explore_url = await self._fix_url_data_type(explore_url, intent, slot_state.slots)
+                    print(f"  [STREAM] ⚡ URL AFTER FIX: {explore_url}")
+
                 # Check if this is a RESTRICTED COUNTRY (redirect to support)
                 if explore_url and explore_url.startswith("RESTRICTED:"):
                     restricted_country_name = explore_url.replace("RESTRICTED:", "")
@@ -2870,7 +3237,8 @@ IMPORTANT
 
         elif intent_url:
             # Use URL from intent detection for non-slot intents
-            explore_url = intent_url
+            # Apply URL fix (will return unchanged for non-data intents)
+            explore_url = await self._fix_url_data_type(intent_url, intent, params)
 
         # Initialize history for this session if not exists
         if session_id not in self._stream_history:
@@ -2918,15 +3286,16 @@ IMPORTANT
             if not dynamic_content:
                 try:
                     # Pass pre-computed intent to avoid duplicate LLM call
+                    # CRITICAL: Use fetch_url (FIXED) not intent_url (UNFIXED)
                     api_data = await self.handle_dynamic_api_call(
                         message, session_id,
                         extra_data={"dynamic_url": fetch_url},
-                        intent_result={"intent": intent, "confidence": 1.0, "url": intent_url, "params": params}
+                        intent_result={"intent": intent, "confidence": 1.0, "url": fetch_url, "params": params}
                     )
                     dynamic_content = api_data or ""
-                    # URL is stored by handle_dynamic_api_call
-                    if dynamic_content:
-                        session_source_url["current"] = fetch_url
+                    # URL is stored by handle_dynamic_api_call (now uses fixed fetch_url)
+                    # Force store the fixed URL regardless of content
+                    session_source_url["current"] = fetch_url
                 except Exception as e:
                     print(f"  [STREAM] API call failed: {e}")
 
@@ -2938,6 +3307,46 @@ IMPORTANT
         # Cache successful dynamic content for follow-up questions
         if dynamic_content:
             self._stream_context[session_id] = dynamic_content
+
+        # ========================================================================
+        # INTELLIGENT URL VALIDATION: Only escalate to support when truly needed
+        # ========================================================================
+        if intent in data_intents and not is_continent_query:
+            from chatbot.services.url_validator import get_url_validator
+            validator = get_url_validator()
+
+            show_url, reason, validation_message = validator.should_show_url(
+                intent, params, dynamic_content
+            )
+
+            if not show_url:
+                # URL should NOT be shown - provide alternative guidance
+                print(f"  [STREAM] URL validation failed: {reason}")
+                print(f"  [STREAM] Redirecting to alternative response")
+
+                # Save user message
+                if self.redis:
+                    self.redis.save_message(session_id, {"role": "user", "content": message})
+
+                # Save assistant response
+                if self.redis:
+                    self.redis.save_message(session_id, {
+                        "role": "assistant",
+                        "content": validation_message
+                    })
+
+                # Yield alternative response with guidance (NOT aggressive upsell)
+                yield json.dumps({
+                    "credit_exhausted": True,  # Reuse same UI component
+                    "message": validation_message,
+                    "actions": [
+                        {"type": "schedule_demo", "label": "Schedule a Demo"},
+                        {"type": "chat_with_us", "label": "Talk to Sales"},
+                        {"type": "continue_chat", "label": "Continue Chat"}
+                    ],
+                    "done": True
+                })
+                return
 
         # Get KB context using correct method and field name
         # Use llm_query (reconstructed) for better KB matching
@@ -2988,6 +3397,19 @@ IMPORTANT
         # ========================================================================
         # Get the source URL for including in response (global already declared above)
         current_source_url = session_source_url.get("current", "") if dynamic_content else ""
+
+        # ========================================================================
+        # CRITICAL: FINAL URL FIX BEFORE SHOWING TO USER
+        # Apply mirror/detailed fix one last time to ensure URL is correct
+        # ========================================================================
+        if current_source_url and intent in ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]:
+            print(f"\n{'🔧'*35}")
+            print(f"[FINAL URL FIX] URL before final fix: {current_source_url}")
+            current_source_url = await self._fix_url_data_type(current_source_url, intent, params)
+            print(f"[FINAL URL FIX] URL after final fix: {current_source_url}")
+            print(f"{'🔧'*35}\n")
+            # Update the global too
+            session_source_url["current"] = current_source_url
 
         prompt_config = PromptConfig(
             site_name=Config.SITE_NAME,
