@@ -35,7 +35,7 @@ class RedisMemoryManager:
         port: int = 6379,
         db: int = 0,
         password: Optional[str] = None,
-        ttl_days: int = 7
+        ttl_days: int = 2  # REDUCED FROM 7 to 2 days for memory safety
     ):
         self.client = redis.Redis(
             host=host,

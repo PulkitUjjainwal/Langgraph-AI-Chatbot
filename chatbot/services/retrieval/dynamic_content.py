@@ -215,9 +215,16 @@ class DynamicContentManager:
                 logger.error("[LEGACY] No legacy client matched this URL")
 
         # =====================================================================
-        # STEP 4: Cache and return
+        # STEP 4: Smart Empty Response Detection
         # =====================================================================
         if content:
+            # Check if content is actually meaningful (not just error messages)
+            if self._is_empty_response(content):
+                logger.warning(f"✗ Content appears empty or meaningless ({len(content)} chars)")
+                error_msg = f"API returned empty or invalid data for {url}"
+                logger.error(f"✗ {error_msg}")
+                raise DynamicContentError(error_msg)
+
             self._add_to_cache(url, content)
             logger.info(f"✓ Cached successfully ({len(self.content_cache)}/{self.max_cache_size})")
             return content
@@ -225,6 +232,67 @@ class DynamicContentManager:
             error_msg = f"All fetching methods failed for {url}"
             logger.error(f"✗ {error_msg}")
             raise DynamicContentError(error_msg)
+
+    def _is_empty_response(self, content: str) -> bool:
+        """
+        Detect if API response is empty or meaningless
+
+        Args:
+            content: Response content to check
+
+        Returns:
+            True if response is empty/meaningless, False otherwise
+        """
+        if not content or len(content.strip()) < 50:
+            return True
+
+        content_lower = content.lower()
+
+        # Check for VERY specific error patterns (must be clear errors, not just containing words)
+        # Be conservative - only reject obviously broken responses
+
+        # Pattern 1: Content starts with error message
+        if content.startswith("Error") or content.startswith("ERROR"):
+            return True
+
+        # Pattern 2: JSON error response
+        if content.startswith("{\"error\"") or content.startswith('{"error"'):
+            return True
+
+        # Pattern 3: Very explicit empty messages (whole line, not substring)
+        explicit_empty_phrases = [
+            "no data available",
+            "no records found",
+            "0 records",
+            "empty result",
+            "data unavailable",
+            "no information available"
+        ]
+
+        # Check if the ENTIRE response (trimmed) matches these phrases
+        content_trimmed = content.strip().lower()
+        if content_trimmed in explicit_empty_phrases:
+            return True
+
+        # Pattern 4: Response is just "404" or "not found" (but allow as part of longer content)
+        if len(content_trimmed) < 100 and ("404" in content_trimmed or content_trimmed == "not found"):
+            return True
+
+        # Pattern 5: Check if response has ANY substantial numeric data (value, shipments, etc.)
+        # If it has numbers formatted with currency or large values, it's likely valid data
+        import re
+        has_substantial_data = bool(re.search(r'\$[\d,]+\.?\d*|\d{3,}[,\.]?\d+', content))
+
+        if has_substantial_data:
+            # Has numeric data - definitely not empty
+            return False
+
+        # If we got here and content is > 500 chars, it's probably real data
+        if len(content) > 500:
+            return False
+
+        # Very short responses without numbers are suspicious
+        return len(content) < 200
 
     def _add_to_cache(self, key: str, value: str):
         """

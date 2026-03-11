@@ -7,6 +7,20 @@ import WhatsAppDropdown from "./WhatsAppDropdown";
 import { getDeviceInfoForAPI } from "../utils/deviceDetection";
 // import VoiceChat from "./VoiceChat"; // Commented out - will add back later
 import whatsappQr from  "../../public/whatsapp-qr.avif"
+import {
+  // trackSuggestedQuestionClick,
+  trackQuestionCardClick,
+  trackActionClick,
+  trackResetConversation,
+  trackWhatsAppClick,
+  // trackVoiceChat,
+  trackDataTypeSelection,
+  trackCountryInput,
+  trackProductInput,
+  // trackLeadCapture,
+  trackOdooEscalation,
+  // trackCallbackRequest,
+} from "../utils/supportTracking";
 
 // Extend Window interface for Odoo-related properties
 declare global {
@@ -914,6 +928,7 @@ export default function ChatWidget() {
 
   // Open schedule demo modal
   const openScheduleDemo = () => {
+    // Note: Tracking happens in handleActionClick before this is called
     if (typeof window !== "undefined" && typeof (window as any).openScheduleDemo === "function") {
       (window as any).openScheduleDemo();
     } else {
@@ -973,6 +988,9 @@ export default function ChatWidget() {
   };
   // Handle action button clicks
   const handleActionClick = (actionType: string, originalQuery?: string) => {
+    // Track the action click
+    trackActionClick(sessionId, actionType, { originalQuery });
+
     if (actionType === "schedule_demo") {
       openScheduleDemo();
     } else if (actionType === "whatsapp") {
@@ -1000,6 +1018,9 @@ export default function ChatWidget() {
   // Send conversation context to Odoo and open Odoo chat
   const sendContextToOdooAndOpenChat = async () => {
     console.log("[ODOO] Chat with us clicked — session_id:", sessionIdRef.current);
+
+    // Track Odoo escalation
+    trackOdooEscalation(sessionId);
 
     const apiOrigin = new URL(import.meta.env.VITE_API_URL || "https://chatbot.exportgenius.in").origin;
 
@@ -1627,6 +1648,30 @@ export default function ChatWidget() {
                 return data.question;
               }
 
+              // Handle show support buttons (vague/incomplete queries)
+              if (data.show_support_buttons) {
+                console.log('[Stream] Show support buttons - vague query detected');
+
+                // Build support actions
+                const supportActions: ChatMessage["actions"] = [
+                  { type: "schedule_demo", label: "Schedule a Demo" },
+                  { type: "chat_with_us", label: "Talk to Live Agent" },
+                  { type: "whatsapp", label: "WhatsApp" },
+                  { type: "continue_chat", label: "Continue Chat" }
+                ];
+
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantMsgId ? {
+                      ...m,
+                      actions: supportActions,
+                      isCreditExhausted: true // Reuse same UI component
+                    } : m
+                  )
+                );
+                // Don't return - continue processing for done event
+              }
+
               if (data.chunk) {
                 accumulatedText += data.chunk;
                 setMessages((prev) =>
@@ -1639,12 +1684,30 @@ export default function ChatWidget() {
               if (data.done) {
                 console.log(`Streaming complete in ${data.processing_time?.toFixed(2)}s`);
 
-                // Handle explore URL if present
-                if (data.explore_url) {
+                // Handle explore URL if present (but NOT if support buttons are shown)
+                if (data.explore_url && !data.show_support_buttons) {
                   console.log('[Stream] Explore URL:', data.explore_url);
                   setMessages((prev) =>
                     prev.map((m) =>
                       m.id === assistantMsgId ? { ...m, exploreUrl: data.explore_url } : m
+                    )
+                  );
+                } else if (data.show_support_buttons) {
+                  console.log('[Stream] Support buttons mode - NOT showing explore URL');
+
+                  // Add support buttons to the message
+                  const supportActions: ChatMessage["actions"] = (data.actions || []).map((a: any) => ({
+                    type: a.type as any,
+                    label: a.label
+                  }));
+
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === assistantMsgId ? {
+                        ...m,
+                        actions: supportActions,
+                        isCreditExhausted: true // Reuse same UI styling
+                      } : m
                     )
                   );
                 }
@@ -1954,6 +2017,8 @@ export default function ChatWidget() {
 
   const handleChatWithUs = () => {
     console.log('[ChatWidget] Chat with us clicked — switching to Odoo livechat');
+    // Track live chat interaction
+    trackActionClick(sessionId, 'chat_with_us', { source: 'options_menu' });
     // Close options menu first
     setShowOptionsMenu(false);
     // Try to open Odoo - it will hide the AI chatbot only if successful
@@ -1962,18 +2027,23 @@ export default function ChatWidget() {
 
   const handleCallUs = () => {
     console.log('[ChatWidget] Call us clicked');
+    // Track call request
+    trackActionClick(sessionId, 'call', { source: 'options_menu', phone: '+4407727449124' });
     window.location.href = "tel:+4407727449124";
     setShowOptionsMenu(false);
   };
 
   const handleWhatsAppUs = () => {
     console.log('[ChatWidget] WhatsApp clicked');
+    // Track WhatsApp menu open
+    trackActionClick(sessionId, 'whatsapp', { source: 'options_menu', action: 'menu_opened' });
     // Toggle a small submenu with QR / Link options
     setShowWhatsAppSubmenu((s) => !s);
   };
 
   const openWhatsAppLink = () => {
     const wa = "https://wa.me/447727449124";
+    trackWhatsAppClick(sessionId, 'direct_link');
     try {
       window.open(wa, "_blank");
     } catch (err) {
@@ -1985,6 +2055,7 @@ export default function ChatWidget() {
   };
 
   const openWhatsAppQRInChat = () => {
+    trackWhatsAppClick(sessionId, 'qr_code');
     // Close menus and show QR overlay inside chat
     setShowWhatsAppQR(true);
     setShowWhatsAppSubmenu(false);
@@ -2011,6 +2082,9 @@ export default function ChatWidget() {
   // Reset conversation - clear messages and create new session
   const handleResetConversation = async () => {
     console.log('[ChatWidget] Reset conversation clicked');
+
+    // Track reset conversation
+    trackResetConversation(sessionId);
 
     // Save current conversation before resetting
     await saveConversationHistory();
@@ -2371,7 +2445,10 @@ export default function ChatWidget() {
                 {questionCards.map((card, idx) => (
                   <button
                     key={idx}
-                    onClick={() => handleSend(card.title)}
+                    onClick={() => {
+                      trackQuestionCardClick(sessionId, card.title, idx);
+                      handleSend(card.title);
+                    }}
                     disabled={isSending}
                     className="question-card w-full text-left px-4 py-3 rounded-lg bg-white border border-gray-200
                       hover:bg-orange-50 hover:border-orange-300 disabled:opacity-50 disabled:cursor-not-allowed
@@ -2413,7 +2490,10 @@ export default function ChatWidget() {
                     <button
                       key={opt.value}
                       disabled={isSending}
-                      onClick={() => handleSend(opt.label, { data_type: opt.value })}
+                      onClick={() => {
+                        trackDataTypeSelection(sessionId, opt.value);
+                        handleSend(opt.label, { data_type: opt.value });
+                      }}
                       className="rounded-full bg-orange-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-orange-600 disabled:opacity-50"
                     >
                       {opt.label}
@@ -2433,6 +2513,7 @@ export default function ChatWidget() {
                         e.preventDefault();
                         const v = countryInput.trim();
                         if (!v) return;
+                        trackCountryInput(sessionId, v);
                         setCountryInput("");
                         handleSend(v, { country: v });
                       }
@@ -2452,6 +2533,7 @@ export default function ChatWidget() {
                     onClick={() => {
                       const v = countryInput.trim();
                       if (!v) return;
+                      trackCountryInput(sessionId, v);
                       setCountryInput("");
                       handleSend(v, { country: v });
                     }}
@@ -2473,6 +2555,7 @@ export default function ChatWidget() {
                         e.preventDefault();
                         const v = productInput.trim();
                         if (!v) return;
+                        trackProductInput(sessionId, v);
                         setProductInput("");
                         handleSend(v, { product: v });
                       }
@@ -2486,6 +2569,7 @@ export default function ChatWidget() {
                     onClick={() => {
                       const v = productInput.trim();
                       if (!v) return;
+                      trackProductInput(sessionId, v);
                       setProductInput("");
                       handleSend(v, { product: v });
                     }}

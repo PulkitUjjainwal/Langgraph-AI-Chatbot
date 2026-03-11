@@ -432,6 +432,303 @@ class FeedbackExportResponse(BaseModel):
 
 
 # ============================================================================
+# SUPPORT INTERACTION MODELS (Click Tracking & Analytics)
+# ============================================================================
+
+from enum import Enum
+
+class SupportInteractionType(str, Enum):
+    """Enum for support interaction types"""
+    MODE_SWITCH = "mode_switch"                  # User switched between General/Company mode
+    SUGGESTED_QUESTION = "suggested_question"     # User clicked a suggested question chip
+    URL_INPUT = "url_input"                       # User entered/submitted Export Genius URL
+    LEAD_CAPTURE = "lead_capture"                 # User submitted lead capture form
+    ODOO_ESCALATION = "odoo_escalation"          # User requested Odoo CRM escalation
+    TWILIO_CALLBACK = "twilio_callback"           # User requested phone callback
+    VOICE_CHAT_START = "voice_chat_start"         # User started voice chat
+    VOICE_CHAT_END = "voice_chat_end"             # User ended voice chat
+    FILE_UPLOAD = "file_upload"                   # User uploaded a file
+    EXPORT_DATA = "export_data"                   # User exported conversation/data
+    SHARE_CONVERSATION = "share_conversation"     # User shared conversation
+    CLEAR_CONVERSATION = "clear_conversation"     # User cleared/reset conversation
+    FEEDBACK_GIVEN = "feedback_given"             # User gave feedback
+    COPY_MESSAGE = "copy_message"                 # User copied assistant message
+    REGENERATE_RESPONSE = "regenerate_response"   # User requested response regeneration
+    WHATSAPP_REQUEST = "whatsapp_request"         # User clicked WhatsApp button (QR or link)
+    SCHEDULE_DEMO = "schedule_demo"               # User clicked schedule demo button
+    CHAT_WITH_US = "chat_with_us"                 # User clicked chat with us button
+    CALL_REQUEST = "call_request"                 # User clicked call request button
+    QUESTION_CARD_CLICK = "question_card_click"   # User clicked question card
+    DATA_TYPE_SELECTION = "data_type_selection"   # User selected data type (Import/Export/Both)
+    COUNTRY_INPUT = "country_input"               # User entered country
+    PRODUCT_INPUT = "product_input"               # User entered product
+    OTHER = "other"                               # Other custom interactions
+
+
+class ConversionType(str, Enum):
+    """Enum for conversion types"""
+    LEAD = "lead"
+    CALLBACK = "callback"
+    ESCALATION = "escalation"
+    NONE = "none"
+
+
+class SupportInteractionRequest(BaseModel):
+    """Request model for tracking support interaction"""
+    session_id: str = Field(..., description="Session identifier")
+    interaction_type: SupportInteractionType = Field(..., description="Type of support interaction")
+    interaction_data: Optional[Dict[str, Any]] = Field(None, description="Additional structured data about the interaction")
+    page_url: Optional[str] = Field(None, description="Page URL where interaction occurred")
+    message_context: Optional[str] = Field(None, description="Related message content if applicable")
+    interaction_order: Optional[int] = Field(None, description="Order of this interaction in the session")
+    led_to_conversion: bool = Field(False, description="Did this lead to a conversion?")
+    conversion_type: ConversionType = Field(ConversionType.NONE, description="Type of conversion if applicable")
+
+    # Device & Browser Information
+    device_type: Optional[str] = Field(None, description="Device type: mobile, tablet, desktop")
+    browser_name: Optional[str] = Field(None, description="Browser name")
+    os_name: Optional[str] = Field(None, description="Operating system")
+
+    # Location
+    country: Optional[str] = Field(None, description="Country from IP")
+    region: Optional[str] = Field(None, description="Region/State")
+    city: Optional[str] = Field(None, description="City")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "user123_session_xyz",
+                "interaction_type": "suggested_question",
+                "interaction_data": {
+                    "question": "What is Export Genius?",
+                    "index": 0,
+                    "question_category": "general"
+                },
+                "page_url": "https://www.exportgenius.in/",
+                "message_context": "User selected first suggested question",
+                "interaction_order": 1,
+                "led_to_conversion": False,
+                "conversion_type": "none",
+                "device_type": "desktop",
+                "browser_name": "Chrome",
+                "os_name": "Windows",
+                "country": "United States",
+                "region": "California",
+                "city": "San Francisco"
+            }
+        }
+
+
+class SupportInteractionResponse(BaseModel):
+    """Response model for support interaction tracking"""
+    success: bool = Field(..., description="Whether interaction was tracked successfully")
+    interaction_id: Optional[int] = Field(None, description="Database ID of the stored interaction")
+    message: str = Field(..., description="Response message")
+    storage: Optional[str] = Field(None, description="Storage type: 'mysql' or 'file'")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "interaction_id": 12345,
+                "message": "Support interaction tracked successfully",
+                "storage": "mysql"
+            }
+        }
+
+
+class SupportInteractionItem(BaseModel):
+    """Single support interaction for display"""
+    id: int
+    session_id: str
+    interaction_type: str
+    interaction_data: Optional[Dict[str, Any]] = None
+    page_url: Optional[str] = None
+    message_context: Optional[str] = None
+    interaction_order: Optional[int] = None
+    led_to_conversion: bool
+    conversion_type: str
+    device_type: Optional[str] = None
+    country: Optional[str] = None
+    created_at: str
+
+
+class SessionInteractionsResponse(BaseModel):
+    """All support interactions for a specific session"""
+    session_id: str
+    interactions: List[SupportInteractionItem]
+    total: int
+
+
+class SupportOptionStats(BaseModel):
+    """Statistics for a specific support option"""
+    interaction_type: str
+    total_clicks: int
+    unique_users: int
+    total_conversions: int
+    conversion_rate_pct: float
+    avg_interaction_order: Optional[float] = None
+    countries_reached: int
+
+
+class SupportAnalyticsResponse(BaseModel):
+    """Analytics data for support options usage"""
+    period_days: int
+    total_interactions: int
+    total_unique_sessions: int
+    overall_conversion_rate: float
+
+    # Most popular support options
+    popular_options: List[SupportOptionStats]
+
+    # Breakdown by type
+    interactions_by_type: Dict[str, int]
+
+    # Device breakdown
+    interactions_by_device: Dict[str, int]
+
+    # Geographic breakdown (top countries)
+    interactions_by_country: List[Dict[str, Any]]
+
+    # Conversion metrics
+    total_conversions: int
+    conversions_by_type: Dict[str, int]
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "period_days": 30,
+                "total_interactions": 5420,
+                "total_unique_sessions": 1890,
+                "overall_conversion_rate": 12.5,
+                "popular_options": [
+                    {
+                        "interaction_type": "suggested_question",
+                        "total_clicks": 2100,
+                        "unique_users": 980,
+                        "total_conversions": 145,
+                        "conversion_rate_pct": 6.9,
+                        "avg_interaction_order": 1.2,
+                        "countries_reached": 45
+                    },
+                    {
+                        "interaction_type": "mode_switch",
+                        "total_clicks": 1560,
+                        "unique_users": 780,
+                        "total_conversions": 89,
+                        "conversion_rate_pct": 5.7,
+                        "avg_interaction_order": 2.1,
+                        "countries_reached": 38
+                    }
+                ],
+                "interactions_by_type": {
+                    "suggested_question": 2100,
+                    "mode_switch": 1560,
+                    "url_input": 890,
+                    "lead_capture": 320,
+                    "voice_chat_start": 245
+                },
+                "interactions_by_device": {
+                    "desktop": 3200,
+                    "mobile": 1890,
+                    "tablet": 330
+                },
+                "interactions_by_country": [
+                    {"country": "United States", "count": 1890, "conversions": 145},
+                    {"country": "India", "count": 1230, "conversions": 89},
+                    {"country": "United Kingdom", "count": 670, "conversions": 45}
+                ],
+                "total_conversions": 679,
+                "conversions_by_type": {
+                    "lead": 320,
+                    "callback": 189,
+                    "escalation": 170
+                }
+            }
+        }
+
+
+class SupportDailyStats(BaseModel):
+    """Daily support interaction statistics"""
+    date: str
+    interaction_type: str
+    interaction_count: int
+    unique_sessions: int
+    conversions: int
+    conversion_rate_pct: float
+    mobile_users: int
+    desktop_users: int
+    tablet_users: int
+
+
+class SupportTimeSeriesResponse(BaseModel):
+    """Time series data for support analytics charts"""
+    data: List[SupportDailyStats]
+    period_days: int
+    start_date: str
+    end_date: str
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "data": [
+                    {
+                        "date": "2025-12-01",
+                        "interaction_type": "suggested_question",
+                        "interaction_count": 145,
+                        "unique_sessions": 67,
+                        "conversions": 8,
+                        "conversion_rate_pct": 5.5,
+                        "mobile_users": 32,
+                        "desktop_users": 29,
+                        "tablet_users": 6
+                    }
+                ],
+                "period_days": 30,
+                "start_date": "2025-11-01",
+                "end_date": "2025-12-01"
+            }
+        }
+
+
+class DeviceSupportPreference(BaseModel):
+    """Support preference by device type"""
+    device_type: str
+    interaction_type: str
+    usage_count: int
+    unique_sessions: int
+    pct_of_device_interactions: float
+
+
+class DeviceSupportPreferencesResponse(BaseModel):
+    """Device-based support preferences"""
+    preferences: List[DeviceSupportPreference]
+    period_days: int
+
+
+class ConversionFunnelItem(BaseModel):
+    """Single conversion funnel entry"""
+    session_id: str
+    started_at: str
+    message_count: int
+    unique_interactions_used: int
+    interaction_path: str
+    converted: bool
+    conversion_type: str
+    device_type: Optional[str] = None
+    country: Optional[str] = None
+
+
+class ConversionFunnelResponse(BaseModel):
+    """Conversion funnel analysis"""
+    funnel_items: List[ConversionFunnelItem]
+    total_converted_sessions: int
+    avg_interactions_to_convert: float
+    most_common_path: str
+    period_days: int
+
+
+# ============================================================================
 # VOICE CHAT MODELS
 # ============================================================================
 

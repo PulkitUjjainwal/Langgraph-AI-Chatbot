@@ -418,58 +418,23 @@ class SlotManager:
         # Validate ALL country-related slots across all intents
         # This prevents invalid country names (like "you-suggest", "all", etc.) from being stored
 
-        # Validate country_to_country intent
+        # NO VALIDATION AT SLOT LEVEL
+        # Slots are just data storage - accept whatever the LLM extracted
+        # Intelligence and validation happens ONLY at URL generation
+        # This allows the LLM to:
+        # 1. See full context (even if "europe" is in slots)
+        # 2. Handle naturally ("Which European country?")
+        # 3. Not be blocked by premature validation
+
+        # Just log what we have for debugging
         if intent == "country_to_country":
             origin = state.slots.get("origin_country", "")
             destination = state.slots.get("destination_country", "")
+            print(f"[SLOTS] Stored: origin_country='{origin}', destination_country='{destination}'")
 
-            # Check if both countries are valid (if provided)
-            origin_valid = self.is_valid_country(origin) if origin else True
-            destination_valid = self.is_valid_country(destination) if destination else True
-
-            if origin and not origin_valid:
-                print(f"[SLOTS] Invalid origin_country '{origin}' - not in KNOWN_COUNTRIES. Clearing slot.")
-                state.slots.pop("origin_country", None)
-
-            if destination and not destination_valid:
-                print(f"[SLOTS] Invalid destination_country '{destination}' - not in KNOWN_COUNTRIES. Clearing slot.")
-                state.slots.pop("destination_country", None)
-
-        # Validate search_trade_data and search_country_data intents (use "country" slot)
         if intent in ["search_trade_data", "search_country_data", "hs_code"]:
             country = state.slots.get("country", "")
-
-            if country and not self.is_valid_country(country):
-                # Check for special conversational phrases that aren't countries
-                conversational_phrases = [
-                    "you-suggest", "you suggest", "suggest", "any", "all", "anywhere",
-                    "everywhere", "all-countries", "multiple", "many", "several",
-                    "which", "what", "where", "recommend", "best", "whatever",
-                    "doesn't matter", "dont care", "don't care", "idk", "i don't know",
-                    "i dunno", "dunno", "pick one", "choose", "decide", "up to you",
-                    "you pick", "you choose", "you decide", "your choice", "your pick"
-                ]
-
-                normalized_country = country.lower().strip().replace("-", " ")
-                is_conversational = any(phrase in normalized_country for phrase in conversational_phrases)
-
-                # Also check for common non-country responses
-                invalid_responses = ["yes", "no", "ok", "okay", "sure", "maybe", "none", "nothing"]
-                is_invalid_response = normalized_country in invalid_responses
-
-                if is_conversational:
-                    print(f"[SLOTS] Detected conversational response '{country}' instead of country name.")
-                    print(f"[SLOTS] User is asking for suggestions, not providing a country. Clearing slot.")
-                elif is_invalid_response:
-                    print(f"[SLOTS] Detected invalid response '{country}' - not a country name. Clearing slot.")
-                else:
-                    print(f"[SLOTS] Invalid country '{country}' - not in KNOWN_COUNTRIES. Clearing slot.")
-
-                # Remove invalid country from slots
-                state.slots.pop("country", None)
-                # Mark this slot as pending so next answer is detected as slot fill
-                state.last_asked_slot = "country"
-                print(f"[SLOTS] Marked 'country' as pending slot for next user message.")
+            print(f"[SLOTS] Stored: country='{country}'")
 
         # Calculate missing slots
         state.missing_slots = self._get_missing_slots(intent, state.slots)
@@ -561,28 +526,34 @@ class SlotManager:
             return False
 
         # Normalize to match KNOWN_COUNTRIES format (lowercase, spaces not hyphens)
+        # Strip common punctuation that users might accidentally include
         normalized = value.lower().strip().replace("-", " ")
+        # Remove trailing punctuation like "?" or "!" that users might add
+        normalized = normalized.rstrip('?!.,;:')
+        # Remove leading prepositions like "for", "in", "from", "to"
+        for prep in ["for ", "in ", "from ", "to ", "at ", "on "]:
+            if normalized.startswith(prep):
+                normalized = normalized[len(prep):].strip()
 
         # Fast path: Check if in known countries list
         if normalized in self.config.KNOWN_COUNTRIES:
             return True
 
-        # CRITICAL: Reject conversational phrases first (high confidence they're not countries)
+        # Only reject OBVIOUS invalid inputs that definitely aren't countries
+        # Let the LLM handle ambiguous cases naturally (regions, etc.)
+
+        # Reject conversational phrases (obvious non-countries)
         conversational_phrases = [
-            "you-suggest", "you suggest", "suggest", "any", "all", "anywhere",
-            "everywhere", "all-countries", "all countries", "multiple", "many", "several",
+            "you suggest", "suggest", "any", "anywhere",
+            "everywhere", "all countries", "multiple", "many", "several",
             "which", "what", "where", "recommend", "best", "whatever",
-            "doesn't matter", "dont care", "don't care", "idk", "i don't know",
-            "i dunno", "dunno", "pick one", "choose", "decide", "up to you",
-            "you pick", "you choose", "you decide", "your choice", "your pick",
+            "dont care", "don't care", "idk", "i don't know",
+            "dunno", "pick one", "choose", "decide", "up to you",
         ]
+        if normalized in conversational_phrases:
+            return False
 
-        # Check for conversational phrases
-        for phrase in conversational_phrases:
-            if phrase in normalized or normalized in phrase:
-                return False
-
-        # Reject common invalid responses (not countries)
+        # Reject simple yes/no responses (obvious non-countries)
         invalid_responses = ["yes", "no", "ok", "okay", "sure", "maybe", "none", "nothing", "nope", "yep"]
         if normalized in invalid_responses:
             return False
@@ -595,33 +566,15 @@ class SlotManager:
         if normalized.isdigit():
             return False
 
-        # Heuristic validation: Accept reasonable country-like inputs
-        # - Must be alphabetic (with spaces, hyphens, apostrophes allowed)
-        # - Must be 1-4 words (most countries are 1-4 words)
-        # - Each word should be at least 2 characters
+        # For URL generation: be strict - only allow known countries
+        # For conversation: let LLM handle ambiguous inputs naturally
+        # This validation is called before URL generation, so reject if not in known list
 
-        # Remove allowed punctuation for checking
-        cleaned = normalized.replace(" ", "").replace("-", "").replace("'", "").replace(".", "")
-
-        # Must be primarily alphabetic
-        if not cleaned.isalpha():
-            return False
-
-        # Check word count and length
-        words = normalized.split()
-        if len(words) > 5:  # Very unlikely to be a country name
-            return False
-
-        # Each word should be at least 2 characters (with some exceptions like "UK")
-        for word in words:
-            clean_word = word.replace("-", "").replace("'", "")
-            if len(clean_word) < 2 and normalized not in ["uk", "us"]:
-                return False
-
-        # If it passes all heuristics, accept it as a potential country
-        # This allows for country name variations we might have missed
-        print(f"[SLOTS] Accepting '{value}' as potential country (not in known list but passes heuristics)")
-        return True
+        # If it's not in KNOWN_COUNTRIES and not obviously invalid, reject for URL generation
+        # but the LLM will still handle it naturally in conversation
+        print(f"[SLOTS] '{value}' not in KNOWN_COUNTRIES list - will not generate URL")
+        print(f"[SLOTS] LLM will handle this query naturally (may be region, typo, or needs clarification)")
+        return False
 
     def is_complex_query(self, message: str, params: Dict[str, Any] = None) -> Tuple[bool, str]:
         """
@@ -928,13 +881,16 @@ class SlotManager:
                     print(f"  [SLOTS] Cannot generate URL: invalid country '{country}' for search_trade_data")
                     return None
 
-            # Determine endpoint based on entity_type
-            # importer/exporter/supplier/buyer/trade
-            endpoint = entity_type if entity_type in ["importer", "exporter", "suppliers", "buyers", "trade"] else "trade"
-            params = f"type={direction}&country={country}"
+            # ALWAYS use "trade" endpoint for search_trade_data intent
+            # The entity_type (buyers/suppliers/importers/exporters) is contextual info only
+            endpoint = "trade"
+
+            # Format country with + for spaces (URL encoding) instead of hyphens
+            country_formatted = country.replace("-", "+")
+            params = f"type={direction}&country={country_formatted}"
 
             if product:
-                params += f"&product={product.lower().replace(' ', '%20')}"
+                params += f"&product={product.lower().replace(' ', '+')}"
             elif hs_code:
                 params += f"&hs_code={hs_code}"
 

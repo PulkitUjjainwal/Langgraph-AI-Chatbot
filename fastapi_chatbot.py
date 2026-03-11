@@ -1429,6 +1429,7 @@ class ChatbotManager:
         self._stream_history: Dict[str, List[Dict[str, str]]] = {}  # Conversation history for streaming
         self._stream_context: Dict[str, str] = {}  # Last dynamic content for follow-up questions
         self._last_explore_url: str = ""  # Last explore URL generated for streaming
+        self._show_support_buttons: bool = False  # Flag to show support buttons instead of URL
         self.app = self._create_workflow()
         print("[OK] Chatbot Manager initialized (Redis-backed)")
 
@@ -2597,6 +2598,29 @@ IMPORTANT
         intent_result = await self._detect_intent_and_entities(message)
         print(f"  [INTENT] Detected once: {intent_result['intent']} (confidence: {intent_result['confidence']:.2f})")
 
+        # ============================================================================
+        # PARALLEL VALIDATION: Start validation in background (non-blocking)
+        # DISABLED: Causing response hangs - needs debugging
+        # ============================================================================
+        validation_task = None
+        # detected_url = intent_result.get("url", "")
+        # detected_intent = intent_result.get("intent", "")
+        # detected_params = intent_result.get("params", {})
+        #
+        # if detected_url and detected_intent in ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]:
+        #     try:
+        #         from chatbot.services.data_validator import get_data_validator
+        #         validator = get_data_validator(timeout=3.0)  # Fast timeout
+        #
+        #         print(f"  [PARALLEL] Starting validation task in background (non-blocking)...")
+        #         validation_task = asyncio.create_task(
+        #             validator.validate_url_has_data(detected_url, detected_intent, detected_params)
+        #         )
+        #         print(f"  [PARALLEL] Validation running in background while response generates...")
+        #     except Exception as e:
+        #         print(f"  [PARALLEL] Error starting validation: {e}")
+        #         validation_task = None
+
         # if dynamic_url:
         print(f"  [DEBUG] [OK] dynamic_url provided in chat()")
         # print(f"  [DEBUG] Looking up cached data for URL: {dynamic_url[:100] if len(dynamic_url) > 100 else dynamic_url}...")
@@ -2776,6 +2800,43 @@ IMPORTANT
         else:
             response = "I'm sorry, I couldn't process that request."
 
+        # ============================================================================
+        # CHECK PARALLEL VALIDATION RESULT (if completed)
+        # DISABLED: Feature temporarily disabled
+        # ============================================================================
+        # if validation_task:
+        #     try:
+        #         # Check if validation completed (with very short timeout to avoid blocking)
+        #         validation_result = await asyncio.wait_for(validation_task, timeout=0.1)
+        #         print(f"  [PARALLEL] Validation completed: {validation_result.status.value}")
+        #
+        #         # If validation shows no data, enhance response with alternatives
+        #         if not validation_result.has_data and validation_result.alternatives:
+        #             print(f"  [PARALLEL] No data found - enhancing response with alternatives")
+        #
+        #             alt_text = "\n\n**Note:** The requested data may not be available. "
+        #
+        #             if validation_result.status.value == "empty":
+        #                 alt_text += "Here are similar options with comprehensive data:\n"
+        #             elif validation_result.status.value == "not_found":
+        #                 alt_text += "This resource was not found. Try these alternatives:\n"
+        #
+        #             for alt in validation_result.alternatives[:3]:
+        #                 if alt.get("type") == "country_suggestion":
+        #                     alt_text += f"- **{alt['country'].replace('-', ' ').title()}**: {alt.get('reason', 'Alternative option')}\n"
+        #                 elif alt.get("type") == "mirror_data":
+        #                     alt_text += f"- {alt.get('suggestion', 'Alternative data')}: {alt.get('reason', '')}\n"
+        #
+        #             response += alt_text
+        #             print(f"  [PARALLEL] Enhanced response with {len(validation_result.alternatives)} alternatives")
+        #
+        #     except asyncio.TimeoutError:
+        #         # Validation didn't complete in time - that's OK, proceed without it
+        #         print(f"  [PARALLEL] Validation still running (timed out after response) - proceeding without results")
+        #     except Exception as e:
+        #         # Validation failed - that's OK, proceed without it
+        #         print(f"  [PARALLEL] Validation error (non-blocking): {e}")
+
         processing_time = time.time() - start_time
         print(f"\n[CHAT END] Total time: {processing_time:.2f}s")
         print(f"{'='*70}\n")
@@ -2788,6 +2849,33 @@ IMPORTANT
         }
 
         return response, processing_time, sources_used
+
+    def _should_show_explore_url(
+        self,
+        response: str,
+        intent: str,
+        explore_url: str,
+        missing_slots: List[str]
+    ) -> bool:
+        """
+        Determine if explore URL should be shown.
+
+        Support buttons should RARELY be shown - only for true errors or when explicitly needed.
+        The LLM should handle most queries naturally.
+
+        Returns:
+            True if explore URL should be shown (default), False only in rare cases
+        """
+        # ALWAYS show explore URL if it exists and intent is data-related
+        # Let the LLM handle edge cases naturally
+        data_intents = ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]
+
+        if intent in data_intents and explore_url:
+            return True
+
+        # For non-data intents, don't show explore URL but also don't show support buttons
+        # Let the LLM handle the conversation naturally
+        return False
 
     async def chat_stream(self, message: str, session_id: str, dynamic_url: Optional[str] = None):
         """
@@ -2933,6 +3021,11 @@ IMPORTANT
         # ========================================================================
         # Track the query to send to LLM (may differ from raw message for slot answers)
         llm_query = message
+        validation_task = None  # Initialize validation task variable
+
+        # Reset flags for new query
+        self._show_support_buttons = False
+        self._last_explore_url = ""
 
         if is_slot_answer:
             # Use previous intent and fill the pending slot
@@ -2975,6 +3068,23 @@ IMPORTANT
             intent = intent_result.get("intent", "unknown")
             params = intent_result.get("params", {})
             intent_url = intent_result.get("url", "")
+
+            # ============================================================================
+            # PARALLEL VALIDATION: Start validation in background for streaming
+            # DISABLED: Causing response hangs - needs debugging
+            # ============================================================================
+            # if intent_url and intent in ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]:
+            #     try:
+            #         from chatbot.services.data_validator import get_data_validator
+            #         validator = get_data_validator(timeout=3.0)
+            #
+            #         print(f"  [PARALLEL-STREAM] Starting validation in background...")
+            #         validation_task = asyncio.create_task(
+            #             validator.validate_url_has_data(intent_url, intent, params)
+            #         )
+            #     except Exception as e:
+            #         print(f"  [PARALLEL-STREAM] Error starting validation: {e}")
+            #         validation_task = None
 
         print(f"  [STREAM] Intent: {intent}, Params: {params}")
 
@@ -3551,6 +3661,35 @@ if query is for platform
             elapsed = time.time() - start_time
             print(f"  [STREAM] Completed: {chunk_count} chunks in {elapsed:.2f}s")
 
+            # ============================================================================
+            # CHECK PARALLEL VALIDATION RESULT (if exists and completed)
+            # DISABLED: Feature temporarily disabled
+            # ============================================================================
+            # if validation_task:
+            #     try:
+            #         validation_result = await asyncio.wait_for(validation_task, timeout=0.1)
+            #         print(f"  [PARALLEL-STREAM] Validation completed: {validation_result.status.value}")
+            #
+            #         # If no data found, enhance response with alternatives
+            #         if not validation_result.has_data and validation_result.alternatives:
+            #             print(f"  [PARALLEL-STREAM] No data - adding alternatives to response")
+            #
+            #             alt_text = "\n\n**Note:** The requested data may not be available. "
+            #             if validation_result.status.value == "empty":
+            #                 alt_text += "Here are similar options:\n"
+            #
+            #             for alt in validation_result.alternatives[:3]:
+            #                 if alt.get("type") == "country_suggestion":
+            #                     alt_text += f"- **{alt['country'].replace('-', ' ').title()}**\n"
+            #
+            #             full_response += alt_text
+            #             yield alt_text  # Yield the additional text
+            #
+            #     except asyncio.TimeoutError:
+            #         print(f"  [PARALLEL-STREAM] Validation still running - skipping")
+            #     except Exception as e:
+            #         print(f"  [PARALLEL-STREAM] Validation error: {e}")
+
             # Store this exchange in history
             self._stream_history[session_id].append({"role": "user", "content": message})
             self._stream_history[session_id].append({"role": "assistant", "content": full_response})
@@ -3584,11 +3723,14 @@ if query is for platform
                     print(f"  [STREAM] Failed to save messages: {e}")
 
             # ========================================================================
-            # STEP 5: Yield stream completion with explore_url
+            # STEP 5: Finalize and store explore URL
             # ========================================================================
-            # The final response with explore_url is yielded by the endpoint handler
-            # We store explore_url in instance for the endpoint to use
+            # Always show explore URL for data intents (simplified logic)
             self._last_explore_url = explore_url if intent in data_intents else ""
+            self._show_support_buttons = False
+
+            if self._last_explore_url:
+                print(f"  [URL] Explore URL: {self._last_explore_url[:60]}...")
 
         except Exception as e:
             print(f"  [STREAM] Error during streaming: {e}")
@@ -4261,6 +4403,7 @@ async def chat_stream(request: ChatRequest):
             # Send final message with completion status and explore URL
             processing_time = time.time() - start_time
             explore_url = getattr(chatbot_manager, '_last_explore_url', '')
+            show_support = getattr(chatbot_manager, '_show_support_buttons', False)
 
             final_data = {
                 'chunk': '',
@@ -4269,6 +4412,7 @@ async def chat_stream(request: ChatRequest):
                 'full_response': full_response
             }
 
+            # Add explore URL if available
             if explore_url:
                 final_data['explore_url'] = explore_url
 
@@ -6228,6 +6372,198 @@ async def get_feedback_detail(
         raise
     except Exception as e:
         print(f"[Feedback Admin] Detail error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# SUPPORT INTERACTION TRACKING ENDPOINTS (Admin/Dashboard)
+# ============================================================================
+
+# Initialize support interaction service
+from chatbot.database.support_interaction_service import SupportInteractionService, SupportInteraction
+from chatbot.models.api_models import (
+    SupportInteractionRequest, SupportInteractionResponse,
+    SessionInteractionsResponse, SupportAnalyticsResponse,
+    SupportTimeSeriesResponse, DeviceSupportPreferencesResponse,
+    ConversionFunnelResponse
+)
+
+support_interaction_service = SupportInteractionService(
+    host=os.getenv("MYSQL_HOST", "localhost"),
+    port=int(os.getenv("MYSQL_PORT", 3306)),
+    user=os.getenv("MYSQL_USER", "root"),
+    password=os.getenv("MYSQL_PASSWORD", ""),
+    database=os.getenv("MYSQL_DATABASE", "chatbot")
+)
+
+
+@app.on_event("startup")
+async def init_support_interaction_service():
+    """Initialize support interaction service on startup"""
+    await support_interaction_service.initialize()
+
+
+@router.post("/support/track", response_model=SupportInteractionResponse)
+async def track_support_interaction(request: SupportInteractionRequest):
+    """
+    Track a support option click/interaction.
+
+    This endpoint is called from the frontend whenever a user:
+    - Switches modes (General/Company)
+    - Clicks a suggested question
+    - Submits a URL
+    - Captures a lead
+    - Requests callbacks/escalations
+    - And more...
+    """
+    try:
+        interaction = SupportInteraction(
+            session_id=request.session_id,
+            interaction_type=request.interaction_type,
+            interaction_data=request.interaction_data,
+            page_url=request.page_url,
+            message_context=request.message_context,
+            interaction_order=request.interaction_order,
+            led_to_conversion=request.led_to_conversion,
+            conversion_type=request.conversion_type,
+            device_type=request.device_type,
+            browser_name=request.browser_name,
+            os_name=request.os_name,
+            country=request.country,
+            region=request.region,
+            city=request.city
+        )
+
+        result = await support_interaction_service.track_interaction(interaction)
+
+        return {
+            "success": result["success"],
+            "interaction_id": result.get("interaction_id"),
+            "message": "Support interaction tracked successfully",
+            "storage": result.get("storage", "unknown")
+        }
+
+    except Exception as e:
+        print(f"[Support] Track interaction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/support/session/{session_id}", response_model=SessionInteractionsResponse)
+async def get_session_interactions(
+    session_id: str,
+    current_user = Depends(require_auth)
+):
+    """
+    Get all support interactions for a specific session.
+    Used in conversation detail views to show what support options were clicked.
+    """
+    try:
+        interactions = await support_interaction_service.get_session_interactions(session_id)
+
+        return {
+            "session_id": session_id,
+            "interactions": interactions,
+            "total": len(interactions)
+        }
+
+    except Exception as e:
+        print(f"[Support] Get session interactions error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/support/analytics")
+async def get_support_analytics(
+    current_user = Depends(require_auth),
+    days: int = 30
+):
+    """
+    Get comprehensive support option analytics.
+
+    Returns:
+    - Total interactions and unique sessions
+    - Popular support options with conversion rates
+    - Breakdown by device, country, interaction type
+    - Conversion metrics
+    """
+    try:
+        analytics = await support_interaction_service.get_analytics(days=days)
+        return analytics
+
+    except Exception as e:
+        print(f"[Support] Get analytics error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/support/timeseries")
+async def get_support_timeseries(
+    current_user = Depends(require_auth),
+    days: int = 30
+):
+    """
+    Get time series data for support interaction charts.
+    Shows daily breakdown of support option usage.
+    """
+    try:
+        data = await support_interaction_service.get_time_series(days=days)
+
+        # Calculate date range
+        if data:
+            start_date = data[-1]['date'] if len(data) > 0 else datetime.now().date().isoformat()
+            end_date = data[0]['date'] if len(data) > 0 else datetime.now().date().isoformat()
+        else:
+            end_date = datetime.now().date().isoformat()
+            start_date = (datetime.now().date() - timedelta(days=days)).isoformat()
+
+        return {
+            "data": data,
+            "period_days": days,
+            "start_date": start_date,
+            "end_date": end_date
+        }
+
+    except Exception as e:
+        print(f"[Support] Get time series error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/support/device-preferences")
+async def get_device_support_preferences(
+    current_user = Depends(require_auth),
+    days: int = 30
+):
+    """
+    Get support option preferences by device type.
+    Shows which devices use which support options most.
+    """
+    try:
+        preferences = await support_interaction_service.get_device_preferences(days=days)
+
+        return {
+            "preferences": preferences,
+            "period_days": days
+        }
+
+    except Exception as e:
+        print(f"[Support] Get device preferences error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/support/conversion-funnel")
+async def get_conversion_funnel(
+    current_user = Depends(require_auth),
+    days: int = 30,
+    limit: int = 100
+):
+    """
+    Get conversion funnel analysis.
+    Shows which interaction paths lead to conversions.
+    """
+    try:
+        funnel = await support_interaction_service.get_conversion_funnel(days=days, limit=limit)
+        return funnel
+
+    except Exception as e:
+        print(f"[Support] Get conversion funnel error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
