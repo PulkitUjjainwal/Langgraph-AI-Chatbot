@@ -100,7 +100,9 @@ function getApiBaseUrl(): string {
   }
 
   // Fallback to environment variable or default
-  return import.meta.env.VITE_API_BASE_URL || 'http://localhost:8003/api';
+  return import.meta.env.VITE_API_BASE_URL ||
+  //  'http://localhost:8003/api';
+   'https://chatbot.exportgenius.in/api'
 }
 
 /**
