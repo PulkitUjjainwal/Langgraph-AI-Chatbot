@@ -77,6 +77,12 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# DEBUG: Print loaded environment variables
+import os
+print(f"[DEBUG ENV] LLM_MODEL from env: {os.getenv('LLM_MODEL')}")
+print(f"[DEBUG ENV] OLLAMA_API_KEY from env: {os.getenv('OLLAMA_API_KEY')}")
+print(f"[DEBUG ENV] OLLAMA_BASE_URL from env: {os.getenv('OLLAMA_BASE_URL')}")
+
 import numpy as np
 import faiss
 import ollama
