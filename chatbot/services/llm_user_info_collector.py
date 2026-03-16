@@ -271,7 +271,7 @@ Return ONLY a JSON object (no markdown, no explanation):
                 return self._fallback_regex_detection(user_message, missing_fields)
 
             response = self._ollama_client.chat(
-                model='ministral-3:8b',  # Fast, lightweight model (10GB)
+                model='qwen3.5:cloud',  # Small cloud model (fast, GPU-accelerated, 1-2s response)
                 messages=[{'role': 'user', 'content': prompt}],
                 options={
                     'temperature': 0.1,  # Low temperature for consistent detection

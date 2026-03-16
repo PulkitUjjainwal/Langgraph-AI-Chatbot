@@ -3997,10 +3997,10 @@ async def ensure_initialized():
         user_info_service = await init_user_info_service()
         if user_info_service and user_info_service.is_available:
             # NEW: Intelligent LLM-driven collector with smart detection
-            # Use LOCAL Ollama client (ministral-3:8b available locally)
-            ollama_local = get_ollama_local_client()
-            llm_user_info_collector = LLMUserInfoCollector(redis_manager, user_info_service, ollama_local)
-            print("[OK] LLM User info collector enabled (fast, contextual, using LOCAL Ollama)")
+            # Use CLOUD Ollama client with small fast model (qwen2.5:1.5b)
+            ollama_cloud = get_ollama_cloud_client()
+            llm_user_info_collector = LLMUserInfoCollector(redis_manager, user_info_service, ollama_cloud)
+            print("[OK] LLM User info collector enabled (fast, contextual, using CLOUD Ollama with small model)")
 
             # Keep old manager as fallback
             user_info_manager = UserInfoManager(redis_manager, user_info_service)
