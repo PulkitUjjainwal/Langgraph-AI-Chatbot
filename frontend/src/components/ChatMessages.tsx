@@ -918,7 +918,7 @@ export function ChatMessages({
           />
 
           {/* Modal */}
-          <div className="feedback-modal relative bg-white rounded-2xl shadow-2xl w-[90%] max-w-sm mx-4 overflow-hidden">
+          <div className="feedback-modal relative bg-white rounded-2xl shadow-2xl w-[90%] max-w-sm max-h-[75vh] mx-4 overflow-y-auto">
             {/* Header */}
             <div className="bg-gradient-to-r from-orange-500 to-orange-600 px-5 py-4">
               <div className="flex items-center justify-between">
@@ -971,7 +971,7 @@ export function ChatMessages({
 
       {/* Support Buttons Card (appears after 30 seconds of inactivity) */}
       {supportButtons.show && !supportButtons.dismissed && (
-        <div className="support-buttons-card mx-2 my-4 animate-fade-in">
+        <div className="support-buttons-card mx-2 my-4 animate-fade-in max-h-[70vh] overflow-y-auto">
           {/* Idle message bubble */}
           <div className="flex items-center justify-center mb-3">
             <div className="bg-blue-100 px-4 py-2 rounded-full text-sm text-blue-700 flex items-center gap-2">
@@ -983,7 +983,7 @@ export function ChatMessages({
           </div>
 
           {/* Support Card */}
-          <div className="bg-white rounded-2xl shadow-lg border border-blue-200 overflow-hidden">
+          <div className="bg-white rounded-2xl shadow-lg border border-blue-200 overflow-hidden max-h-[60vh]">
             <div className="bg-gradient-to-r from-blue-500 to-blue-600 px-5 py-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -1009,7 +1009,7 @@ export function ChatMessages({
             </div>
 
             {/* Support Options */}
-            <div className="p-5 space-y-3">
+            <div className="p-5 space-y-3 max-h-[50vh] overflow-y-auto">
               <button
                 onClick={() => handleSupportAction('get_help')}
                 className="w-full flex items-center gap-4 p-4 rounded-xl transition-all duration-200 hover:bg-orange-50 border-2 border-transparent hover:border-orange-200 group text-left"

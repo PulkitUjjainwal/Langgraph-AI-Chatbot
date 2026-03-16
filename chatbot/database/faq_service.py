@@ -100,7 +100,7 @@ class FAQService:
                         await cur.fetchone()
 
                 self._available = True
-                print(f"[FAQ] ✓ MySQL connection pool initialized (async)")
+                print(f"[FAQ] MySQL connection pool initialized (async)")
 
                 # Load page patterns
                 await self._load_page_patterns()
@@ -134,7 +134,7 @@ class FAQService:
                 conn.close()
 
                 self._available = True
-                print(f"[FAQ] ✓ MySQL connection pool initialized (sync)")
+                print(f"[FAQ] MySQL connection pool initialized (sync)")
 
                 # Load page patterns synchronously
                 await asyncio.get_event_loop().run_in_executor(
@@ -147,7 +147,7 @@ class FAQService:
                 print(f"[FAQ] MySQL sync connection failed: {e}")
                 self._sync_pool = None
 
-        print("[FAQ] ⚠ MySQL unavailable - will use LLM fallback for questions")
+        print("[FAQ] Warning: MySQL unavailable - will use LLM fallback for questions")
         return False
 
     async def _load_page_patterns(self):

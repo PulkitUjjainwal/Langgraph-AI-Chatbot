@@ -165,6 +165,60 @@ class ConversationHistoryService:
         if log_dir and not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)
 
+    async def ensure_session_exists(
+        self,
+        session_id: str,
+        initial_url: Optional[str] = None,
+        ip_address: Optional[str] = None
+    ) -> bool:
+        """
+        Ensure a session record exists in conversation_sessions table.
+        Creates a minimal session record if it doesn't exist.
+
+        This is CRITICAL for user_info table foreign key constraint.
+
+        Args:
+            session_id: Session identifier
+            initial_url: Initial URL (optional)
+            ip_address: IP address (optional)
+
+        Returns:
+            True if session exists or was created, False on error
+        """
+        if not self._available:
+            return False
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    # Use INSERT IGNORE to create session only if it doesn't exist
+                    await cur.execute("""
+                        INSERT IGNORE INTO conversation_sessions (
+                            session_id,
+                            started_at,
+                            last_activity,
+                            initial_url,
+                            ip_address,
+                            message_count,
+                            user_message_count,
+                            assistant_message_count,
+                            session_status,
+                            created_at
+                        ) VALUES (%s, %s, %s, %s, %s, 0, 0, 0, 'active', CURRENT_TIMESTAMP)
+                    """, (
+                        session_id,
+                        datetime.now(),
+                        datetime.now(),
+                        initial_url,
+                        ip_address
+                    ))
+
+            return True
+
+        except Exception as e:
+            print(f"[ConversationHistory] ensure_session_exists error: {e}")
+            return False
+
     async def save_conversation(self, conversation: ConversationSession) -> Dict[str, Any]:
         """
         Save complete conversation session with all messages.

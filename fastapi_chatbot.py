@@ -145,6 +145,18 @@ from chatbot.models.credit_models import (
     ContinueChatRequest, ContinueChatResponse
 )
 
+# Import User Info Manager
+from chatbot.services.user_info_manager import UserInfoManager
+from chatbot.services.llm_user_info_collector import LLMUserInfoCollector
+from chatbot.database.user_info_service import UserInfoService, get_user_info_service, init_user_info_service
+from chatbot.models.user_info_models import (
+    UserInfoField,
+    SaveUserInfoRequest, SaveUserInfoResponse,
+    GetUserInfoRequest, GetUserInfoResponse,
+    PauseCollectionRequest, PauseCollectionResponse,
+    UserInfoStatsResponse
+)
+
 # Import Voice Chat Service - Commented out (voice mode disabled for now)
 # from chatbot.services.voice_chat_service import VoiceChatService, get_voice_chat_service
 # from chatbot.services.twilio_callback_service import get_twilio_callback_service
@@ -263,10 +275,9 @@ class Config:
     ENABLE_PERFORMANCE_LOGGING = True
 
     # Ollama Configuration
-    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "https://ollama.com/api")
-    OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "006b1854cb5743d5a8a6e2baf09d163c.NQNQ-X28yY6S7WD0UtAp4_pb")
-    # OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "https://ollama.com/api")
-    # OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "006b1854cb5743d5a8a6e2baf09d163c.NQNQ-X28yY6S7WD0UtAp4_pb")
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "https://ollama.com")
+    OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
+    OLLAMA_COOKIE = os.getenv("OLLAMA_COOKIE", "")
 
     # Redis Configuration
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -281,6 +292,100 @@ class Config:
 
     # Performance optimization
     DISABLE_CHECKPOINTING = os.getenv("DISABLE_CHECKPOINTING", "false").lower() == "true"  # Set to "true" for 10-15s faster responses
+
+    # Contact Information
+    CONTACT_PHONE_NUMBER = "+44 7727 449124"
+    CONTACT_EMAIL = "support@marketinside.com"
+
+
+# ============================================================================
+# HELPER FUNCTIONS - Multi HS Code Detection & Contact Info
+# ============================================================================
+
+def detect_multi_hs_code_query(message: str) -> bool:
+    """
+    Detect if user is asking for multiple HS codes.
+
+    Returns True if query involves multiple HS codes that would be better
+    viewed on dashboard rather than in chat.
+    """
+    message_lower = message.lower()
+
+    # Keywords indicating multiple HS codes
+    multi_indicators = [
+        'all hs codes',
+        'multiple hs code',
+        'several hs code',
+        'many hs code',
+        'list of hs code',
+        'hs codes for',
+        'all harmonized',
+        'multiple harmonized',
+        'all tariff code',
+        'multiple tariff code',
+    ]
+
+    # Check for indicators
+    for indicator in multi_indicators:
+        if indicator in message_lower:
+            return True
+
+    # Check for plural forms with counts
+    if re.search(r'\d+\s*(hs codes?|tariff codes?|harmonized)', message_lower):
+        return True
+
+    return False
+
+
+def get_multi_hs_code_response() -> str:
+    """
+    Get helpful response for multi HS code queries.
+    Suggests using dashboard and offers support options.
+    """
+    return (
+        "I can help you with HS codes! For multiple HS codes or comprehensive tariff data, "
+        "our dashboard provides a much better viewing experience with filters, exports, and detailed breakdowns.\n\n"
+        "Would you like me to:\n"
+        "• Connect you with our team to access the dashboard\n"
+        "• Schedule a quick demo to show you how to view all HS codes\n"
+        "• Share specific HS code information if you have a particular product in mind\n\n"
+        "What would be most helpful for you?"
+    )
+
+
+def detect_contact_info_request(message: str) -> bool:
+    """Detect if user is asking for contact information"""
+    message_lower = message.lower()
+
+    contact_keywords = [
+        'phone number',
+        'contact number',
+        'call you',
+        'telephone',
+        'phone no',
+        'contact info',
+        'contact detail',
+        'how to reach',
+        'how can i reach',
+        'how do i contact',
+        'contact you',
+        'get in touch',
+    ]
+
+    return any(keyword in message_lower for keyword in contact_keywords)
+
+
+def get_contact_info_response() -> str:
+    """Get formatted contact information response"""
+    return (
+        f"📞 You can reach us at: **{Config.CONTACT_PHONE_NUMBER}**\n\n"
+        "Our team is available to assist you with:\n"
+        "• Trade data inquiries\n"
+        "• Custom reports and analysis\n"
+        "• Dashboard demos and onboarding\n"
+        "• Enterprise solutions\n\n"
+        "Feel free to call us, or I can have someone call you back. What works best for you?"
+    )
 
 
 # ============================================================================
@@ -303,13 +408,18 @@ class LazyOllamaClient:
     def _get_cloud_client(self):
         """Lazy initialize the cloud Ollama client (for LLM)"""
         if self._cloud_client is None:
-            if Config.OLLAMA_API_KEY:
+            if Config.OLLAMA_API_KEY and Config.OLLAMA_COOKIE:
+                # Use both API key and cookie for Ollama cloud authentication
+                headers = {
+                    'Authorization': f'Bearer {Config.OLLAMA_API_KEY}',
+                    'Cookie': Config.OLLAMA_COOKIE
+                }
                 self._cloud_client = ollama.Client(
                     host=Config.OLLAMA_BASE_URL,
-                    headers={'Authorization': f'Bearer {Config.OLLAMA_API_KEY}'}
+                    headers=headers
                 )
             else:
-                # Fallback to local if no API key
+                # Fallback to local if no API key/cookie
                 self._cloud_client = ollama.Client(host="http://localhost:11434")
         return self._cloud_client
 
@@ -979,8 +1089,18 @@ def create_chatbot_node():
         'timeout': 30.0,  # CRITICAL FIX: 30 second timeout to prevent hanging (reduced from 60s)
     }
 
-    # Use local Ollama
-    llm_kwargs['base_url'] = "http://localhost:11434"
+    # Use cloud Ollama API
+    llm_kwargs['base_url'] = Config.OLLAMA_BASE_URL
+
+    # Add authentication headers via client_kwargs (supports both API key and cookie)
+    headers = {}
+    if Config.OLLAMA_API_KEY:
+        headers['Authorization'] = f'Bearer {Config.OLLAMA_API_KEY}'
+    if Config.OLLAMA_COOKIE:
+        headers['Cookie'] = Config.OLLAMA_COOKIE
+
+    if headers:
+        llm_kwargs['client_kwargs'] = {'headers': headers}
 
     llm = ChatOllama(**llm_kwargs)
 
@@ -1342,8 +1462,18 @@ Remember: Brevity is key. Every word must add value. Shorter responses are ALWAY
             'timeout': 30.0,  # CRITICAL FIX: 30 second timeout to prevent hanging (reduced from 60s)
         }
 
-        # Use local Ollama
-        llm_dynamic_kwargs['base_url'] = "http://localhost:11434"
+        # Use cloud Ollama API
+        llm_dynamic_kwargs['base_url'] = Config.OLLAMA_BASE_URL
+
+        # Add authentication headers via client_kwargs (supports both API key and cookie)
+        headers = {}
+        if Config.OLLAMA_API_KEY:
+            headers['Authorization'] = f'Bearer {Config.OLLAMA_API_KEY}'
+        if Config.OLLAMA_COOKIE:
+            headers['Cookie'] = Config.OLLAMA_COOKIE
+
+        if headers:
+            llm_dynamic_kwargs['client_kwargs'] = {'headers': headers}
 
         llm_dynamic = ChatOllama(**llm_dynamic_kwargs)
 
@@ -2067,8 +2197,18 @@ class ChatbotManager:
             "timeout": 8.0,
         }
 
-        # Use local Ollama
-        llm_kwargs["base_url"] = "http://localhost:11434"
+        # Use cloud Ollama API
+        llm_kwargs["base_url"] = Config.OLLAMA_BASE_URL
+
+        # Add authentication headers via client_kwargs (supports both API key and cookie)
+        headers = {}
+        if Config.OLLAMA_API_KEY:
+            headers['Authorization'] = f'Bearer {Config.OLLAMA_API_KEY}'
+        if Config.OLLAMA_COOKIE:
+            headers['Cookie'] = Config.OLLAMA_COOKIE
+
+        if headers:
+            llm_kwargs["client_kwargs"] = {'headers': headers}
 
         self._intent_llm = ChatOllama(**llm_kwargs)
         return self._intent_llm
@@ -2435,26 +2575,16 @@ IMPORTANT
             from chatbot.services.slot_manager import get_slot_manager
             slot_mgr = get_slot_manager()
 
-            # Check if both countries are valid
+            # Let LLM handle country validation naturally
+            # If countries are invalid, LLM will ask for clarification conversationally
             origin_valid = slot_mgr.is_valid_country(origin) if origin else False
             destination_valid = slot_mgr.is_valid_country(destination) if destination else False
 
             if not origin_valid or not destination_valid:
-                invalid_countries = []
-                if not origin_valid and origin:
-                    invalid_countries.append(f"origin='{origin}'")
-                if not destination_valid and destination:
-                    invalid_countries.append(f"destination='{destination}'")
-
-                print(f"  [INTENT] Rejecting country_to_country: invalid countries {', '.join(invalid_countries)}")
-                print(f"  [INTENT] Downgrading to 'unknown' intent - will use KB fallback")
-
-                # Downgrade to unknown intent if countries are invalid
-                # This will cause the system to use KB/general response instead of API
-                intent = "unknown"
-                confidence = 0.0
-                params = {}
-                # Don't set URL - let it fall through to general handling
+                # Just log it - don't downgrade to unknown
+                # Let the LLM ask for clarification naturally
+                print(f"  [INTENT] Note: May need country clarification (origin={origin_valid}, dest={destination_valid})")
+                # Continue with country_to_country intent - LLM will handle invalid countries
 
         url = parsed.get("url", "")
         if not isinstance(url, str):
@@ -2919,102 +3049,9 @@ IMPORTANT
                 is_slot_answer = True
                 print(f"  [STREAM] Detected slot answer: '{message}' for slot '{pending_slot}' (intent: {prev_intent})")
 
-                # CRITICAL: Validate slot answer before accepting it
-                # Reject conversational phrases like "you suggest", "recommend", "any", etc.
-                if pending_slot in ["country", "origin_country", "destination_country"]:
-                    conversational_phrases = [
-                        "you-suggest", "you suggest", "suggest", "any", "all", "anywhere",
-                        "everywhere", "all-countries", "multiple", "many", "several",
-                        "which", "what", "where", "recommend", "best", "whatever",
-                        "doesn't matter", "dont care", "don't care", "idk", "i don't know"
-                    ]
-
-                    normalized_answer = message.lower().strip().replace("-", " ")
-                    is_conversational = any(phrase in normalized_answer for phrase in conversational_phrases)
-
-                    # Also validate if answer is actually a valid country
-                    is_valid_country = slot_mgr.is_valid_country(normalized_answer)
-
-                    if is_conversational:
-                        print(f"  [STREAM] Rejected conversational response '{message}' for slot '{pending_slot}'")
-                        print(f"  [STREAM] User is asking for suggestions, not providing a valid country")
-
-                        # Save user message
-                        if self.redis:
-                            self.redis.save_message(session_id, {"role": "user", "content": message})
-
-                        # Return a helpful response asking the user to pick a specific country
-                        question_text = "I need a specific country name to show you the data. Please choose one of the suggested countries, or type any country you're interested in:"
-                        suggestions = ["India", "USA", "China", "Germany", "Indonesia"]
-
-                        # Save assistant response
-                        if self.redis:
-                            self.redis.save_message(session_id, {
-                                "role": "assistant",
-                                "content": question_text,
-                                "is_clarifying": True
-                            })
-
-                        # Yield clarifying question again
-                        yield json.dumps({
-                            "clarifying_question": True,
-                            "question": question_text,
-                            "slot_name": pending_slot,
-                            "suggestions": suggestions
-                        })
-                        return
-
-                    elif not is_valid_country:
-                        # User gave something that's NOT a country (like "used phone" when we asked for country)
-                        print(f"  [STREAM] ❌ SLOT MISMATCH: User said '{message}' but we asked for '{pending_slot}'")
-                        print(f"  [STREAM] '{message}' is NOT a valid country name!")
-
-                        # Check if it might be a product instead
-                        might_be_product = (
-                            len(message.split()) <= 3 and  # Short phrase
-                            message.lower() not in ["yes", "no", "ok", "okay", "sure", "maybe"]  # Not a yes/no
-                        )
-
-                        if might_be_product and prev_intent == "search_trade_data":
-                            # User probably meant to give us the PRODUCT, not the country
-                            print(f"  [STREAM] 💡 SMART FIX: '{message}' looks like a product, not a country")
-                            print(f"  [STREAM] Clearing pending slot and re-running intent detection")
-
-                            # Clear the pending slot to prevent auto-fill
-                            prev_state.last_asked_slot = None
-                            slot_mgr._save_state(session_id, prev_state)
-
-                            # Let it fall through to normal intent detection
-                            # This will treat "used phone" as a new query
-                            is_slot_answer = False
-                            # Continue to normal intent detection below
-                        else:
-                            # Can't figure out what user meant - ask for country again
-                            print(f"  [STREAM] Re-asking for '{pending_slot}' with clarification")
-
-                            # Save user message
-                            if self.redis:
-                                self.redis.save_message(session_id, {"role": "user", "content": message})
-
-                            # Ask again with clarification
-                            question_text = f"'{message}' doesn't look like a country name. Which country are you interested in?"
-                            suggestions = ["Taiwan", "India", "USA", "China", "Germany"]
-
-                            # Save assistant response
-                            if self.redis:
-                                self.redis.save_message(session_id, {
-                                    "role": "assistant",
-                                    "content": question_text,
-                                    "is_clarifying": True
-                                })
-
-                            yield json.dumps({
-                                "clarifying_question": True,
-                                "question": question_text,
-                                "slot_name": pending_slot,
-                                "suggestions": suggestions
-                            })
-                            return
+                # Let the LLM handle invalid responses naturally
+                # No hardcoded validation - LLM is smart enough to clarify
+                print(f"  [STREAM] Slot answer detected: '{message}' for slot '{pending_slot}'")
 
         # ========================================================================
         # STEP 1: Detect intent and extract params
@@ -3608,8 +3645,18 @@ if query is for platform
             'request_timeout': 90.0,  # 90s timeout to prevent silent hangs
         }
 
-        # Use local Ollama
-        llm_kwargs['base_url'] = "http://localhost:11434"
+        # Use cloud Ollama API
+        llm_kwargs['base_url'] = Config.OLLAMA_BASE_URL
+
+        # Add authentication headers via client_kwargs (supports both API key and cookie)
+        headers = {}
+        if Config.OLLAMA_API_KEY:
+            headers['Authorization'] = f'Bearer {Config.OLLAMA_API_KEY}'
+        if Config.OLLAMA_COOKIE:
+            headers['Cookie'] = Config.OLLAMA_COOKIE
+
+        if headers:
+            llm_kwargs['client_kwargs'] = {'headers': headers}
 
         llm = ChatOllama(**llm_kwargs)
 
@@ -3794,8 +3841,18 @@ What APIs and integrations does Export Genius offer?"""
                 'timeout': 30.0,  # CRITICAL FIX: 30 second timeout for question generation
             }
 
-            # Use local Ollama
-            llm_kwargs_init['base_url'] = "http://localhost:11434"
+            # Use cloud Ollama API
+            llm_kwargs_init['base_url'] = Config.OLLAMA_BASE_URL
+
+            # Add authentication headers via client_kwargs (supports both API key and cookie)
+            headers = {}
+            if Config.OLLAMA_API_KEY:
+                headers['Authorization'] = f'Bearer {Config.OLLAMA_API_KEY}'
+            if Config.OLLAMA_COOKIE:
+                headers['Cookie'] = Config.OLLAMA_COOKIE
+
+            if headers:
+                llm_kwargs_init['client_kwargs'] = {'headers': headers}
 
             llm = ChatOllama(**llm_kwargs_init)
             response = await asyncio.to_thread(
@@ -3875,13 +3932,18 @@ hostility_detector: Optional[HostilityDetector] = None
 lead_manager: Optional[LeadManager] = None  # Lead generation manager
 credit_manager: Optional[CreditManager] = None  # Credit tracking manager
 slot_manager: Optional[SlotManager] = None  # Slot collection manager
+user_info_manager: Optional[UserInfoManager] = None  # User info collection manager (old, will be replaced)
+llm_user_info_collector: Optional[LLMUserInfoCollector] = None  # NEW: LLM-driven collector (fast, contextual)
+user_info_service: Optional[UserInfoService] = None  # User info database service
+history_service: Optional['ConversationHistoryService'] = None  # Conversation history service
 faq_service: Optional['FAQService'] = None  # FAQ service for page-specific questions
 app_start_time: float = 0
 _initialization_lock = False
+_session_ensured_cache: set = set()  # Track which sessions have been ensured in MySQL (memory optimization)
 
 async def ensure_initialized():
     """Lazy initialization on first request"""
-    global chatbot_manager, redis_manager, hostility_detector, lead_manager, credit_manager, slot_manager, faq_service, _initialization_lock, app_start_time
+    global chatbot_manager, redis_manager, hostility_detector, lead_manager, credit_manager, slot_manager, user_info_manager, llm_user_info_collector, user_info_service, history_service, faq_service, _initialization_lock, app_start_time
 
     if chatbot_manager is not None:
         return  # Already initialized
@@ -3936,6 +3998,29 @@ async def ensure_initialized():
         # Initialize slot manager
         slot_manager = init_slot_manager(redis_manager)
         print("[OK] Slot collection enabled")
+
+        # Initialize user info service and NEW LLM-driven collector
+        user_info_service = await init_user_info_service()
+        if user_info_service and user_info_service.is_available:
+            # NEW: Intelligent LLM-driven collector with smart detection
+            ollama_cloud = get_ollama_cloud_client()
+            llm_user_info_collector = LLMUserInfoCollector(redis_manager, user_info_service, ollama_cloud)
+            print("[OK] LLM User info collector enabled (fast, contextual)")
+
+            # Keep old manager as fallback
+            user_info_manager = UserInfoManager(redis_manager, user_info_service)
+        else:
+            llm_user_info_collector = None
+            user_info_manager = None
+            print("[WARNING] User info collection disabled (MySQL unavailable)")
+
+        # Initialize conversation history service (for session tracking)
+        history_service = await init_conversation_history_service()
+        if history_service and history_service.is_available:
+            print("[OK] Conversation history service enabled")
+        else:
+            history_service = None
+            print("[WARNING] Conversation history service disabled (MySQL unavailable)")
 
         # Initialize FAQ service (for page-specific suggested questions)
         if FAQ_SERVICE_AVAILABLE:
@@ -4005,7 +4090,7 @@ def check_and_pull_ollama_models():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    global chatbot_manager, hostility_detector, lead_manager, credit_manager, slot_manager, app_start_time, redis_manager
+    global chatbot_manager, hostility_detector, lead_manager, credit_manager, slot_manager, user_info_manager, llm_user_info_collector, user_info_service, history_service, app_start_time, redis_manager
     import sys
 
     sys.stderr.write("\n" + "=" * 70 + "\n")
@@ -4057,6 +4142,30 @@ async def lifespan(app: FastAPI):
 
         # Initialize slot manager
         slot_manager = init_slot_manager(redis_manager)
+        sys.stderr.write("[OK] Slot collection enabled\n")
+        sys.stderr.flush()
+
+        # Initialize user info service and manager
+        user_info_service = await init_user_info_service()
+        if user_info_service and user_info_service.is_available:
+            user_info_manager = UserInfoManager(redis_manager, user_info_service)
+            sys.stderr.write("[OK] User info collection enabled\n")
+            sys.stderr.flush()
+        else:
+            user_info_manager = None
+            sys.stderr.write("[WARNING] User info collection disabled (MySQL unavailable)\n")
+            sys.stderr.flush()
+
+        # Initialize conversation history service (for session tracking)
+        history_service = await init_conversation_history_service()
+        if history_service and history_service.is_available:
+            sys.stderr.write("[OK] Conversation history service enabled\n")
+            sys.stderr.flush()
+        else:
+            history_service = None
+            sys.stderr.write("[WARNING] Conversation history service disabled (MySQL unavailable)\n")
+            sys.stderr.flush()
+
         sys.stderr.write("[OK] Slot collection enabled\n")
         sys.stderr.flush()
 
@@ -4151,6 +4260,30 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         print(f"  - session_id: {request.session_id}")
         print(f"  - dynamic_url: {request.dynamic_url}")
 
+        # ====================================================================
+        # SPECIAL CASE: Multi HS Code Query
+        # ====================================================================
+        if detect_multi_hs_code_query(request.message):
+            print("[SPECIAL] Multi HS code query detected - suggesting dashboard")
+            return ChatResponse(
+                response=get_multi_hs_code_response(),
+                session_id=request.session_id,
+                processing_time=0.1,
+                sources_used=["Support Suggestion"]
+            )
+
+        # ====================================================================
+        # SPECIAL CASE: Contact Information Request
+        # ====================================================================
+        if detect_contact_info_request(request.message):
+            print("[SPECIAL] Contact info request detected")
+            return ChatResponse(
+                response=get_contact_info_response(),
+                session_id=request.session_id,
+                processing_time=0.1,
+                sources_used=["Contact Information"]
+            )
+
         # Guardrail node handles hostility detection in workflow
         # Add timeout to prevent indefinite hanging
         try:
@@ -4172,13 +4305,65 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         # Schedule session cleanup in background
         background_tasks.add_task(chatbot_manager.cleanup_old_sessions)
 
+        # Get message count from session (used by both lead and user info managers)
+        session_info = chatbot_manager.sessions.get(request.session_id, {})
+        message_count = session_info.get("message_count", 1)
+
+        # User Info Collection - Extract and collect user information naturally
+        if user_info_manager:
+            try:
+                # CRITICAL: Check for disposable email FIRST
+                disposable_email_message = await user_info_manager.check_disposable_email(
+                    session_id=request.session_id,
+                    message=request.message
+                )
+
+                if disposable_email_message:
+                    # Disposable email detected - append helpful message to response
+                    response = response + "\n\n" + disposable_email_message
+                    print(f"[USER_INFO] Disposable email detected, requesting work email")
+                else:
+                    # No disposable email - proceed with normal extraction
+                    extracted = await user_info_manager.extract_from_message(
+                        session_id=request.session_id,
+                        message=request.message,
+                        field=None  # Auto-detect
+                    )
+
+                    if extracted and extracted.extracted:
+                        print(f"[USER_INFO] Extracted {extracted.field.value}={extracted.value}")
+
+                # Check for resistance patterns
+                is_resistant = await user_info_manager.detect_resistance(
+                    session_id=request.session_id,
+                    message=request.message
+                )
+
+                if is_resistant:
+                    print(f"[USER_INFO] Resistance detected, pausing collection")
+
+                # Decide if we should collect info in next turn (only if no disposable email issue)
+                if not disposable_email_message:
+                    collection_decision = await user_info_manager.should_collect_info(
+                        session_id=request.session_id,
+                        message=request.message,
+                        message_count=message_count,
+                        detected_intent=None  # Could integrate with intent detection
+                    )
+
+                    if collection_decision.should_collect and collection_decision.prompt_message:
+                        # Append info collection prompt to response
+                        response = response + "\n\n" + collection_decision.prompt_message
+                        print(f"[USER_INFO] Collecting {collection_decision.field_to_collect.value} (weight: {collection_decision.collection_weight})")
+
+            except Exception as e:
+                print(f"[USER_INFO] Error in user info collection: {e}")
+                import traceback
+                traceback.print_exc()
+
         # Check if we should prompt for lead capture
         lead_prompt = None
         if lead_manager:
-            # Get message count from session
-            session_info = chatbot_manager.sessions.get(request.session_id, {})
-            message_count = session_info.get("message_count", 1)
-
             # Check if we should prompt
             should_prompt, prompt_type, prompt_message = lead_manager.should_prompt_for_lead(
                 session_id=request.session_id,
@@ -4283,7 +4468,7 @@ def is_connect_help_intent(message: str) -> bool:
 
 
 @router.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
     """
     Stream chatbot response using Server-Sent Events (SSE)
 
@@ -4297,6 +4482,62 @@ async def chat_stream(request: ChatRequest):
     - Connect support: data: {"credit_exhausted": true, "message": "...", "actions": [...]}\n\n (same format as credit exhausted)
     """
     await ensure_initialized()
+
+    # Log IP address if provided
+    if request.ip_address:
+        print(f"\n[WEB] Request from IP: {request.ip_address}")
+
+    # Debug logging
+    print(f"\n[DEBUG] Chat stream request received:")
+    print(f"  - message: {request.message}")
+    print(f"  - session_id: {request.session_id}")
+    print(f"  - dynamic_url: {request.dynamic_url}")
+
+    # ====================================================================
+    # SPECIAL CASE: Multi HS Code Query
+    # ====================================================================
+    if detect_multi_hs_code_query(request.message):
+        print("[SPECIAL] Multi HS code query detected - suggesting dashboard")
+        async def multi_hs_response():
+            response_data = {
+                "chunk": get_multi_hs_code_response(),
+                "done": True,
+                "processing_time": 0.1
+            }
+            yield f"data: {json.dumps(response_data)}\n\n"
+
+        return StreamingResponse(
+            multi_hs_response(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+
+    # ====================================================================
+    # SPECIAL CASE: Contact Information Request
+    # ====================================================================
+    if detect_contact_info_request(request.message):
+        print("[SPECIAL] Contact info request detected")
+        async def contact_info_response():
+            response_data = {
+                "chunk": get_contact_info_response(),
+                "done": True,
+                "processing_time": 0.1
+            }
+            yield f"data: {json.dumps(response_data)}\n\n"
+
+        return StreamingResponse(
+            contact_info_response(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
 
     # Check for connect/help intent FIRST - before any LLM processing
     if is_connect_help_intent(request.message):
@@ -4400,6 +4641,134 @@ async def chat_stream(request: ChatRequest):
                 full_response += chunk
                 yield f"data: {json.dumps({'chunk': chunk, 'done': False})}\n\n"
 
+            # ====================================================================
+            # POST-RESPONSE PROCESSING
+            # ====================================================================
+            # Get message count from session (used by both lead and user info managers)
+            session_info = chatbot_manager.sessions.get(request.session_id, {})
+            message_count = session_info.get("message_count", 1)
+
+            # ====================================================================
+            # CRITICAL: Ensure session exists in MySQL before user info collection
+            # OPTIMIZATION: Only do this ONCE per session using in-memory cache
+            # ====================================================================
+            global _session_ensured_cache
+            print(f"[DEBUG] user_info_manager={user_info_manager is not None}, history_service={history_service is not None}, available={history_service.is_available if history_service else False}")
+            if user_info_manager and history_service and history_service.is_available:
+                # Check if we've already ensured this session exists (memory cache)
+                if request.session_id not in _session_ensured_cache:
+                    print(f"[SESSION] Ensuring session exists for {request.session_id}...")
+                    try:
+                        # Create session in MySQL if it doesn't exist (uses INSERT IGNORE - lightweight)
+                        success = await history_service.ensure_session_exists(
+                            session_id=request.session_id,
+                            initial_url=request.dynamic_url,
+                            ip_address=request.ip_address
+                        )
+                        if success:
+                            # Cache this session ID so we don't check again
+                            _session_ensured_cache.add(request.session_id)
+                            print(f"[SESSION] ✓ Session ensured in MySQL: {request.session_id}")
+                        else:
+                            print(f"[SESSION] ✗ Failed to ensure session in MySQL")
+                    except Exception as e:
+                        print(f"[SESSION] Warning: Could not ensure session exists in MySQL: {e}")
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    print(f"[SESSION] Session already ensured (cached): {request.session_id}")
+            else:
+                print(f"[SESSION] Skipping session ensure - requirements not met")
+
+            # ====================================================================
+            # NEW: LLM-DRIVEN USER INFO COLLECTION (Fast, Contextual, Non-blocking)
+            # ====================================================================
+            user_info_prompt = ""
+
+            if llm_user_info_collector:
+                try:
+                    # Get conversation history from Redis (where it's actually stored)
+                    messages = []
+                    actual_message_count = 0
+
+                    if redis_manager and redis_manager.client:
+                        # Redis stores messages in a list at key: session:{session_id}:messages
+                        history_key = f"session:{request.session_id}:messages"
+                        try:
+                            # Get list length (number of messages)
+                            list_length = redis_manager.client.llen(history_key)
+                            if list_length > 0:
+                                actual_message_count = list_length // 2  # Divide by 2 since each turn = user + assistant
+                                print(f"[LLM_COLLECTOR] Got {list_length} messages from Redis, message_count={actual_message_count}")
+
+                                # Optionally get the actual messages for context
+                                messages_raw = redis_manager.client.lrange(history_key, 0, -1)
+                                messages = [json.loads(msg) for msg in messages_raw]
+                        except Exception as e:
+                            print(f"[LLM_COLLECTOR] Redis read error: {e}")
+
+                    # Fallback to session_info count if Redis fails
+                    if actual_message_count == 0:
+                        actual_message_count = message_count
+                        print(f"[LLM_COLLECTOR] Using fallback message_count={actual_message_count}")
+
+                    print(f"[LLM_COLLECTOR] Starting analysis for session {request.session_id}, msg count: {actual_message_count}")
+
+                    # Fast, contextual analysis (no blocking LLM calls)
+                    prompt = await llm_user_info_collector.analyze_and_collect_async(
+                        session_id=request.session_id,
+                        user_message=request.message,
+                        bot_response=full_response,
+                        message_count=actual_message_count,
+                        conversation_history=messages
+                    )
+
+                    print(f"[LLM_COLLECTOR] analyze_and_collect_async returned: {prompt if prompt else 'None'}")
+
+                    if prompt:
+                        user_info_prompt = "\n\n" + prompt
+                        print(f"[LLM_COLLECTOR] ✓ Generated contextual prompt: {prompt[:50]}...")
+                    else:
+                        print(f"[LLM_COLLECTOR] No prompt generated (returned None)")
+
+                except Exception as e:
+                    print(f"[LLM_COLLECTOR] Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"[LLM_COLLECTOR] SKIPPED - llm_user_info_collector is None/False")
+
+            # Stream user info prompt if available
+            if user_info_prompt:
+                full_response += user_info_prompt
+                yield f"data: {json.dumps({'chunk': user_info_prompt, 'done': False})}\n\n"
+
+            # ====================================================================
+            # LEAD CAPTURE - Check if we should prompt for lead
+            # ====================================================================
+            lead_prompt_data = None
+            if lead_manager:
+                try:
+                    # Check if we should prompt
+                    should_prompt, prompt_type, prompt_message = lead_manager.should_prompt_for_lead(
+                        session_id=request.session_id,
+                        message=request.message,
+                        message_count=message_count
+                    )
+
+                    if should_prompt:
+                        lead_prompt_data = get_lead_form_config(prompt_type, prompt_message)
+                        # Record that we showed a prompt
+                        lead_manager.record_prompt(request.session_id, message_count, prompt_type)
+                        print(f"[LEAD] Prompting for lead capture (type: {prompt_type})")
+                except Exception as e:
+                    print(f"[LEAD] Error in lead capture: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            # Schedule session cleanup in background
+            background_tasks.add_task(chatbot_manager.cleanup_old_sessions)
+
             # Send final message with completion status and explore URL
             processing_time = time.time() - start_time
             explore_url = getattr(chatbot_manager, '_last_explore_url', '')
@@ -4415,6 +4784,10 @@ async def chat_stream(request: ChatRequest):
             # Add explore URL if available
             if explore_url:
                 final_data['explore_url'] = explore_url
+
+            # Add lead prompt if available
+            if lead_prompt_data:
+                final_data['lead_prompt'] = lead_prompt_data
 
             yield f"data: {json.dumps(final_data)}\n\n"
 
@@ -7372,6 +7745,90 @@ async def serve_chat_widget():
 async def serve_chat_widget_legacy():
     """Serve the chatbot widget JavaScript file (legacy path)"""
     return await serve_chat_widget()
+
+# ============================================================================
+# USER INFO COLLECTION ENDPOINTS
+# ============================================================================
+
+@router.get("/user-info/{session_id}", response_model=GetUserInfoResponse)
+async def get_user_info(session_id: str):
+    """Get collected user information for a session"""
+    if not user_info_manager:
+        raise HTTPException(status_code=503, detail="User info collection not available")
+
+    try:
+        user_info = await user_info_manager.get_user_info(session_id)
+        return GetUserInfoResponse(**user_info)
+    except Exception as e:
+        print(f"[ERROR] Get user info failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get user info: {str(e)}")
+
+
+@router.post("/user-info/save", response_model=SaveUserInfoResponse)
+async def save_user_info(request: SaveUserInfoRequest):
+    """Manually save user information (typically not needed - auto-extracted)"""
+    if not user_info_manager:
+        raise HTTPException(status_code=503, detail="User info collection not available")
+
+    try:
+        state = await user_info_manager.get_state(request.session_id)
+        await user_info_manager._save_extracted_field(state, request.field, request.value)
+
+        return SaveUserInfoResponse(
+            success=True,
+            session_id=request.session_id,
+            field=request.field.value,
+            completion_percentage=state.completion_percentage,
+            fields_collected=state.fields_collected,
+            message=f"{request.field.value.capitalize()} saved successfully"
+        )
+    except Exception as e:
+        print(f"[ERROR] Save user info failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save user info: {str(e)}")
+
+
+@router.post("/user-info/{session_id}/pause", response_model=PauseCollectionResponse)
+async def pause_user_info_collection(session_id: str, request: PauseCollectionRequest):
+    """Manually pause user info collection for a session"""
+    if not user_info_manager:
+        raise HTTPException(status_code=503, detail="User info collection not available")
+
+    try:
+        result = await user_info_manager.pause_collection_manually(
+            session_id=session_id,
+            pause_for_messages=request.pause_for_messages
+        )
+
+        return PauseCollectionResponse(
+            success=result['success'],
+            session_id=session_id,
+            paused_until_message_count=result['paused_until_message_count'],
+            message=f"Collection paused for {request.pause_for_messages} messages"
+        )
+    except Exception as e:
+        print(f"[ERROR] Pause collection failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to pause collection: {str(e)}")
+
+
+@router.get("/user-info/stats", response_model=UserInfoStatsResponse)
+async def get_user_info_stats(days: int = 30):
+    """Get user info collection statistics"""
+    if not user_info_service:
+        raise HTTPException(status_code=503, detail="User info service not available")
+
+    try:
+        stats = await user_info_service.get_user_info_stats(days=days)
+
+        if "error" in stats:
+            raise HTTPException(status_code=500, detail=stats["error"])
+
+        return UserInfoStatsResponse(**stats)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Get user info stats failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+
 
 # Debug endpoint to check file paths
 @app.get("/debug/paths")
