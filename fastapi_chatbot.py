@@ -460,6 +460,10 @@ def get_ollama_cloud_client():
     """Get the cloud Ollama client for LLM calls"""
     return _lazy_ollama_client._get_cloud_client()
 
+def get_ollama_local_client():
+    """Get the local Ollama client for background tasks"""
+    return _lazy_ollama_client._get_local_client()
+
 # Create single instance
 _lazy_ollama_client = LazyOllamaClient()
 
@@ -4003,9 +4007,10 @@ async def ensure_initialized():
         user_info_service = await init_user_info_service()
         if user_info_service and user_info_service.is_available:
             # NEW: Intelligent LLM-driven collector with smart detection
-            ollama_cloud = get_ollama_cloud_client()
-            llm_user_info_collector = LLMUserInfoCollector(redis_manager, user_info_service, ollama_cloud)
-            print("[OK] LLM User info collector enabled (fast, contextual)")
+            # Use LOCAL Ollama client (ministral-3:8b available locally)
+            ollama_local = get_ollama_local_client()
+            llm_user_info_collector = LLMUserInfoCollector(redis_manager, user_info_service, ollama_local)
+            print("[OK] LLM User info collector enabled (fast, contextual, using LOCAL Ollama)")
 
             # Keep old manager as fallback
             user_info_manager = UserInfoManager(redis_manager, user_info_service)
