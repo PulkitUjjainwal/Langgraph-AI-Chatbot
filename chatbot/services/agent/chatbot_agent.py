@@ -40,16 +40,22 @@ class ChatbotAgent:
         self.settings = settings or get_settings()
         self.prompt_builder = PromptBuilder()
 
-        # Configure LLM
+        # Configure LLM with SMART ROUTING
         llm_kwargs = {
             'model': llm_model or self.settings.llm_model,
             'temperature': 0.5,  # Default temperature (can be adjusted per query)
-            'base_url': self.settings.ollama_base_url
         }
 
-        # Add API key if available
+        # SMART ROUTING: Use local by default, cloud only if API key is set
         if api_key or self.settings.ollama_api_key:
+            # Cloud Ollama with authentication
+            llm_kwargs['base_url'] = self.settings.ollama_base_url
             llm_kwargs['api_key'] = api_key or self.settings.ollama_api_key
+            print(f"[ChatbotAgent] Using CLOUD Ollama: {self.settings.ollama_base_url}")
+        else:
+            # Local Ollama (no authentication needed)
+            llm_kwargs['base_url'] = 'http://localhost:11434'
+            print(f"[ChatbotAgent] Using LOCAL Ollama: http://localhost:11434")
 
         self.llm = ChatOllama(**llm_kwargs)
 

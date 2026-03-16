@@ -275,7 +275,7 @@ class Config:
     ENABLE_PERFORMANCE_LOGGING = True
 
     # Ollama Configuration
-    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "https://ollama.com")
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")  # Default to local
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
     OLLAMA_COOKIE = os.getenv("OLLAMA_COOKIE", "")
 
@@ -463,6 +463,23 @@ def get_ollama_cloud_client():
 def get_ollama_local_client():
     """Get the local Ollama client for background tasks"""
     return _lazy_ollama_client._get_local_client()
+
+def get_ollama_config():
+    """
+    Get Ollama configuration (base_url and headers).
+
+    SMART ROUTING: Uses local Ollama by default, cloud only if API key is set.
+    Returns: (base_url, headers_dict or None)
+    """
+    if Config.OLLAMA_API_KEY:
+        # Cloud Ollama with authentication
+        headers = {'Authorization': f'Bearer {Config.OLLAMA_API_KEY}'}
+        if Config.OLLAMA_COOKIE:
+            headers['Cookie'] = Config.OLLAMA_COOKIE
+        return (Config.OLLAMA_BASE_URL, headers)
+    else:
+        # Local Ollama (no authentication)
+        return ('http://localhost:11434', None)
 
 # Create single instance
 _lazy_ollama_client = LazyOllamaClient()
@@ -1082,7 +1099,7 @@ def detect_query_type_simple(query: str) -> str:
 def create_chatbot_node():
     """Create chatbot node with SMART CONTEXT INJECTION"""
 
-    # Configure LLM with API key if available
+    # Configure LLM
     llm_kwargs = {
         'model': Config.LLM_MODEL,
         'temperature': Config.TEMPERATURE,
@@ -1093,18 +1110,13 @@ def create_chatbot_node():
         'timeout': 30.0,  # CRITICAL FIX: 30 second timeout to prevent hanging (reduced from 60s)
     }
 
-    # Use cloud Ollama API
-    llm_kwargs['base_url'] = Config.OLLAMA_BASE_URL
-
-    # Add authentication headers via client_kwargs (supports both API key and cookie)
-    headers = {}
-    if Config.OLLAMA_API_KEY:
-        headers['Authorization'] = f'Bearer {Config.OLLAMA_API_KEY}'
-    if Config.OLLAMA_COOKIE:
-        headers['Cookie'] = Config.OLLAMA_COOKIE
-
+    # SMART ROUTING: Use local by default, cloud only if API key is set
+    base_url, headers = get_ollama_config()
+    llm_kwargs['base_url'] = base_url
     if headers:
         llm_kwargs['client_kwargs'] = {'headers': headers}
+
+    print(f"[LLM] Using {'CLOUD' if Config.OLLAMA_API_KEY else 'LOCAL'} Ollama: {base_url} (model: {Config.LLM_MODEL})")
 
     llm = ChatOllama(**llm_kwargs)
 
@@ -1466,16 +1478,9 @@ Remember: Brevity is key. Every word must add value. Shorter responses are ALWAY
             'timeout': 30.0,  # CRITICAL FIX: 30 second timeout to prevent hanging (reduced from 60s)
         }
 
-        # Use cloud Ollama API
-        llm_dynamic_kwargs['base_url'] = Config.OLLAMA_BASE_URL
-
-        # Add authentication headers via client_kwargs (supports both API key and cookie)
-        headers = {}
-        if Config.OLLAMA_API_KEY:
-            headers['Authorization'] = f'Bearer {Config.OLLAMA_API_KEY}'
-        if Config.OLLAMA_COOKIE:
-            headers['Cookie'] = Config.OLLAMA_COOKIE
-
+        # SMART ROUTING: Use local by default, cloud only if API key is set
+        base_url, headers = get_ollama_config()
+        llm_dynamic_kwargs['base_url'] = base_url
         if headers:
             llm_dynamic_kwargs['client_kwargs'] = {'headers': headers}
 
@@ -2201,16 +2206,9 @@ class ChatbotManager:
             "timeout": 8.0,
         }
 
-        # Use cloud Ollama API
-        llm_kwargs["base_url"] = Config.OLLAMA_BASE_URL
-
-        # Add authentication headers via client_kwargs (supports both API key and cookie)
-        headers = {}
-        if Config.OLLAMA_API_KEY:
-            headers['Authorization'] = f'Bearer {Config.OLLAMA_API_KEY}'
-        if Config.OLLAMA_COOKIE:
-            headers['Cookie'] = Config.OLLAMA_COOKIE
-
+        # SMART ROUTING: Use local by default, cloud only if API key is set
+        base_url, headers = get_ollama_config()
+        llm_kwargs["base_url"] = base_url
         if headers:
             llm_kwargs["client_kwargs"] = {'headers': headers}
 
@@ -3649,16 +3647,9 @@ if query is for platform
             'request_timeout': 90.0,  # 90s timeout to prevent silent hangs
         }
 
-        # Use cloud Ollama API
-        llm_kwargs['base_url'] = Config.OLLAMA_BASE_URL
-
-        # Add authentication headers via client_kwargs (supports both API key and cookie)
-        headers = {}
-        if Config.OLLAMA_API_KEY:
-            headers['Authorization'] = f'Bearer {Config.OLLAMA_API_KEY}'
-        if Config.OLLAMA_COOKIE:
-            headers['Cookie'] = Config.OLLAMA_COOKIE
-
+        # SMART ROUTING: Use local by default, cloud only if API key is set
+        base_url, headers = get_ollama_config()
+        llm_kwargs['base_url'] = base_url
         if headers:
             llm_kwargs['client_kwargs'] = {'headers': headers}
 
@@ -3845,16 +3836,9 @@ What APIs and integrations does Export Genius offer?"""
                 'timeout': 30.0,  # CRITICAL FIX: 30 second timeout for question generation
             }
 
-            # Use cloud Ollama API
-            llm_kwargs_init['base_url'] = Config.OLLAMA_BASE_URL
-
-            # Add authentication headers via client_kwargs (supports both API key and cookie)
-            headers = {}
-            if Config.OLLAMA_API_KEY:
-                headers['Authorization'] = f'Bearer {Config.OLLAMA_API_KEY}'
-            if Config.OLLAMA_COOKIE:
-                headers['Cookie'] = Config.OLLAMA_COOKIE
-
+            # SMART ROUTING: Use local by default, cloud only if API key is set
+            base_url, headers = get_ollama_config()
+            llm_kwargs_init['base_url'] = base_url
             if headers:
                 llm_kwargs_init['client_kwargs'] = {'headers': headers}
 
