@@ -390,11 +390,27 @@ Return ONLY a JSON object (no markdown, no explanation):
                 return {
                     'should_ask': True,
                     'field': 'email',
-                    'custom_message': f"We noticed you provided {rejection_info['email']} which is a temporary email. For better service and to send you trade insights, please provide your work email address."
+                    'custom_message': f"To send you professional trade insights and detailed reports, I'll need a work email address. Could you share your company email?"
                 }
 
         # Don't collect user info if bot couldn't help (said "Sorry", etc.)
         if self._is_out_of_scope_response(bot_response):
+            return {'should_ask': False, 'field': None}
+
+        # CRITICAL: Never ask for user info when bot failed to provide value
+        # This prevents desperate behavior when queries fail
+        bot_failed_indicators = [
+            'not available in the data',
+            "i don't have",
+            'unable to find',
+            "couldn't locate",
+            'no data available',
+            'data is not available',
+            'cannot find',
+            'not found',
+        ]
+        if bot_response and any(indicator in bot_lower for indicator in bot_failed_indicators):
+            print(f"[COLLECTOR_INTERNAL] 🚫 Bot couldn't help - skipping user info collection (not desperate)")
             return {'should_ask': False, 'field': None}
 
         # Priority 1: Name (ask first)

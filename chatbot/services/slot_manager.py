@@ -456,9 +456,32 @@ class SlotManager:
         return value
 
     def _normalize_country(self, value: str) -> str:
-        """Normalize country name to lowercase, URL-safe format with hyphens"""
-        # Use hyphens instead of %20 for URL paths (API client expects this format)
-        return value.lower().strip().replace(" ", "-")
+        """
+        Normalize country name to lowercase, URL-safe format.
+
+        Note: This returns the canonical slug used internally.
+        URL generation will map these to correct slugs per endpoint.
+        """
+        # Normalize to lowercase with hyphens
+        normalized = value.lower().strip().replace(" ", "-")
+
+        # Map common variations to canonical form (for slot storage consistency)
+        # These will be mapped to actual URL slugs in generate_url()
+        country_mapping = {
+            "usa": "united-states",
+            "us": "united-states",
+            "america": "united-states",
+            "americas": "united-states",
+            "uk": "united-kingdom",
+            "england": "united-kingdom",
+            "britain": "united-kingdom",
+            "great-britain": "united-kingdom",
+            "korea": "south-korea",
+            "holland": "netherlands",
+            "uae": "united-arab-emirates",
+        }
+
+        return country_mapping.get(normalized, normalized)
 
     def is_continent(self, value: str) -> bool:
         """
@@ -864,9 +887,20 @@ class SlotManager:
                 print(f"  [SLOTS] Cannot generate URL: invalid country '{country}'")
                 return None
 
+            # Map canonical country name to URL slug for /country/ endpoint
+            # /country/ uses short slugs: usa, uk, uae, etc.
+            country_to_url_slug = {
+                "united-states": "usa",
+                "united-kingdom": "uk",
+                "united-arab-emirates": "uae",
+                "south-korea": "south-korea",
+                # Other countries use their normalized form as-is
+            }
+            country_slug = country_to_url_slug.get(country, country)
+
             direction = slots.get("direction", "import")
             direction_suffix = "imports" if direction == "import" else "exports"
-            return f"{base_url}/country/{country}/{direction_suffix}"
+            return f"{base_url}/country/{country_slug}/{direction_suffix}"
 
         elif intent == "search_trade_data":
             country = slots.get("country", "")
@@ -926,7 +960,17 @@ class SlotManager:
                 print(f"  [SLOTS] Cannot generate URL: invalid country '{country}' for hs_code")
                 return None
 
-            return f"{base_url}/chapter/{country}-{direction}-hs-code-{hs_code}"
+            # Map canonical country name to URL slug for /chapter/ endpoint
+            # /chapter/ also uses short slugs: usa, uk, etc.
+            country_to_url_slug = {
+                "united-states": "usa",
+                "united-kingdom": "uk",
+                "united-arab-emirates": "uae",
+                "south-korea": "south-korea",
+            }
+            country_slug = country_to_url_slug.get(country, country)
+
+            return f"{base_url}/chapter/{country_slug}-{direction}-hs-code-{hs_code}"
 
         return None
 

@@ -722,20 +722,18 @@ class UserInfoManager:
 
                 attempts = self._email_validation_attempts[session_id]
 
-                # Provide progressively stronger messages
+                # Provide progressively helpful messages (professional tone)
                 if attempts == 1:
                     return validation_message
                 elif attempts == 2:
                     return (
-                        "I understand temporary emails are convenient, but we need a professional work email "
-                        "to provide you with proper business support, detailed reports, and personalized assistance. "
-                        "Could you please share your company email instead?"
+                        "I'd love to send you detailed trade insights and market reports. "
+                        "What's your preferred work email address?"
                     )
                 else:
                     return (
-                        "For the best experience and to access our business resources, "
-                        "a work email is required. If you'd prefer not to share it now, "
-                        "that's okay - you can continue exploring, and we can collect it later when you're ready."
+                        "No problem! Feel free to continue exploring. "
+                        "If you'd like detailed reports or personalized assistance later, just let me know."
                     )
 
         return None

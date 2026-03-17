@@ -2306,16 +2306,23 @@ class ChatbotManager:
         if greeting_result:
             return greeting_result
 
-        system = """You are an intent-to-URL generator for a trade data application.
+        system = """You are an intelligent intent analyzer for a trade data application.
 
 You must output ONLY valid JSON.
 No explanations. No markdown. No extra text.
 
 Your job:
-- Understand the user query
+- Understand the user query with contextual intelligence
+- Handle ambiguous queries by making smart assumptions
 - Decide the correct intent
-- Extract parameters from the query
+- Extract and normalize parameters intelligently
 - Generate the EXACT final URL based on rules below
+
+INTELLIGENCE PRINCIPLES:
+1. Context Awareness: In trade contexts, use reasonable defaults (e.g., "america" typically means USA)
+2. Pattern Recognition: Recognize entity-first patterns ("exporters argentina" = Argentina exporters)
+3. Smart Assumptions: Make informed assumptions based on common usage
+4. Normalization: Convert variations to standard forms ("us", "usa", "america" → "united states")
 
 ────────────────────────
 INTENTS (SEVEN TOTAL)
@@ -2426,6 +2433,29 @@ CRITICAL EXAMPLES - Use search_trade_data when PRODUCT is mentioned:
 "steel exporters" → params: {product: "steel", entity_type: "exporter", direction: "export"}
 "oil suppliers in China" → params: {country: "china", product: "oil", entity_type: "suppliers", direction: "import"}
 
+INTELLIGENT COUNTRY NORMALIZATION (Handle ambiguous country names):
+"imports from america" → params: {country: "united states", direction: "import"}, intent: search_country_data
+   REASON: In trade context, "america" typically means USA. Normalize to "united states"
+   URL: https://www.marketinsidedata.com/en/country/usa/imports  (use "usa" slug for United States)
+
+"exports to us" → params: {country: "united states", direction: "export"}
+   REASON: "us" and "usa" normalize to "united states"
+   URL: https://www.marketinsidedata.com/en/country/usa/exports  (use "usa" slug)
+
+"trade with england" → params: {country: "united kingdom"}
+   REASON: "england" commonly refers to UK in trade contexts
+   URL: https://www.marketinsidedata.com/en/country/uk/imports  (use "uk" slug)
+
+ENTITY-FIRST QUERY PATTERNS (Entity mentioned BEFORE country):
+"exporters argentina" → params: {country: "argentina", entity_type: "exporter", direction: "export"}
+   REASON: Recognize reversed word order, extract both entity and country
+   URL: https://www.marketinsidedata.com/en/search-data/exporter?type=export&country=argentina
+
+"importers china" → params: {country: "china", entity_type: "importer", direction: "import"}
+"suppliers germany" → params: {country: "germany", entity_type: "suppliers", direction: "import"}
+"buyers usa" → params: {country: "united states", entity_type: "buyers", direction: "export"}
+   REASON: Handle "country after entity" pattern, normalize "usa" → "united states"
+
 IMPORTANT: Extract country when mentioned with "from", "in", "to", or "of":
 "I need supplies from Taiwan" → params: {country: "taiwan", entity_type: "suppliers", direction: "import"} (NO product yet - will ask)
 "suppliers from India" → params: {country: "india", entity_type: "suppliers", direction: "import"} (NO product yet - will ask)
@@ -2435,6 +2465,7 @@ IMPORTANT: Extract country when mentioned with "from", "in", "to", or "of":
 Use search_country_data when NO product (general overview):
 "top importers in Indonesia" → intent: search_country_data (no product!)
 "what does India export?" → intent: search_country_data (general overview)
+"america imports" → intent: search_country_data, params: {country: "united states", direction: "import"}
 
 URL formats:
 
@@ -2473,9 +2504,25 @@ Rules:
 
 IMPORTANT: If user doesn't specify import/export, default to "import"
 
+CRITICAL - URL SLUG MAPPING:
+When generating URLs, use these EXACT slugs for common countries:
+- "united states" → use slug "usa" (NOT "united-states")
+- "united kingdom" → use slug "uk" (NOT "united-kingdom")
+- "south korea" → use slug "south-korea"
+- "united arab emirates" → use slug "uae"
+- All other countries → use lowercase with hyphens (e.g., "saudi-arabia", "south-africa")
+
 URL formats:
-https://www.marketinsidedata.com/en/country/{country}/imports
-https://www.marketinsidedata.com/en/country/{country}/exports
+https://www.marketinsidedata.com/en/country/usa/imports  (NOT /country/united-states/imports)
+https://www.marketinsidedata.com/en/country/uk/exports  (NOT /country/united-kingdom/exports)
+https://www.marketinsidedata.com/en/country/{country-slug}/imports
+https://www.marketinsidedata.com/en/country/{country-slug}/exports
+
+CORRECT EXAMPLES:
+"imports from america" → https://www.marketinsidedata.com/en/country/usa/imports
+"what does USA export" → https://www.marketinsidedata.com/en/country/usa/exports
+"UK imports" → https://www.marketinsidedata.com/en/country/uk/imports
+"India exports" → https://www.marketinsidedata.com/en/country/india/exports
 
 ────────────────────────
 INTENT: country_to_country
@@ -2567,6 +2614,33 @@ entity_type values (for search_trade_data only):
 - "trade" → general trade data (default if not specified)
 
 ────────────────────────
+COUNTRY NORMALIZATION REFERENCE
+────────────────────────
+
+ALWAYS normalize these variations to standard names:
+- "america", "americas", "usa", "us", "the us", "united-states" → "united states"
+- "england", "britain", "great britain" → "united kingdom"
+- "uk" → "united kingdom"
+- "holland" → "netherlands"
+- "korea" → "south korea"
+- "uae" → "united arab emirates"
+
+When generating URLs for search_country_data:
+CRITICAL - Use these EXACT slugs (not the full country name):
+- "united states" → slug: "usa"
+- "united kingdom" → slug: "uk"
+- "south korea" → slug: "south-korea"
+- "united arab emirates" → slug: "uae"
+- Other countries → lowercase with hyphens (e.g., "saudi-arabia")
+
+For search_data URLs (trade/importer/exporter):
+- Use lowercase country names as-is
+- Replace spaces with hyphens: "united states" → "united-states"
+
+For country_to_country URLs:
+- Use Title Case with %20 for spaces: "United States", "United%20Kingdom"
+
+────────────────────────
 IMPORTANT
 ────────────────────────
 
@@ -2574,8 +2648,10 @@ IMPORTANT
 - ALWAYS include "params" object with extracted values (empty string if not found)
 - Do NOT add explanations
 - Extract all params you can find, even if some are missing
+- ALWAYS normalize country names using the reference above
 - If direction is not specified, set direction to "import" in params (most common use case)
 - Generate URL when you have the core required fields (country + hs_code for hs_code intent, etc.)
+- Be intelligent: recognize entity-first patterns, normalize country variations, use context clues
         """
         parsed: Optional[Dict[str, Any]] = None
         try:
