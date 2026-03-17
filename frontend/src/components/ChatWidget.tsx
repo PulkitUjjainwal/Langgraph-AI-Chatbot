@@ -275,6 +275,13 @@ export default function ChatWidget() {
     interceptorScript.id = 'odoo-session-interceptor';
     interceptorScript.textContent = `
       (function(){
+        // Prevent duplicate script execution
+        if(window.__odoo_interceptor_loaded){
+          console.log('[Odoo] Interceptor already loaded, skipping');
+          return;
+        }
+        window.__odoo_interceptor_loaded = true;
+
         // Hide Odoo livechat initially until user requests it
         (function(){
           var hs = document.createElement('style');
@@ -386,8 +393,16 @@ export default function ChatWidget() {
         })();
 
         // Handle openOdooChat event
+        var odooClickInProgress = false;  // Prevent duplicate clicks
         window.addEventListener('openOdooChat', function(){
           console.log('[Odoo] openOdooChat event received');
+
+          // Prevent duplicate execution if already in progress
+          if(odooClickInProgress){
+            console.log('[Odoo] Already opening, ignoring duplicate event');
+            return;
+          }
+          odooClickInProgress = true;
 
           // Remove hide style first
           var hs = document.getElementById('odoo-init-hide');
@@ -466,6 +481,8 @@ export default function ChatWidget() {
           // Try immediately
           if(tryClickOdoo()){
             console.log('[Odoo] ✓ Button clicked successfully');
+            // Reset flag after 2 seconds to allow future opens
+            setTimeout(function(){ odooClickInProgress = false; }, 2000);
             return;
           }
 
@@ -478,11 +495,15 @@ export default function ChatWidget() {
             if(tryClickOdoo()){
               console.log('[Odoo] ✓ Button clicked after', attempts, 'attempts');
               clearInterval(retryInterval);
+              // Reset flag after 2 seconds
+              setTimeout(function(){ odooClickInProgress = false; }, 2000);
               return;
             }
             if(attempts >= maxAttempts){
               console.warn('[Odoo] Button not found after', maxAttempts, 'attempts');
               clearInterval(retryInterval);
+              // Reset flag even if button not found
+              odooClickInProgress = false;
             }
           }, 300);
         });
