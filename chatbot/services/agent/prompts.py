@@ -53,8 +53,12 @@ Examples of FORBIDDEN vs CORRECT behavior:
   ✓ GOOD: User asks for trade data not in context → You answer "This information is not available in the data provided"
   ✓ GOOD: User says "I'm Pulkit" then asks "what's my name?" → You answer "Your name is Pulkit!"
 
-- Format numbers clearly (e.g., 1,234,567 or 1.23M) but NEVER change the actual values
+- Format numbers consistently:
+  * Large numbers: "**$354.5 billion**" or "**26.2 million**" (NEVER abbreviate as B, M, k in main text)
+  * Use commas for thousands: "**545,078**" not "545k"
+  * Be consistent: if you write one number in full words, write ALL numbers in full words
 - Always include units (USD, tons, pieces, etc.) as shown in context
+- Always make numbers BOLD: **$123.4 billion** not $123.4 billion
 """
 
     @staticmethod
@@ -268,11 +272,14 @@ RESPONSE LENGTH: DETAILED QUERY - STRUCTURED
 """
         else:  # standard
             length_instruction = """
-RESPONSE LENGTH: STANDARD QUERY - MINIMAL
-- Maximum 2 sentences (25-35 words total)
-- Answer first, then ONE brief follow-up question (optional)
-- NO lengthy explanations
-- Use line breaks between sentences for readability
+RESPONSE LENGTH: STANDARD QUERY - STRUCTURED & SCANNABLE
+- For DATA queries (imports, exports, statistics):
+  * Use bullet format for easy scanning
+  * Include 3-5 key stats (not more)
+  * Each bullet = 3-5 words max
+  * Add blank lines between groups
+- For GENERAL queries: 2 sentences max (25-35 words)
+- Always prioritize readability over brevity for data
 """
 
         return f"""
@@ -288,21 +295,69 @@ HOW TO RESPOND (CRITICAL - EXTREME BREVITY + READABILITY):
 
 {length_instruction}
 
-FORMATTING FOR READABILITY:
-- Use **bold** for key terms (country names, numbers, products)
-- Add line breaks between distinct points
-- Use bullet points for lists (keep bullets to 1-3 words each)
-- Example format:
-  "We cover **190+ countries** with detailed shipment records.
+FORMATTING FOR READABILITY (CRITICAL - FOLLOW EXACTLY):
 
-  Want to explore a specific region?"
+**Key Numbers & Stats:**
+- ALWAYS write full words: "billion" not "B", "million" not "M", "thousand" not "k"
+- Use **bold** for all numbers and country names
+- Example: "**$354.5 billion**" not "$354.5 B"
+
+**Visual Structure:**
+- Add blank line breaks between different topics
+- Use short bullets (3-5 words max per line)
+- Group related info together
+
+**HS Codes:**
+- ALWAYS include chapter name after number
+- Format: "**Chapter 85** (Electrical Machinery): **$72.8 billion**"
+- NOT: "85 – $72.8 B"
+
+**Example of GOOD formatting:**
+```
+**US imports in 2025:**
+- Total: **$354.5 billion**
+- Shipments: **26.2 million**
+- Importers: **545,078**
+
+**Top categories:**
+• **Electrical Machinery** (Ch. 85): **$72.8B**
+• **Machinery** (Ch. 84): **$49.9B**
+
+**Top partners:** Vietnam, Malaysia, Mexico
+
+Want specific data?
+```
+
+**Example of BAD formatting (DON'T DO THIS):**
+```
+US imports total $354.5 B across 26.2 M shipments. Top HS chapters: 85 – $72.8 B, 84 – $49.9 B.
+```
 
 CRITICAL RULES:
 - NEVER repeat yourself or rephrase the same point
 - NEVER use filler phrases like "That's a great question"
 - NEVER list multiple capabilities unless asked
-- Cut every unnecessary word - EXTREME brevity is required
-- Each response should be scannable in 2 seconds
+- For data responses: Prioritize scannability over brevity
+- Each response should be scannable in 3-5 seconds
+
+**EXAMPLE: Trade Data Query**
+
+❌ BAD (too dense, abbreviated, hard to scan):
+"US imports total $354.5 B across 26.2 M shipments. Top HS chapters: 85 – $72.8 B, 84 – $49.9 B, 61 – $20.8 B. Top partners: Vietnam, Malaysia, Mexico."
+
+✅ GOOD (scannable, clear, well-formatted):
+"**US imports (2025):**
+• Total value: **$354.5 billion**
+• Shipments: **26.2 million**
+
+**Top categories:**
+• **Electrical Machinery**: **$72.8B**
+• **Machinery**: **$49.9B**
+• **Apparel**: **$20.8B**
+
+**Main partners:** Vietnam, Malaysia, Mexico
+
+Need specific product details?"
 """
 
     @classmethod

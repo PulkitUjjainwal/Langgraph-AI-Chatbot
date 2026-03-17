@@ -97,6 +97,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 # Import modular components for prompt building
 from chatbot.services.agent.prompts import PromptBuilder, PromptConfig
+from chatbot.utils.url_validator import get_url_validator
 
 # Import modular API models
 from chatbot.models.api_models import (
@@ -737,6 +738,45 @@ session_dynamic_content: Dict[str, str] = {}
 
 # Global source URL per session (for including in responses)
 session_source_url: Dict[str, str] = {}
+
+# Global URL validator (initialized on startup)
+url_validator = None
+
+
+async def set_source_url_if_valid(url: str) -> bool:
+    """
+    Set source URL only if it's valid (not a 404 page)
+
+    Args:
+        url: URL to validate and set
+
+    Returns:
+        True if URL was set, False if invalid/404
+    """
+    global url_validator, session_source_url
+
+    if not url or not url_validator:
+        return False
+
+    # Check cache first (instant - no delay)
+    is_valid = await url_validator.is_valid_cached(url)
+
+    if is_valid is True:
+        # Cached as valid - use it immediately
+        session_source_url["current"] = url
+        print(f"  [URL] ✓ Using cached valid URL: {url[:60]}...")
+        return True
+    elif is_valid is False:
+        # Cached as invalid (404) - don't use it
+        print(f"  [URL] ✗ Skipping cached invalid URL (404): {url[:60]}...")
+        return False
+    else:
+        # Not cached - validate in background for next time
+        # For now, DON'T include URL in response (be conservative)
+        print(f"  [URL] ? URL not validated yet, skipping: {url[:60]}...")
+        print(f"  [URL] ⏳ Validating in background for future use...")
+        await url_validator.validate_in_background(url)
+        return False
 
 
 def fetch_dynamic_trade_data(query: str = "") -> str:
@@ -3435,8 +3475,8 @@ IMPORTANT
                 related, score, _ = await self.is_query_related_via_llm(message, fetch_url, full_content)
                 if related and score >= 0.5:
                     dynamic_content = full_content
-                    # Store the cached URL as source
-                    session_source_url["current"] = fetch_url
+                    # Store the cached URL as source (only if valid)
+                    await set_source_url_if_valid(fetch_url)
                     print(f"  [STREAM] Using cached content: {len(full_content)} chars")
             if not dynamic_content:
                 try:
@@ -3449,8 +3489,8 @@ IMPORTANT
                     )
                     dynamic_content = api_data or ""
                     # URL is stored by handle_dynamic_api_call (now uses fixed fetch_url)
-                    # Force store the fixed URL regardless of content
-                    session_source_url["current"] = fetch_url
+                    # Force store the fixed URL regardless of content (only if valid)
+                    await set_source_url_if_valid(fetch_url)
                 except Exception as e:
                     print(f"  [STREAM] API call failed: {e}")
 
@@ -3515,8 +3555,12 @@ IMPORTANT
                 # Use 'chunk_text' field (same as main chat function)
                 kb_context = "\n".join([doc.get("chunk_text", "") for doc in kb_results[:3]])
                 print(f"  [STREAM] KB context retrieved: {len(kb_context)} chars")
+            except asyncio.TimeoutError:
+                print(f"  [STREAM] KB retrieval timed out (5s) - using empty context")
             except Exception as e:
-                print(f"  [STREAM] KB retrieval failed: {e}")
+                print(f"  [STREAM] KB retrieval failed: {type(e).__name__}: {e}")
+                import traceback
+                print(f"  [STREAM] Traceback: {traceback.format_exc()}")
 
         # Merge context
         merged_context = ""
@@ -3554,17 +3598,22 @@ IMPORTANT
         current_source_url = session_source_url.get("current", "") if dynamic_content else ""
 
         # ========================================================================
-        # CRITICAL: FINAL URL FIX BEFORE SHOWING TO USER
-        # Apply mirror/detailed fix one last time to ensure URL is correct
+        # CRITICAL: FINAL URL FIX AND VALIDATION BEFORE SHOWING TO USER
+        # 1. Apply mirror/detailed fix to ensure URL is correct
+        # 2. Validate URL to ensure it's not a 404 page
         # ========================================================================
+        validated_url = ""
         if current_source_url and intent in ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]:
             print(f"\n{'🔧'*35}")
             print(f"[FINAL URL FIX] URL before final fix: {current_source_url}")
             current_source_url = await self._fix_url_data_type(current_source_url, intent, params)
             print(f"[FINAL URL FIX] URL after final fix: {current_source_url}")
             print(f"{'🔧'*35}\n")
-            # Update the global too
-            session_source_url["current"] = current_source_url
+            # Validate URL (only include if valid, not 404)
+            if await set_source_url_if_valid(current_source_url):
+                validated_url = current_source_url
+            else:
+                print(f"[URL] ⚠️ URL validation failed - excluding from response")
 
         prompt_config = PromptConfig(
             site_name=Config.SITE_NAME,
@@ -3573,7 +3622,7 @@ IMPORTANT
             conversation_history=history_text,
             industry_info=None,
             query_type=smart_query_type,
-            source_url=current_source_url  # Include source URL for user to click
+            source_url=validated_url  # Only include if validated (prevents 404s)
         )
 
         system_prompt = PromptBuilder.build_system_prompt(prompt_config)
@@ -6769,6 +6818,25 @@ support_interaction_service = SupportInteractionService(
 async def init_support_interaction_service():
     """Initialize support interaction service on startup"""
     await support_interaction_service.initialize()
+
+
+@app.on_event("startup")
+async def init_url_validator():
+    """Initialize URL validator with Redis on startup"""
+    global url_validator
+    try:
+        from chatbot.integrations.redis.client import RedisMemoryManager
+        redis_manager = RedisMemoryManager(
+            host=Config.REDIS_HOST,
+            port=Config.REDIS_PORT,
+            db=Config.REDIS_DB,
+            password=Config.REDIS_PASSWORD if Config.REDIS_PASSWORD else None
+        )
+        url_validator = get_url_validator(redis_manager)
+        print("[URL Validator] ✓ Initialized with Redis caching")
+    except Exception as e:
+        print(f"[URL Validator] ⚠️ Failed to initialize: {e}")
+        print(f"[URL Validator] URLs will not be validated (all URLs will be shown)")
 
 
 @router.post("/support/track", response_model=SupportInteractionResponse)
