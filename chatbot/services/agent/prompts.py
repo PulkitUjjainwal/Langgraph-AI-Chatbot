@@ -439,7 +439,13 @@ Need specific product details?"
         if config.conversation_history:
             history_section = f"""[CONVERSATION HISTORY - USE THIS FOR CONTEXT]:
 {config.conversation_history}
-(Remember details from above conversation - user's name, preferences, previous questions, etc.)
+
+IMPORTANT: Remember details from conversation:
+- User's name (if they shared it) - use it naturally in responses
+- Previous questions/topics - reference them when user provides info
+- When user shares personal info (name/email/phone), acknowledge warmly AND continue previous topic
+  Example: "Thanks, Pulkit! Now, about those used phones you asked about earlier..."
+  DON'T just say "Your name is Pulkit!" - that's robotic. Make it conversational.
 
 """
 

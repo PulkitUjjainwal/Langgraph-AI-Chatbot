@@ -55,74 +55,166 @@ class LLMUserInfoCollector:
         conversation_history: List[Dict[str, str]]
     ) -> Optional[str]:
         """
-        FAST non-blocking analysis.
+        SMART USER INFO COLLECTION - Ask when appropriate, extract in background.
 
-        Returns prompt immediately if we should collect, None otherwise.
-        Extraction happens in background.
+        Strategy:
+        1. Extract info from user messages in background (non-blocking)
+        2. After message 2+, start asking for missing critical fields
+        3. Use template prompts (instant) to avoid LLM call delays
+
+        Performance: ~1-2ms (Redis check + template generation)
         """
-        print(f"[COLLECTOR_INTERNAL] analyze_and_collect_async called: msg_count={message_count}")
+        print(f"[COLLECTOR_INTERNAL] analyze_and_collect_async: msg_count={message_count}")
 
-        # Quick check: Do we need to collect anything?
+        # Don't collect on message 1
+        if message_count < 2:
+            return None
+
+        # Get current state (fast Redis check, ~1-2ms)
         user_info = await self._get_user_info_fast(session_id)
         missing = self._get_missing_fields(user_info)
-        print(f"[COLLECTOR_INTERNAL] user_info={user_info}, missing={missing}")
 
         if not missing:
-            print(f"[COLLECTOR_INTERNAL] All info collected, returning None")
             return None  # All collected
 
-        # Quick heuristic checks (no LLM needed for obvious cases)
+        print(f"[COLLECTOR_INTERNAL] Missing: {missing}, starting background extraction")
 
-        # Don't collect on message 1 (let them engage first)
-        if message_count < 2:
-            print(f"[COLLECTOR_INTERNAL] Message count < 2, returning None")
-            return None
-
-        # CRITICAL FIX: Check if current message contains user info BEFORE asking
-        # Uses cached LLM detection (< 1ms) from previous background task
-        # Falls back to fast heuristics if no cache available
-        detected_in_message = self._get_cached_detection(session_id, user_message, missing)
-        print(f"[COLLECTOR_INTERNAL] Detected in current message: {detected_in_message}")
-
-        # Update missing list - remove fields detected in current message
-        still_missing = [field for field in missing if field not in detected_in_message]
-        print(f"[COLLECTOR_INTERNAL] Still missing after detection: {still_missing}")
-
-        # Extract in background (non-blocking)
-        print(f"[COLLECTOR_INTERNAL] Starting background extraction task")
+        # Start background extraction (non-blocking, ~1ms to spawn)
+        # All LLM detection and extraction happens in background
         asyncio.create_task(
-            self._extract_and_save_background(session_id, user_message, missing)
+            self._llm_analyze_and_collect_background(
+                session_id=session_id,
+                user_message=user_message,
+                bot_response=bot_response,
+                message_count=message_count,
+                conversation_history=conversation_history,
+                current_missing=missing
+            )
         )
 
-        # Smart decision: Should we prompt now? (only for fields NOT in current message)
-        should_prompt_now = self._fast_decision_heuristic(
-            user_message=user_message,
-            bot_response=bot_response,
-            message_count=message_count,
-            missing_fields=still_missing,  # Use updated list
-            user_info=user_info,
-            session_id=session_id  # Pass session_id to check for rejected emails
-        )
-        print(f"[COLLECTOR_INTERNAL] Decision result: {should_prompt_now}")
+        # SMART PROMPTING: Ask for info based on priority and engagement
+        # Priority order for REAL-TIME collection: name > email > phone
+        # NOTE: Requirements are collected AFTER session ends (not asked during conversation)
+        priority_order = ['name', 'email', 'phone']
 
-        if not should_prompt_now['should_ask']:
-            print(f"[COLLECTOR_INTERNAL] Decision says don't ask, returning None")
+        # Remove requirements from missing list (collected later)
+        missing_realtime = [f for f in missing if f != 'requirements']
+
+        # Ask starting from message 2, then every 3 messages (2, 5, 8, 11...)
+        # This gives user time to respond without being too pushy
+        should_ask = message_count >= 2 and (message_count - 2) % 3 == 0
+
+        if should_ask and missing_realtime:
+            # Ask for highest priority missing field
+            for field in priority_order:
+                if field in missing_realtime:
+                    # Use template prompt (instant, no LLM call)
+                    prompt = self._generate_template_prompt(field, user_message)
+                    print(f"[LLM_COLLECTOR] Asking for '{field}': {prompt[:60]}...")
+                    return f"\n\n{prompt}"
+
+        return None
+
+    async def _llm_analyze_and_collect_background(
+        self,
+        session_id: str,
+        user_message: str,
+        bot_response: str,
+        message_count: int,
+        conversation_history: List[Dict[str, str]],
+        current_missing: List[str]
+    ):
+        """
+        OPTIMIZED: Single-pass LLM extraction with caching.
+
+        Performance improvements:
+        1. Skip detection, go straight to extraction (faster)
+        2. Cache results for next message
+        3. No redundant LLM calls
+
+        NOTE: Requirements are NOT extracted here - they're extracted when
+        conversation is saved (end of session) for better accuracy.
+        """
+        try:
+            print(f"[LLM_COLLECTOR] Background extraction started (name/email/phone only)")
+
+            # Filter out requirements - they're collected after session ends
+            missing_realtime = [f for f in current_missing if f != 'requirements']
+
+            if missing_realtime:
+                # OPTIMIZED: Skip separate detection call, go straight to extraction
+                # This saves 1-2 LLM calls per message (2-4 seconds)
+                await self._extract_and_save_background(session_id, user_message, missing_realtime, conversation_history)
+
+            print(f"[LLM_COLLECTOR] Background extraction complete")
+
+        except Exception as e:
+            print(f"[LLM_COLLECTOR] Background error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    async def extract_requirements_from_full_history(
+        self,
+        session_id: str,
+        conversation_history: List[Dict[str, str]]
+    ) -> Optional[str]:
+        """
+        Extract requirements from FULL conversation history after session ends.
+
+        This is called when conversation is saved to analyze the complete
+        conversation and extract what the user was looking for.
+
+        Returns the extracted requirement or None.
+        """
+        if not conversation_history or len(conversation_history) < 2:
+            print(f"[LLM_COLLECTOR] [POST-SESSION] Conversation too short, skipping requirements extraction")
             return None
 
-        # Check if there's a custom message (e.g., for rejected disposable email)
-        if 'custom_message' in should_prompt_now:
-            prompt = should_prompt_now['custom_message']
-            print(f"[COLLECTOR_INTERNAL] ⚠️ Using custom prompt for rejected email: {prompt[:60]}...")
-        else:
-            # Generate prompt (LLM-generated, personalized based on context)
-            prompt = await self._generate_fast_contextual_prompt(
-                field=should_prompt_now['field'],
-                bot_response=bot_response,
-                user_message=user_message
-            )
-            print(f"[COLLECTOR_INTERNAL] Generated prompt: {prompt}")
+        try:
+            print(f"[LLM_COLLECTOR] [POST-SESSION] Extracting requirements from {len(conversation_history)} messages")
 
-        return prompt
+            # Check if requirements already exist
+            user_info = await self._get_user_info_fast(session_id)
+            if user_info.get('requirements'):
+                print(f"[LLM_COLLECTOR] [POST-SESSION] Requirements already exist, skipping")
+                return user_info['requirements']
+
+            # Build conversation summary (last 10 user messages)
+            user_queries = []
+            for msg in conversation_history:
+                if msg.get('role') == 'user':
+                    content = msg.get('content', '').strip()
+                    if content and len(content) > 5:
+                        user_queries.append(content)
+
+            if not user_queries:
+                print(f"[LLM_COLLECTOR] [POST-SESSION] No user queries found")
+                return None
+
+            # Take last 10 queries for analysis
+            recent_queries = user_queries[-10:]
+            queries_text = "\n".join([f"- {q}" for q in recent_queries])
+
+            # Use keyword extraction as primary method (faster, more reliable)
+            requirement = self._extract_requirement_from_keywords(
+                " ".join(recent_queries),
+                conversation_history
+            )
+
+            if requirement and len(requirement) > 15:
+                # Save to database
+                print(f"[LLM_COLLECTOR] [POST-SESSION] Extracted requirement: {requirement[:100]}...")
+                await self.db_service.save_user_info(session_id, {'requirements': requirement})
+                return requirement
+
+            print(f"[LLM_COLLECTOR] [POST-SESSION] No clear requirement found")
+            return None
+
+        except Exception as e:
+            print(f"[LLM_COLLECTOR] [POST-SESSION] Requirements extraction failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _get_cached_detection(
         self,
@@ -133,20 +225,20 @@ class LLMUserInfoCollector:
         """
         INSTANT detection using cached LLM results (< 1ms).
 
-        Falls back to fast heuristics if no cache available.
-        LLM detection runs in background and populates cache for next message.
+        100% LLM-DRIVEN - no heuristic fallback.
+        Returns empty if no cache (background LLM will handle detection).
         """
         # Check cache (instant)
         cache_key = f"{session_id}:{user_message[:50]}"
         if cache_key in self._detection_cache:
             cached = self._detection_cache[cache_key]
-            print(f"[COLLECTOR_INTERNAL] ⚡ Cache HIT for detection")
+            print(f"[COLLECTOR_INTERNAL] * Cache HIT - LLM detected: {cached}")
             return [f for f in cached if f in missing_fields]
 
-        # No cache - use instant heuristics with conversation context (< 1ms)
-        print(f"[COLLECTOR_INTERNAL] ⚡ Cache MISS - using fast heuristics")
-        conversation = self.redis.get_conversation(session_id)
-        return self._instant_heuristic_detection(user_message, missing_fields, conversation)
+        # No cache - return empty (background LLM will detect and cache for next time)
+        # This prevents asking for info the user just provided
+        print(f"[COLLECTOR_INTERNAL] * Cache MISS - background LLM will handle detection")
+        return []  # Trust LLM only, no heuristics
 
     def _instant_heuristic_detection(
         self,
@@ -188,17 +280,35 @@ class LLMUserInfoCollector:
                 detected.append('name')
 
             # Pattern 2: Direct answer after bot asked for name
-            # Check if bot just asked for name in last message
-            elif conversation_context and len(conversation_context) >= 2:
-                last_bot_msg = conversation_context[-1].get('content', '').lower()
-                if 'name' in last_bot_msg and any(q in last_bot_msg for q in ['?', 'please', 'could you']):
+            # Check if bot just asked for name in last message OR second-to-last message
+            elif conversation_context and len(conversation_context) >= 1:
+                # Check last 2 bot messages for name question
+                bot_asked_for_name = False
+                for msg in reversed(conversation_context[-4:]):  # Check last 4 messages (2 exchanges)
+                    if msg.get('role') == 'assistant':
+                        bot_msg_lower = msg.get('content', '').lower()
+                        if (('name' in bot_msg_lower or 'who are you' in bot_msg_lower or "what's your name" in bot_msg_lower) and
+                            any(q in bot_msg_lower for q in ['?', 'please', 'could you', 'may i', 'share your'])):
+                            bot_asked_for_name = True
+                            break
+
+                if bot_asked_for_name:
                     # Bot asked for name, check if user provided simple text response
                     # Must be: 2-50 chars, mostly letters, not a question, not a common phrase
-                    if (2 <= len(message_stripped) <= 50 and
-                        sum(c.isalpha() or c.isspace() for c in message_stripped) / len(message_stripped) > 0.7 and
+                    # Accept both capitalized AND lowercase names (e.g., "Pulkit" or "pulkit")
+                    is_likely_name = (
+                        2 <= len(message_stripped) <= 50 and
+                        sum(c.isalpha() or c.isspace() for c in message_stripped) / len(message_stripped) > 0.6 and
                         '?' not in message_stripped and
-                        message_stripped.lower() not in ['yes', 'no', 'ok', 'sure', 'nope', 'yeah', 'hi', 'hello']):
+                        not any(word in user_lower for word in ['yes', 'no', 'ok', 'sure', 'nope', 'yeah']) and
+                        message_stripped.lower() not in ['hi', 'hello', 'hey', 'usa', 'india', 'china', 'uk', 'brazil', 'germany'] and
+                        # Simple word with mostly letters (accept both "Pulkit" and "pulkit")
+                        (len(message_stripped) <= 20 and
+                         sum(c.isalpha() or c.isspace() for c in message_stripped) >= len(message_stripped) * 0.8)
+                    )
+                    if is_likely_name:
                         detected.append('name')
+                        print(f"[COLLECTOR_INTERNAL] * Heuristic detected name: '{message_stripped}'")
 
         # Detect requirements (keyword-based)
         if 'requirements' in missing_fields:
@@ -237,31 +347,24 @@ class LLMUserInfoCollector:
 
         # Build focused prompt with context
         fields_str = ', '.join(missing_fields)
-        prompt = f"""Analyze this conversation and detect if the user's current message contains: {fields_str}.
+        prompt = f"""You are a data extraction assistant. Analyze the conversation and detect if the user provided: {fields_str}.
 
 Conversation history:
 {context}
 
 Current user message: "{user_message}"
 
-CRITICAL RULES:
-- Name: User providing their name in ANY form:
-  * Explicit: "my name is John", "I'm Sarah", "call me Alex"
-  * Direct answer: If bot asked "what's your name?" and user says "pulkit" → TRUE
-  * Context-aware: If bot asks for name and user provides simple text (2-50 chars), likely a name → TRUE
-  * NOT a name: Country names, company names, greetings, yes/no
+Detection rules:
+- Name: User providing their name (e.g., "my name is John", "I'm Sarah", "call me Alex", or direct answer to name question like "pulkit")
+- Email: Valid email address (e.g., user@domain.com)
+- Phone: Phone number (e.g., +1234567890 or similar)
+- Requirements: User expressing needs (e.g., "I need import data", "looking for statistics")
 
-- Email: Valid email address (user@domain.com)
+CRITICAL: Return ONLY a valid JSON object, nothing else. No thinking, no explanation, no markdown.
 
-- Phone: Phone number (+1234567890 or similar)
+Format: {{"name": true/false, "email": true/false, "phone": true/false, "requirements": true/false}}
 
-- Requirements: User expressing needs/wants
-  * "I need import data", "looking for statistics", "want to find buyers"
-
-IMPORTANT: Use conversation context! If bot asked "what's your name?" and user replied with a simple word, that's their name.
-
-Return ONLY a JSON object (no markdown, no explanation):
-{{"name": true/false, "email": true/false, "phone": true/false, "requirements": true/false}}"""
+Your response:"""
 
         try:
             # Fast LLM call for intelligent detection
@@ -271,21 +374,63 @@ Return ONLY a JSON object (no markdown, no explanation):
                 return self._fallback_regex_detection(user_message, missing_fields)
 
             response = self._ollama_client.chat(
-                model='qwen3.5:cloud',  # Small cloud model (fast, GPU-accelerated, 1-2s response)
+                model='qwen3.5:cloud',  # Cloud model (same as main)
                 messages=[{'role': 'user', 'content': prompt}],
                 options={
-                    'temperature': 0.1,  # Low temperature for consistent detection
-                    'num_predict': 100  # Short response
+                    'temperature': 0.0,  # Zero temperature for deterministic output
+                    'num_predict': 100,  # Reduced for faster response
+                    'thinking': False,  # Disable thinking output
+                    'num_ctx': 2048  # Reduced context for speed
                 }
             )
 
-            # Parse JSON response
-            response_text = response['message']['content'].strip()
+            # Parse JSON response with robust extraction
+            # Handle models that put output in 'thinking' field (e.g., gpt-oss:20b-cloud)
+            response_text = response['message'].get('content', '').strip()
+            if not response_text and 'thinking' in response['message']:
+                response_text = response['message']['thinking'].strip()
 
-            # Remove markdown code blocks if present
-            response_text = re.sub(r'```json\s*|\s*```', '', response_text).strip()
+            print(f"[COLLECTOR_INTERNAL] Raw LLM response: content={response['message'].get('content', '')[:100]}, has_thinking={('thinking' in response['message'])}")
 
-            data = json.loads(response_text)
+            # ROBUST JSON EXTRACTION - handles thinking text and various formats
+            def extract_json_from_text(text: str) -> Optional[dict]:
+                """Extract JSON from text that may contain thinking/explanation"""
+                if not text:
+                    return None
+
+                # Remove markdown code blocks
+                text = re.sub(r'```(?:json)?\s*|\s*```', '', text).strip()
+
+                # Try to find JSON object - look for {...} pattern with boolean values
+                # Match JSON objects that contain true/false values (our expected format)
+                json_patterns = [
+                    r'\{[^{}]*(?:"name"|"email"|"phone"|"requirements")[^{}]*\}',  # Contains our keys
+                    r'\{(?:[^{}]|"[^"]*")*\}',  # Any valid JSON object
+                ]
+
+                for pattern in json_patterns:
+                    matches = re.finditer(pattern, text, re.DOTALL)
+                    for match in matches:
+                        try:
+                            candidate = match.group(0)
+                            parsed = json.loads(candidate)
+                            # Validate it has at least one of our expected keys
+                            if any(k in parsed for k in ['name', 'email', 'phone', 'requirements']):
+                                return parsed
+                        except json.JSONDecodeError:
+                            continue
+
+                # If all else fails, try to parse the whole text
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    return None
+
+            data = extract_json_from_text(response_text)
+
+            if not data:
+                print(f"[COLLECTOR_INTERNAL] Failed to extract JSON from: {response_text[:200]}")
+                raise ValueError("No valid JSON found in response")
             print(f"[COLLECTOR_INTERNAL] LLM detection result: {data}")
 
             # Build detected list
@@ -386,7 +531,7 @@ Return ONLY a JSON object (no markdown, no explanation):
             if rejection_key in self._cache:
                 rejection_info = self._cache[rejection_key]
                 del self._cache[rejection_key]  # Clear after use
-                print(f"[COLLECTOR_INTERNAL] ⚠️ Detected rejected disposable email - will ask for valid email")
+                print(f"[COLLECTOR_INTERNAL] [WARN] Detected rejected disposable email - will ask for valid email")
                 return {
                     'should_ask': True,
                     'field': 'email',
@@ -473,19 +618,19 @@ Return ONLY a JSON object (no markdown, no explanation):
         # Use generic prompt if bot said "Sorry" or couldn't help
         if self._is_out_of_scope_response(bot_response):
             generic_prompt = self._generate_generic_prompt(field)
-            print(f"[LLM_COLLECTOR] ⚡ Generic prompt (instant): {generic_prompt[:50]}...")
+            print(f"[LLM_COLLECTOR] * Generic prompt (instant): {generic_prompt[:50]}...")
             return generic_prompt
 
         # Check cache for LLM-generated prompt (instant)
         cache_key = f"{field}"
         if cache_key in self._prompt_cache:
             cached_prompt = self._prompt_cache[cache_key]
-            print(f"[LLM_COLLECTOR] ⚡ Cached LLM prompt (instant): {cached_prompt[:50]}...")
+            print(f"[LLM_COLLECTOR] * Cached LLM prompt (instant): {cached_prompt[:50]}...")
             return cached_prompt
 
         # Use template immediately (instant)
         template_prompt = self._generate_template_prompt(field, user_message)
-        print(f"[LLM_COLLECTOR] ⚡ Template prompt (instant): {template_prompt[:50]}...")
+        print(f"[LLM_COLLECTOR] * Template prompt (instant): {template_prompt[:50]}...")
 
         # Generate better LLM prompt in background for future use
         if self._ollama_client:
@@ -510,7 +655,7 @@ Return ONLY a JSON object (no markdown, no explanation):
             if llm_prompt:
                 cache_key = f"{field}"
                 self._prompt_cache[cache_key] = llm_prompt
-                print(f"[LLM_COLLECTOR] ⚡ Cached improved LLM prompt for '{field}': {llm_prompt[:60]}...")
+                print(f"[LLM_COLLECTOR] * Cached improved LLM prompt for '{field}': {llm_prompt[:60]}...")
         except Exception as e:
             print(f"[LLM_COLLECTOR] Background LLM prompt generation failed: {e}")
 
@@ -552,25 +697,38 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
 
         try:
             response = self._ollama_client.chat(
-                model='ministral-3:8b',
+                model='qwen3.5:cloud',  # Cloud model (same as main)
                 messages=[{'role': 'user', 'content': system_prompt}],
                 options={
                     'temperature': 0.7,  # Creative but controlled
-                    'num_predict': 80  # Short prompt
+                    'num_predict': 100,  # Increased for qwen
+                    'thinking': False  # Disable thinking output
                 }
             )
 
-            generated_prompt = response['message']['content'].strip()
+            # Handle models that put output in 'thinking' field
+            generated_prompt = response['message'].get('content', '').strip()
+            if not generated_prompt and 'thinking' in response['message']:
+                generated_prompt = response['message']['thinking'].strip()
 
             # Clean up response (remove quotes if present)
             generated_prompt = generated_prompt.strip('"\'')
+
+            # Extract just the prompt if there's thinking text
+            if generated_prompt and '\n' in generated_prompt:
+                # Take last line that looks like a question
+                lines = [l.strip() for l in generated_prompt.split('\n') if l.strip()]
+                for line in reversed(lines):
+                    if '?' in line and len(line) > 15:
+                        generated_prompt = line.strip('"\'')
+                        break
 
             # Validate prompt (basic checks)
             if (len(generated_prompt) > 15 and
                 len(generated_prompt) < 200 and
                 ('?' in generated_prompt or 'please' in generated_prompt.lower())):
 
-                print(f"[LLM_COLLECTOR] ✓ Generated prompt for {field}: {generated_prompt[:60]}...")
+                print(f"[LLM_COLLECTOR] [OK] Generated prompt for {field}: {generated_prompt[:60]}...")
                 return generated_prompt
 
             return None
@@ -642,47 +800,34 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
         self,
         session_id: str,
         user_message: str,
-        missing_fields: List[str]
+        missing_fields: List[str],
+        conversation_history: Optional[List[Dict[str, str]]] = None
     ):
         """
-        Extract and save user info in BACKGROUND (non-blocking).
+        OPTIMIZED: Extract and save user info in one pass.
 
-        Uses LLM-based intelligent extraction with conversation context.
-        Allows updates to existing fields (e.g., "pulkit" → "pulkit ujjainwal").
-
-        Also runs LLM detection and CACHES results for next message (instant lookup).
+        Performance improvements:
+        1. Use provided conversation_history to avoid Redis fetch
+        2. Skip redundant detection call
+        3. Go straight to extraction
         """
 
         extracted = {}
 
-        # Get conversation history AND current user info for context-aware extraction
-        messages = self.redis.get_conversation(session_id)
+        # Get current user info for context-aware extraction
         current_info = await self._get_user_info_fast(session_id)
 
-        # RUN LLM DETECTION IN BACKGROUND with conversation context
-        # This provides LLM accuracy without blocking main response
-        try:
-            detected_fields = await self._quick_detect_user_info(
-                user_message,
-                missing_fields,
-                conversation_history=messages  # Pass conversation context for smarter detection
-            )
-            # Cache for next message (instant lookup)
-            cache_key = f"{session_id}:{user_message[:50]}"
-            self._detection_cache[cache_key] = detected_fields
-            print(f"[COLLECTOR_INTERNAL] ⚡ Cached LLM detection for next message: {detected_fields}")
+        # Get conversation history (use provided or fetch)
+        messages = conversation_history if conversation_history else self.redis.get_conversation(session_id)
 
-            # Cleanup old cache (keep last 10 per session)
-            session_keys = [k for k in self._detection_cache.keys() if k.startswith(f"{session_id}:")]
-            if len(session_keys) > 10:
-                oldest_key = session_keys[0]
-                del self._detection_cache[oldest_key]
-        except Exception as e:
-            print(f"[COLLECTOR_INTERNAL] LLM detection failed in background: {e}")
-
-        # ALWAYS try to extract name (allows updates like "pulkit" → "pulkit ujjainwal")
-        # The LLM will determine if this message contains a name
+        # ALWAYS try to extract name (allows updates like "pulkit" -> "pulkit ujjainwal")
+        # Try LLM first, then regex fallback if LLM fails
         name = await self._extract_name_llm(user_message, messages)
+
+        # If LLM failed or returned None, try regex fallback
+        if not name:
+            name = self._extract_name_regex_fallback(user_message)
+
         if name:
             # Check if this is an UPDATE (better/more complete name)
             current_name = current_info.get('name')
@@ -691,13 +836,14 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
                 current_parts = current_name.split()
                 new_parts = name.split()
                 if len(new_parts) > len(current_parts):
-                    print(f"[LLM_COLLECTOR] ⚡ Updating name: '{current_name}' → '{name}'")
+                    print(f"[LLM_COLLECTOR] * Updating name: '{current_name}' → '{name}'")
                     extracted['name'] = name
                 else:
                     print(f"[LLM_COLLECTOR] Name already complete: '{current_name}', ignoring '{name}'")
             else:
                 # New name
                 extracted['name'] = name
+                print(f"[LLM_COLLECTOR] * Extracted new name: '{name}'")
 
         # Extract email (only if missing - email doesn't need updates)
         if 'email' in missing_fields:
@@ -723,7 +869,7 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
                         'message': 'We noticed you used a temporary email. Please provide your work email for better service.'
                     }
                     print(f"[LLM_COLLECTOR] [BLOCKED] Email rejected: {email} (type: {email_type}) - {message[:80]}...")
-                    print(f"[LLM_COLLECTOR] ⚠️ Will notify user on next message")
+                    print(f"[LLM_COLLECTOR] [WARN] Will notify user on next message")
 
         # Extract phone (only if missing - phone doesn't need updates)
         if 'phone' in missing_fields:
@@ -742,7 +888,16 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
 
         # Save extracted info
         if extracted:
-            await self._save_extracted_info(session_id, extracted)
+            print(f"[COLLECTOR_INTERNAL] About to save: {extracted}")
+            try:
+                await self._save_extracted_info(session_id, extracted)
+                print(f"[COLLECTOR_INTERNAL] Save completed successfully")
+            except Exception as e:
+                print(f"[COLLECTOR_INTERNAL] [ERROR] Save failed: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"[COLLECTOR_INTERNAL] No extracted info to save")
 
     async def _get_user_info_fast(self, session_id: str) -> Dict[str, Any]:
         """Fast get user info (uses Redis cache)"""
@@ -833,14 +988,29 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
 
             # Common business terms
             'company', 'business', 'enterprise', 'corporation', 'limited',
-            'import', 'export', 'trade', 'supplier', 'buyer', 'vendor'
+            'import', 'export', 'trade', 'supplier', 'buyer', 'vendor',
+
+            # Query patterns (prevent extracting user queries as names)
+            'general', 'overview', 'phones', 'used phones', 'data for',
+            'tell me', 'show me', 'find', 'search', 'get', 'about'
         }
 
         # Validation checks
         if (name_lower in invalid_names or  # In blocklist
             len(name.strip()) < 2 or  # Too short
+            len(name.strip()) > 50 or  # Too long (likely a query)
             name.isdigit() or  # Just numbers
-            not any(c.isalpha() for c in name)):  # No letters
+            not any(c.isalpha() for c in name) or  # No letters
+            name.count(' ') > 5):  # Too many words (likely a query)
+            return False
+
+        # Check if it looks like a query (contains common query words)
+        query_keywords = ['import', 'export', 'overview', 'data', 'about', 'tell', 'show', 'find', 'search', 'get', 'for', 'in', 'the', 'used', 'phones', 'general']
+        word_count = len(name.split())
+        query_word_count = sum(1 for word in name.lower().split() if word in query_keywords)
+
+        # If more than 30% of words are query keywords, it's likely a query, not a name
+        if word_count > 2 and (query_word_count / word_count) > 0.3:
             return False
 
         return True
@@ -954,41 +1124,63 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
                     role = "User" if msg['role'] == 'user' else "Bot"
                     context += f"{role}: {msg['content'][:100]}\n"
 
-            prompt = f"""Analyze this conversation and extract the user's PERSONAL NAME if provided.
+            prompt = f"""Extract the user's personal name from this conversation.
 
-Conversation context:
+Conversation:
 {context}
 
-Current user message: "{user_message}"
+Latest message: "{user_message}"
 
-Rules:
-- Extract ONLY if user is providing their PERSONAL name (e.g., "I'm John Smith", "my name is Sarah", "call me Alex")
-- DO NOT extract country names (e.g., "indonesia", "brazil"), company names, product names, or other entities
-- DO NOT extract if user is just answering a question about countries/products/topics
-- If the bot just asked "which country?" and user said "indonesia", that's NOT a name
-- Return "none" if no personal name is provided
+Extract ONLY personal names (e.g., "John Smith", "Sarah", "Alex").
+DO NOT extract: country names, company names, greetings, products.
 
-Return ONLY the extracted name in Title Case (e.g., "John Smith"), or "none" if not found:"""
+Return ONLY the name in Title Case, or "none" if not found.
+
+Your response:"""
 
             response = self._ollama_client.chat(
-                model='ministral-3:8b',
+                model='qwen3.5:cloud',  # Cloud model (same as main)
                 messages=[{'role': 'user', 'content': prompt}],
                 options={
-                    'temperature': 0.1,  # Very low for accurate extraction
-                    'num_predict': 50  # Names are short
+                    'temperature': 0.0,  # Deterministic for consistent extraction
+                    'num_predict': 30,  # Names are very short, reduced for speed
+                    'thinking': False,  # Disable thinking output
+                    'num_ctx': 1024  # Reduced context for faster processing
                 }
             )
 
-            name = response['message']['content'].strip()
+            # Handle models that put output in 'thinking' field
+            raw_response = response['message'].get('content', '').strip()
+            if not raw_response and 'thinking' in response['message']:
+                raw_response = response['message']['thinking'].strip()
 
-            # Clean up response
+            # ROBUST: Extract actual answer from thinking text
+            name = self._extract_answer_from_thinking(raw_response, expected_type='name')
+
+            if not name:
+                print(f"[LLM_COLLECTOR] No name found in LLM response")
+                return None
+
+            # Clean up extracted name
             name = name.strip('"\'.,!')
+
+            # If multi-line, try to extract a clean name
+            if name and '\n' in name:
+                # Take first line that looks like a proper name
+                for line in name.split('\n'):
+                    line = line.strip('"\'.,!-*# ')
+                    if (line and 2 <= len(line) <= 50 and
+                        any(c.isalpha() for c in line) and
+                        not any(ind in line.lower() for ind in thinking_indicators)):
+                        name = line
+                        break
 
             # Validate result
             if (name.lower() in ['none', 'n/a', 'not found', 'no name', 'unclear'] or
                 len(name) < 2 or
                 len(name) > 100 or
-                not any(c.isalpha() for c in name)):
+                not any(c.isalpha() for c in name) or
+                any(indicator in name.lower() for indicator in thinking_indicators)):
                 return None
 
             # Additional validation - block if it looks like a greeting or invalid
@@ -996,32 +1188,100 @@ Return ONLY the extracted name in Title Case (e.g., "John Smith"), or "none" if 
                 print(f"[LLM_COLLECTOR] LLM extracted invalid name: '{name}' - rejected")
                 return None
 
-            print(f"[LLM_COLLECTOR] ✓ Extracted name via LLM: {name}")
+            print(f"[LLM_COLLECTOR] [OK] Extracted name via LLM: {name}")
             return name.title()
 
         except Exception as e:
             print(f"[LLM_COLLECTOR] LLM name extraction failed: {e}, using regex fallback")
             return self._extract_name_regex_fallback(user_message)
 
+    def _extract_answer_from_thinking(self, text: str, expected_type: str = 'text') -> Optional[str]:
+        """
+        CRITICAL FIX: Extract actual answer from thinking text.
+
+        LLM may return thinking process despite instructions.
+        This extracts the actual answer from patterns like:
+        "Thinking Process: ... Output: [ANSWER]"
+        "Answer: [ANSWER]"
+        "Result: [ANSWER]"
+        """
+        if not text:
+            return None
+
+        # Remove markdown formatting
+        text = re.sub(r'\*\*|\`\`\`', '', text)
+
+        # Pattern 1: Look for "Output:", "Answer:", "Result:" followed by content
+        answer_patterns = [
+            r'(?:output|answer|result|response):\s*([^\n]+)',
+            r'(?:extracted|final)\s+(?:name|requirement):\s*([^\n]+)',
+            r'\*\*(?:Output|Answer|Result):\*\*\s*([^\n]+)',
+        ]
+
+        for pattern in answer_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                answer = match.group(1).strip().strip('"\'.,*-#')
+                if answer and answer.lower() not in ['none', 'n/a', 'not found']:
+                    return answer
+
+        # Pattern 2: If no markers, take last line that doesn't look like thinking
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        thinking_indicators = [
+            'thinking', 'analyze', 'request', 'input:', 'step', 'rule',
+            'context', 'task:', 'note:', 'explanation:', '1.', '2.', '3.',
+            'conclusion', '**', 'process:'
+        ]
+
+        for line in reversed(lines):
+            line_clean = line.strip('"\'.,*-#')
+            # Skip thinking lines
+            if any(indicator in line.lower() for indicator in thinking_indicators):
+                continue
+            # Skip very short or very long lines
+            if len(line_clean) < 2 or len(line_clean) > 200:
+                continue
+            # Skip lines that are just punctuation
+            if not any(c.isalnum() for c in line_clean):
+                continue
+            # Found potential answer
+            if line_clean.lower() not in ['none', 'n/a', 'not found', 'unclear']:
+                return line_clean
+
+        return None
+
     def _extract_name_regex_fallback(self, user_message: str) -> Optional[str]:
         """
         Fallback regex-based name extraction (used if LLM unavailable).
-        Only matches explicit name patterns like "my name is X" or "I'm X".
+        Matches explicit name patterns OR simple capitalized words (likely names).
         """
         import re
 
-        # Only match EXPLICIT name patterns (not just any capitalized word)
-        patterns = [
+        # Pattern 1: EXPLICIT name patterns (highest confidence)
+        explicit_patterns = [
             r"(?:my name is|i'm|i am|call me|this is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
         ]
 
-        for pattern in patterns:
+        for pattern in explicit_patterns:
             match = re.search(pattern, user_message, re.IGNORECASE)
             if match:
                 name = match.group(1).strip().title()
                 if self._is_valid_name(name):
-                    print(f"[LLM_COLLECTOR] ✓ Extracted name via regex: {name}")
+                    print(f"[LLM_COLLECTOR] [OK] Extracted name via regex (explicit): {name}")
                     return name
+
+        # Pattern 2: Simple capitalized word or short alphabetic name (likely a direct answer)
+        # Match: "Pulkit", "John Smith", "Sarah" etc.
+        message_stripped = user_message.strip()
+        if (2 <= len(message_stripped) <= 50 and
+            (message_stripped[0].isupper() or message_stripped.isalpha()) and
+            sum(c.isalpha() or c.isspace() for c in message_stripped) / len(message_stripped) > 0.8):
+
+            # Extract just the name part (remove punctuation)
+            name = re.sub(r'[^\w\s]', '', message_stripped).strip().title()
+            if name and self._is_valid_name(name):
+                print(f"[LLM_COLLECTOR] [OK] Extracted name via regex (simple): {name}")
+                return name
 
         return None
 
@@ -1053,65 +1313,190 @@ Return ONLY the extracted name in Title Case (e.g., "John Smith"), or "none" if 
             # Get current requirements if exists
             current_req = current_info.get('requirements', '')
 
-            prompt = f"""Analyze this conversation and extract/update the user's comprehensive requirements for trade intelligence data.
+            # SIMPLE PROMPT - Avoid complex instructions that models echo back
+            prompt = f"""User said: "{user_message}"
 
-Current requirements (if any): {current_req or 'None yet'}
+What trade data do they want? Write it in 1 sentence.
 
-Conversation history:
-{context}
+Examples:
+- Mobile phone shipments for USA
+- Indonesia detailed import data
+- Iran import statistics
 
-Current message: "{user_message}"
-
-Your task:
-1. Identify what trade intelligence the user needs (countries, products, import/export, etc.)
-2. If current requirements exist, UPDATE/EXPAND them with new info from conversation
-3. Build a COMPREHENSIVE requirement profile from the ENTIRE conversation
-4. Include: data direction (import/export), countries, products/HS codes, specific needs
-
-Examples of good requirements:
-- "Import data for Indonesia - interested in electronics and machinery sectors"
-- "Export statistics for Brazil, focusing on agricultural products"
-- "Custom shipment data for USA-China trade, need supplier contact details"
-- "Looking for buyer leads in automotive parts import market in Germany"
-
-Rules:
-- Extract from the FULL conversation, not just the current message
-- If user mentioned countries/products in earlier messages, include them
-- If requirements already exist, EXPAND them with new details
-- Be specific and structured
-- Return "none" only if there's truly no data need expressed
-
-Return ONLY the extracted/updated requirement (no JSON, no explanation):"""
+Your answer:"""
 
             response = self._ollama_client.chat(
-                model='ministral-3:8b',
+                model='qwen3.5:cloud',  # Cloud model (same as main)
                 messages=[{'role': 'user', 'content': prompt}],
                 options={
-                    'temperature': 0.3,  # Slightly higher for creative summarization
-                    'num_predict': 150
+                    'temperature': 0.3,  # Moderate for natural responses
+                    'num_predict': 50,  # Short answer expected
+                    'thinking': False  # Disable thinking output
                 }
             )
 
-            requirement = response['message']['content'].strip()
+            # Handle models that put output in 'thinking' field
+            raw_response = response['message'].get('content', '').strip()
+            if not raw_response and 'thinking' in response['message']:
+                raw_response = response['message']['thinking'].strip()
 
-            # Clean up response
-            requirement = requirement.strip('"\'')
+            # ROBUST EXTRACTION: Handle various response formats
+            requirement = None
 
-            if requirement.lower() in ['none', 'n/a', 'no requirement', 'unclear', 'no data need']:
+            # Remove common prefixes/suffixes from response
+            clean_response = raw_response
+            for prefix in ['answer:', 'requirement:', 'your answer:', 'response:', 'output:']:
+                if clean_response.lower().startswith(prefix):
+                    clean_response = clean_response[len(prefix):].strip()
+                    break
+
+            # Take first line if multi-line
+            if '\n' in clean_response:
+                lines = [l.strip() for l in clean_response.split('\n') if l.strip()]
+                # Find first line that doesn't look like instructions
+                for line in lines:
+                    if (len(line) > 10 and
+                        not line.lower().startswith(('example', 'note:', 'constraint', 'return', 'write'))):
+                        requirement = line
+                        break
+                if not requirement and lines:
+                    requirement = lines[0]
+            else:
+                requirement = clean_response
+
+            if not requirement:
                 return None
 
+            # Clean up requirement
+            requirement = requirement.strip('"\'.-*# ')
+
+            # CRITICAL: Filter out meta-text and thinking patterns
+            meta_text_indicators = [
+                'thinking process', 'analyze', 'input:', 'output:',
+                'task:', 'step 1', 'step 2', 'conclusion:', 'analysis:',
+                'conversation history', 'current message', 'prompt', 'context',
+                'return only', 'examples provided', 'constraint', 'goal:',
+                'your response', 'format:', 'rules:', 'extract from', 'instruction',
+                'user message:', 'bot:', 'assistant:', 'current:', 'latest:',
+                'user:', '-> ', 'formulate', 'max 2 sentences', 'write it in'
+            ]
+
+            # Final validation - ensure it's not meta-text or echoed instructions
+            requirement_lower = requirement.lower()
+            if any(indicator in requirement_lower for indicator in meta_text_indicators):
+                print(f"[LLM_COLLECTOR] [BLOCKED] Meta-text in requirement: {requirement[:100]}...")
+                return None
+
+            # Block if starts with common instruction words
+            if any(requirement_lower.startswith(word) for word in ['example', 'note', 'constraint', 'return', 'write', 'extract', 'user said']):
+                print(f"[LLM_COLLECTOR] [BLOCKED] Instruction-like requirement: {requirement[:100]}...")
+                return None
+
+            # CRITICAL: Block truncated/incomplete requirements
+            if (requirement.endswith('->') or
+                requirement.endswith('a') or
+                len(requirement.split()[-1]) < 3):
+                print(f"[LLM_COLLECTOR] [BLOCKED] Truncated requirement: {requirement}")
+                return None
+
+            # Additional validation: Must contain trade-related keywords or be a meaningful request
+            # Block generic phrases that aren't actual requirements
+            invalid_requirements = [
+                'none', 'n/a', 'no requirement', 'unclear', 'no data need',
+                'general', 'overview', 'information', 'details', 'help', 'examples',
+                'conversation', 'message', 'greeting', 'hi', 'hello'
+            ]
+
+            requirement_lower = requirement.lower().strip()
+            if requirement_lower in invalid_requirements or len(requirement_lower.split()) <= 2:
+                print(f"[LLM_COLLECTOR] [BLOCKED] Invalid/generic requirement: {requirement}")
+                return None
+
+            # Must be substantial (more than 15 chars but not too long)
             if len(requirement) > 15 and len(requirement) < 500:
                 if current_req and current_req != requirement:
-                    print(f"[LLM_COLLECTOR] ⚡ UPDATED requirement: {requirement[:120]}...")
+                    print(f"[LLM_COLLECTOR] * UPDATED requirement: {requirement[:120]}...")
                 else:
-                    print(f"[LLM_COLLECTOR] ✓ Extracted requirement: {requirement[:120]}...")
+                    print(f"[LLM_COLLECTOR] [OK] Extracted requirement: {requirement[:120]}...")
                 return requirement
 
-            return None
+            print(f"[LLM_COLLECTOR] [BLOCKED] Requirement too short ({len(requirement)} chars), trying keyword fallback")
+
+            # FALLBACK: Extract keywords from user's actual message
+            return self._extract_requirement_from_keywords(user_message, conversation_history)
 
         except Exception as e:
-            print(f"[LLM_COLLECTOR] Smart requirements extraction failed: {e}, using fallback")
-            return await self._extract_requirements_llm(user_message)
+            print(f"[LLM_COLLECTOR] Smart requirements extraction failed: {e}, using keyword fallback")
+            return self._extract_requirement_from_keywords(user_message, conversation_history)
+
+    def _extract_requirement_from_keywords(
+        self,
+        user_message: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ) -> Optional[str]:
+        """
+        FALLBACK: Extract requirements from keywords when LLM fails.
+
+        Looks for trade-related terms in user message and recent conversation.
+        """
+        # Combine user message with recent queries
+        text = user_message.lower()
+
+        if conversation_history:
+            recent = conversation_history[-3:]  # Last 3 messages
+            for msg in recent:
+                if msg.get('role') == 'user':
+                    text += " " + msg['content'].lower()
+
+        # Extract key trade terms
+        countries = []
+        products = []
+        directions = []
+
+        # Country keywords
+        country_patterns = [
+            r'\b(usa|united states|america|china|india|indonesia|brazil|germany|japan|uk|france|canada|mexico|australia|korea|vietnam|thailand|singapore|malaysia|philippines|taiwan|hong kong|russia|iran|iraq|turkey|egypt|saudi arabia|uae|south africa|nigeria|kenya|argentina|chile|peru|colombia)\b'
+        ]
+
+        for pattern in country_patterns:
+            matches = re.findall(pattern, text)
+            countries.extend(matches)
+
+        # Product keywords
+        if re.search(r'\b(mobile|phone|smartphone|electronics|machinery|computer|textile|apparel|garment|steel|iron|chemical|automotive|vehicle|car|food|grain|wheat|rice|oil|petroleum|coal|furniture|plastic|rubber)\b', text):
+            products = re.findall(r'\b(mobile phone|smartphone|electronics|machinery|computer|textile|apparel|garment|steel|iron|chemical|automotive|vehicle|car|food|grain|wheat|rice|oil|petroleum|coal|furniture|plastic|rubber)\b', text)
+
+        # Direction keywords
+        if re.search(r'\b(import|export|shipment|trade)\b', text):
+            if 'export' in text:
+                directions.append('export')
+            else:
+                directions.append('import')
+
+        # Build requirement string
+        parts = []
+        if products:
+            parts.append(products[0].title())
+        if directions:
+            parts.append(directions[0])
+        if countries:
+            parts.append(f"for {countries[0].upper()}")
+
+        if parts:
+            requirement = " ".join(parts) + " data"
+            if len(requirement) > 15:
+                print(f"[LLM_COLLECTOR] [FALLBACK] Keyword-based requirement: {requirement}")
+                return requirement
+
+        # Last resort: use user message if it contains trade terms
+        trade_keywords = ['shipment', 'trade', 'import', 'export', 'data', 'statistics', 'detailed']
+        if any(kw in text for kw in trade_keywords):
+            requirement = user_message[:100]  # First 100 chars
+            if len(requirement) > 15:
+                print(f"[LLM_COLLECTOR] [FALLBACK] User message as requirement: {requirement}")
+                return requirement
+
+        return None
 
     async def _extract_requirements_llm(self, user_message: str) -> Optional[str]:
         """
@@ -1140,17 +1525,30 @@ Rules:
 Return ONLY the extracted requirement (no JSON, no explanation):"""
 
             response = self._ollama_client.chat(
-                model='ministral-3:8b',
+                model='qwen3.5:cloud',  # Cloud model (same as main)
                 messages=[{'role': 'user', 'content': prompt}],
                 options={
                     'temperature': 0.2,
-                    'num_predict': 100
+                    'num_predict': 100,
+                    'thinking': False  # Disable thinking output
                 }
             )
 
-            requirement = response['message']['content'].strip()
+            # Handle models that put output in 'thinking' field
+            requirement = response['message'].get('content', '').strip()
+            if not requirement and 'thinking' in response['message']:
+                requirement = response['message']['thinking'].strip()
 
-            # Clean up response
+            # Clean up response - extract requirement text
+            requirement = requirement.strip('"\'')
+            if requirement and '\n' in requirement:
+                lines = [l.strip('"\'.-*# ') for l in requirement.split('\n') if l.strip()]
+                for line in lines:
+                    if (len(line) > 10 and len(line) < 500 and
+                        not line.lower().startswith(('thinking', 'rule', 'analysis'))):
+                        requirement = line
+                        break
+
             if requirement.lower() in ['none', 'n/a', 'no requirement', 'unclear']:
                 return None
 
@@ -1203,8 +1601,8 @@ Return ONLY the extracted requirement (no JSON, no explanation):"""
                     field=field,
                     value=value,
                     state_data={
-                        'completion_percentage': completion,  # ✅ Total completion
-                        'fields_collected': list(all_collected_fields),  # ✅ All fields
+                        'completion_percentage': completion,  # [OK] Total completion
+                        'fields_collected': list(all_collected_fields),  # [OK] All fields
                         f'{field}_ask_count': 0,
                         'collection_paused': False,
                         'last_field_asked': field

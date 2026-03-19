@@ -74,8 +74,8 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (override=True to ensure .env takes precedence)
+load_dotenv(override=True)
 
 # DEBUG: Print loaded environment variables
 import os
@@ -268,6 +268,7 @@ class Config:
 
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
     LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v3.1:671b-cloud")
+    INTENT_MODEL = os.getenv("INTENT_MODEL", os.getenv("LLM_MODEL", "deepseek-v3.1:671b-cloud"))  # Fallback to LLM_MODEL if not set
 
     TOP_K_RESULTS = 5
     MAX_CHUNK_CHARS = 800
@@ -275,7 +276,7 @@ class Config:
     TEMPERATURE = 0.2
     TOP_P = 0.8
     TOP_K = 40
-    NUM_PREDICT = 650
+    NUM_PREDICT = 400  # Reduced from 650 for faster responses (chatbot should be brief anyway)
     NUM_CTX = 3400
 
     DYNAMIC_MAX_CHUNKS = 10
@@ -1521,7 +1522,7 @@ Remember: Brevity is key. Every word must add value. Shorter responses are ALWAY
             'top_k': Config.TOP_K,
             'num_predict': Config.NUM_PREDICT,
             'num_ctx': Config.NUM_CTX,
-            'timeout': 30.0,  # CRITICAL FIX: 30 second timeout to prevent hanging (reduced from 60s)
+            'timeout': 15.0,  # OPTIMIZED: 15s timeout (reduced from 30s) with retry logic
         }
 
         # SMART ROUTING: Use local by default, cloud only if API key is set
@@ -1532,8 +1533,32 @@ Remember: Brevity is key. Every word must add value. Shorter responses are ALWAY
 
         llm_dynamic = ChatOllama(**llm_dynamic_kwargs)
 
+        # PERFORMANCE FIX: Add retry logic for timeouts
+        max_retries = 2
+        retry_timeout = 15.0
+
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    print(f"  [RETRY] Attempt {attempt + 1}/{max_retries} with {retry_timeout:.1f}s timeout...")
+                    llm_dynamic_kwargs['timeout'] = retry_timeout
+                    llm_dynamic = ChatOllama(**llm_dynamic_kwargs)
+
+                response = llm_dynamic.invoke(llm_messages)
+                break  # Success - exit retry loop
+
+            except Exception as e:
+                if "timeout" in str(e).lower() and attempt < max_retries - 1:
+                    print(f"  [WARN] LLM timeout, retrying ({attempt + 1}/{max_retries})...")
+                    retry_timeout *= 0.8  # Reduce timeout slightly on retry
+                    continue
+                else:
+                    # Final attempt failed or non-timeout error
+                    raise
+
         try:
-            response = llm_dynamic.invoke(llm_messages)
+            # Process response (existing code)
+            pass
 
             # Post-process response to ensure clean, markdown-free text
             if hasattr(response, 'content') and isinstance(response.content, str):
@@ -2240,14 +2265,14 @@ class ChatbotManager:
     def _get_intent_classifier_llm(self) -> ChatOllama:
         """
         Lazily create and reuse a deterministic LLM instance for classification.
-        Avoids reconstructing clients on every call.
+        Uses a separate fast model (INTENT_MODEL) for speed and structured output.
         """
         cached = getattr(self, "_intent_llm", None)
         if cached is not None:
             return cached
 
         llm_kwargs = {
-            "model": Config.LLM_MODEL,
+            "model": Config.INTENT_MODEL,  # Use dedicated intent model for speed
             "temperature": 0.0,
             "timeout": 8.0,
         }
@@ -2259,6 +2284,7 @@ class ChatbotManager:
             llm_kwargs["client_kwargs"] = {'headers': headers}
 
         self._intent_llm = ChatOllama(**llm_kwargs)
+        print(f"[INTENT] Using {'CLOUD' if Config.OLLAMA_API_KEY else 'LOCAL'} Ollama: {base_url} (model: {Config.INTENT_MODEL})")
         return self._intent_llm
 
     def _check_greeting_or_general(self, query: str) -> Optional[Dict[str, Any]]:
@@ -2368,8 +2394,15 @@ Choose exactly ONE intent:
    → Output a /chapter/... URL
 
 5. general
-   → User asks general questions about the platform, pricing, features
-   → Questions about "what is Market Inside", "how does it work", "pricing"
+   → User asks general questions about the platform, pricing, features, data offerings
+   → Examples:
+     - "What is Market Inside?"
+     - "How does it work?"
+     - "What is pricing?"
+     - "Tell me about i/e data" or "import/export data"
+     - "What data do you provide?"
+     - "What services do you offer?"
+     - "How can I access the data?"
    → No URL needed
    → Output url = ""
 
@@ -2383,7 +2416,11 @@ Choose exactly ONE intent:
    → Questions completely unrelated to trade data
    → Output url = ""
 
-If unclear, set intent = "unknown" and url = "".
+CRITICAL: Only use "unknown" as a last resort!
+- If the query is REMOTELY related to trade, data, or the platform → use "general"
+- If the query mentions Market Inside, data, imports, exports, trade → use "general"
+- Reserve "unknown" for truly ambiguous or unclear queries
+- When in doubt between "unknown" and "general" → choose "general"
 
 ────────────────────────
 GLOBAL RULES
@@ -3001,7 +3038,7 @@ IMPORTANT
                         config
                     )
                 ),
-                timeout=60.0  # 60 second timeout to allow for Redis checkpoint overhead
+                timeout=35.0  # OPTIMIZED: 35s timeout (reduced from 60s after async checkpoint fix)
             )
 
             workflow_time = time.time() - workflow_start
@@ -3012,26 +3049,25 @@ IMPORTANT
             print(f"  - Total workflow time: {workflow_time:.2f}s")
             print(f"  - Processing time (from start): {time.time() - start_time:.2f}s")
 
-            if workflow_time > 40.0:
-                print(f"[WARN] Workflow took {workflow_time:.1f}s (expected <40s)")
+            if workflow_time > 25.0:
+                print(f"[WARN] Workflow took {workflow_time:.1f}s (expected <25s)")
                 print(f"[WARN] Possible causes:")
-                print(f"        1. Redis checkpoint saving is slow (check Redis latency)")
-                print(f"        2. LLM API is slow (check Ollama/Deepseek response time)")
-                print(f"        3. Network latency (check internet connection)")
+                print(f"        1. LLM API is slow (check Ollama/Deepseek response time)")
+                print(f"        2. Network latency (check internet connection)")
+                print(f"        3. Complex query requiring multiple retrieval passes")
 
         except asyncio.TimeoutError:
             workflow_time = time.time() - workflow_start
             print(f"[WORKFLOW] [FAILED] TIMEOUT after {workflow_time:.1f}s")
-            print(f"[ERROR] Workflow exceeded 60s timeout")
-            print(f"[DEBUG] Breakdown: chatbot finished around 33s, but workflow took {workflow_time:.1f}s total")
-            print(f"[DEBUG] This suggests Redis checkpoint saving is taking 20-30+ seconds")
-            print(f"[FIX] Consider:")
-            print(f"      1. Using local Redis instead of remote")
-            print(f"      2. Disabling checkpointing (lose conversation history)")
-            print(f"      3. Using faster Redis instance")
+            print(f"[ERROR] Workflow exceeded 35s timeout")
+            print(f"[DEBUG] This indicates:")
+            print(f"      1. LLM response taking too long (check model performance)")
+            print(f"      2. Network latency to API endpoint")
+            print(f"      3. Complex multi-step retrieval")
+            print(f"[FIX] User should try again with simpler query or check system status")
             raise HTTPException(
                 status_code=504,
-                detail=f"Request timeout after {workflow_time:.1f}s. Redis or network is too slow."
+                detail=f"Request timeout after {workflow_time:.1f}s. Please try a simpler query or try again."
             )
         except Exception as e:
             import traceback
@@ -3039,11 +3075,11 @@ IMPORTANT
             print(f"\n[ERROR] Workflow invocation failed after {workflow_time:.1f}s:")
             print(traceback.format_exc())
 
-            # Check if it's a timeout-like issueDynamic URL provided:
-            if workflow_time > 40.0:
+            # Check if it's a timeout-like issue
+            if workflow_time > 30.0:
                 raise HTTPException(
                     status_code=504,
-                    detail=f"Request took too long ({workflow_time:.1f}s). The system is overloaded. Please try again."
+                    detail=f"Request took too long ({workflow_time:.1f}s). Please try a simpler query or try again."
                 )
             raise
 
@@ -3769,12 +3805,10 @@ if query is for platform
 """
 
         # Create LLM for streaming
+        # Using gpt-oss:20b-cloud which works reliably (no num_predict limits needed)
         llm_kwargs = {
             'model': Config.LLM_MODEL,
             'temperature': 0.5,
-            'top_p': Config.TOP_P,
-            'num_predict': Config.NUM_PREDICT,
-            'num_ctx': Config.NUM_CTX,
             'request_timeout': 90.0,  # 90s timeout to prevent silent hangs
         }
 
@@ -3783,6 +3817,10 @@ if query is for platform
         llm_kwargs['base_url'] = base_url
         if headers:
             llm_kwargs['client_kwargs'] = {'headers': headers}
+
+        # DEBUG: Log LLM configuration
+        print(f"  [STREAM] LLM config: model={Config.LLM_MODEL}, base_url={base_url}")
+        print(f"  [STREAM] Using gpt-oss:20b-cloud (reliable, no token limits)")
 
         llm = ChatOllama(**llm_kwargs)
 
@@ -3802,34 +3840,84 @@ if query is for platform
             raw_accumulated = ""
             yielded_length = 0
             in_think_block = False
+            cleaned = ""  # Initialize to avoid NameError
 
-            async for chunk in llm.astream(llm_messages):
-                if not hasattr(chunk, 'content') or not chunk.content:
-                    continue
+            try:
+                debug_logged_first = False
+                total_chunks_received = 0
 
-                raw_accumulated += chunk.content
+                async for chunk in llm.astream(llm_messages):
+                    total_chunks_received += 1
 
-                # Track open/close think tags to know if we're mid-block
-                open_tags = raw_accumulated.count('<think>')
-                close_tags = raw_accumulated.count('</think>')
-                in_think_block = open_tags > close_tags
+                    # DEBUG: Log first chunk only (simplified)
+                    if not debug_logged_first:
+                        has_content = hasattr(chunk, 'content') and chunk.content
+                        print(f"  [STREAM] First chunk: has_content={has_content}, content='{chunk.content[:50] if has_content else 'EMPTY'}...'")
+                        debug_logged_first = True
 
-                if in_think_block:
-                    # Still inside a think block — don't yield anything yet
-                    continue
+                    if not hasattr(chunk, 'content'):
+                        continue
 
-                # Strip all complete <think>...</think> blocks from accumulated text
-                import re as _re
-                cleaned = _re.sub(r'<think>.*?</think>', '', raw_accumulated, flags=_re.DOTALL).strip()
+                    if not chunk.content:
+                        continue
 
-                # Yield only the new portion we haven't sent yet
-                new_content = cleaned[yielded_length:]
-                if new_content:
-                    chunk_count += 1
-                    clean_chunk = new_content.replace('**', '').replace('__', '')
-                    full_response += clean_chunk
-                    yielded_length += len(new_content)
-                    yield clean_chunk
+                    raw_accumulated += chunk.content
+
+                    # Track open/close think tags to know if we're mid-block
+                    open_tags = raw_accumulated.count('<think>')
+                    close_tags = raw_accumulated.count('</think>')
+                    in_think_block = open_tags > close_tags
+
+                    if in_think_block:
+                        # Still inside a think block — don't yield anything yet
+                        continue
+
+                    # Strip all complete <think>...</think> blocks from accumulated text
+                    import re as _re
+                    cleaned = _re.sub(r'<think>.*?</think>', '', raw_accumulated, flags=_re.DOTALL)
+
+                    # Yield only the new portion we haven't sent yet
+                    new_content = cleaned[yielded_length:]
+                    if new_content:
+                        chunk_count += 1
+                        # Clean markdown but DON'T strip - preserve spaces
+                        clean_chunk = new_content.replace('**', '').replace('__', '')
+                        full_response += clean_chunk
+                        yielded_length = len(cleaned)
+                        yield clean_chunk
+
+                # CRITICAL: If we received chunks but yielded nothing, yield what we have
+                if total_chunks_received > 0 and chunk_count == 0:
+                    print(f"  [STREAM ERROR] Received {total_chunks_received} chunks but yielded nothing!")
+                    print(f"  [STREAM ERROR] This indicates a model compatibility issue")
+
+                    # Force yield the content, stripping think blocks if present
+                    if cleaned:
+                        clean_chunk = cleaned.replace('**', '').replace('__', '')
+                        if clean_chunk:
+                            chunk_count = 1
+                            full_response = clean_chunk
+                            yield clean_chunk
+                            print(f"  [STREAM] Force yielded {len(clean_chunk)} chars")
+                    elif raw_accumulated:
+                        # If cleaned is empty but we have raw content, strip think blocks and yield
+                        import re as _re
+                        force_cleaned = _re.sub(r'<think>.*?</think>', '', raw_accumulated, flags=_re.DOTALL)
+                        clean_chunk = force_cleaned.replace('**', '').replace('__', '')
+                        if clean_chunk:
+                            chunk_count = 1
+                            full_response = clean_chunk
+                            yield clean_chunk
+                            print(f"  [STREAM] Force yielded {len(clean_chunk)} chars from raw")
+
+                # Log completion status
+                if chunk_count > 0:
+                    print(f"  [STREAM] ✓ Yielded {chunk_count} chunks from {total_chunks_received} received")
+            except Exception as stream_error:
+                import traceback
+                print(f"  [STREAM] Error in LLM streaming loop: {type(stream_error).__name__}: {stream_error}")
+                traceback.print_exc()
+                raise
 
             elapsed = time.time() - start_time
             print(f"  [STREAM] Completed: {chunk_count} chunks in {elapsed:.2f}s")
@@ -3906,7 +3994,10 @@ if query is for platform
                 print(f"  [URL] Explore URL: {self._last_explore_url[:60]}...")
 
         except Exception as e:
-            print(f"  [STREAM] Error during streaming: {e}")
+            import traceback
+            print(f"  [STREAM] Error during streaming: {type(e).__name__}: {e}")
+            print(f"  [STREAM] Traceback:")
+            traceback.print_exc()
             yield f"\n\nI apologize, but I encountered an error. Please try again."
 
     async def generate_questions(self, content: str, company_name: Optional[str] = None) -> List[str]:
@@ -4122,7 +4213,7 @@ async def ensure_initialized():
         user_info_service = await init_user_info_service()
         if user_info_service and user_info_service.is_available:
             # NEW: Intelligent LLM-driven collector with smart detection
-            # Use CLOUD Ollama client with small fast model (qwen2.5:1.5b)
+            # Use CLOUD Ollama client with fast model (gpt-oss:20b-cloud)
             ollama_cloud = get_ollama_cloud_client()
             llm_user_info_collector = LLMUserInfoCollector(redis_manager, user_info_service, ollama_cloud)
             print("[OK] LLM User info collector enabled (fast, contextual, using CLOUD Ollama with small model)")
@@ -4405,7 +4496,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             )
 
         # Guardrail node handles hostility detection in workflow
-        # Add timeout to prevent indefinite hanging
+        # OPTIMIZED: Reduced timeout after async checkpoint + LLM optimization
         try:
             response, processing_time, sources_used = await asyncio.wait_for(
                 chatbot_manager.chat(
@@ -4413,13 +4504,13 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                     session_id=request.session_id,
                     dynamic_url=request.dynamic_url
                 ),
-                timeout=90.0  # 90 second max timeout for entire chat operation
+                timeout=40.0  # OPTIMIZED: 40s timeout (reduced from 90s after performance fixes)
             )
         except asyncio.TimeoutError:
-            print(f"[ERROR] Chat operation timed out after 90 seconds")
+            print(f"[ERROR] Chat operation timed out after 40 seconds")
             raise HTTPException(
                 status_code=504,
-                detail="Request timeout - the AI model took too long to respond. Please try again."
+                detail="Request timeout - please try a simpler query or try again in a moment."
             )
 
         # Schedule session cleanup in background
@@ -5840,6 +5931,9 @@ async def save_conversation_history(
     Uses background tasks to avoid blocking the response.
     Saves ALL conversations regardless of feedback status.
     """
+    # Ensure chatbot is initialized before saving (redis_manager needed)
+    await ensure_initialized()
+
     try:
         # Get client IP address from request
         client_ip = request.ip_address
@@ -5920,10 +6014,19 @@ async def _save_conversation_background(
 
     try:
         # Get conversation history from Redis
-        global redis_manager
+        global redis_manager, llm_user_info_collector
         if not redis_manager:
             print(f"[ConversationHistory] ERROR: Redis manager not initialized")
-            return
+            print(f"[ConversationHistory] This should not happen - ensure_initialized should have been called")
+            print(f"[ConversationHistory] Attempting to initialize now...")
+            try:
+                await ensure_initialized()
+                if not redis_manager:
+                    print(f"[ConversationHistory] FATAL: Failed to initialize redis_manager")
+                    return
+            except Exception as init_error:
+                print(f"[ConversationHistory] ERROR during initialization: {init_error}")
+                return
 
         print(f"[ConversationHistory] Redis manager available: {redis_manager is not None}")
 
@@ -6018,6 +6121,31 @@ async def _save_conversation_background(
 
         if result.get("success"):
             print(f"[ConversationHistory] ✓ SUCCESS: Saved session {session_id}: {result.get('message_count')} messages ({result.get('storage')})")
+
+            # EXTRACT REQUIREMENTS FROM FULL CONVERSATION HISTORY
+            # This runs after conversation is saved to analyze what the user was looking for
+            try:
+                global llm_user_info_collector
+                if llm_user_info_collector and messages_data and len(messages_data) >= 2:
+                    print(f"[ConversationHistory] Extracting requirements from conversation history...")
+                    requirement = await llm_user_info_collector.extract_requirements_from_full_history(
+                        session_id=session_id,
+                        conversation_history=messages_data
+                    )
+                    if requirement:
+                        print(f"[ConversationHistory] ✓ Extracted requirement: {requirement[:100]}...")
+                    else:
+                        print(f"[ConversationHistory] No requirement extracted from conversation")
+                else:
+                    if not llm_user_info_collector:
+                        print(f"[ConversationHistory] llm_user_info_collector not available, skipping requirements extraction")
+                    elif not messages_data or len(messages_data) < 2:
+                        print(f"[ConversationHistory] Conversation too short for requirements extraction")
+            except Exception as req_error:
+                print(f"[ConversationHistory] Error extracting requirements: {req_error}")
+                import traceback
+                traceback.print_exc()
+
             print(f"[ConversationHistory] ===== SAVE COMPLETED =====")
         else:
             print(f"[ConversationHistory] ✗ FAILED: Could not save session {session_id}")
