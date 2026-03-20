@@ -362,8 +362,40 @@ def get_multi_hs_code_response() -> str:
 
 
 def detect_contact_info_request(message: str) -> bool:
-    """Detect if user is asking for contact information"""
+    """
+    Detect if user is asking for MarketInside's contact information.
+
+    IMPORTANT: Exclude queries about COMPANY contacts (importers/exporters/buyers/suppliers).
+    Those should be handled by LLM to redirect to dashboard access.
+    """
     message_lower = message.lower()
+
+    # EXCLUSION: If asking about company/database contact details, let LLM handle it
+    company_contact_keywords = [
+        'importer',
+        'exporter',
+        'buyer',
+        'supplier',
+        'company',
+        'companies',
+        'firm',
+        'business',
+        'manufacturer',
+        'vendor',
+        'customer',
+        'trader',
+        'in your database',
+        'in the database',
+        'in database',
+        'provide contact',
+        'get contact',
+        'access contact',
+        'have contact',
+    ]
+
+    # If asking about company contacts, DON'T intercept - let LLM handle
+    if any(keyword in message_lower for keyword in company_contact_keywords):
+        return False
 
     contact_keywords = [
         'phone number',
