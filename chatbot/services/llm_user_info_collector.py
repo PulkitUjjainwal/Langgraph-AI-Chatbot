@@ -204,7 +204,7 @@ class LLMUserInfoCollector:
             if requirement and len(requirement) > 15:
                 # Save to database
                 print(f"[LLM_COLLECTOR] [POST-SESSION] Extracted requirement: {requirement[:100]}...")
-                await self.db_service.save_user_info(session_id, {'requirements': requirement})
+                await self.db_service.save_user_info(session_id, 'requirements', requirement)
                 return requirement
 
             print(f"[LLM_COLLECTOR] [POST-SESSION] No clear requirement found")

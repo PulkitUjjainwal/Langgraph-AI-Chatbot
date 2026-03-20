@@ -1886,9 +1886,14 @@ class ChatbotManager:
                         use_mirror = False
                         print(f"  [URL FIX] ✅ '{country}' has detailed_import - will use type=import")
                     elif has_mirror:
+                        # Mirror-only country - redirect to dashboard/support
                         use_mirror = True
                         print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_import (no detailed)")
-                        print(f"  [URL FIX] 🔧 Will change type to mirror_import")
+                        print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will trigger support options")
+
+                        # Return special marker to trigger support UI
+                        country_name_formatted = country.replace('-', ' ').title()
+                        return f"MIRROR_ONLY:{country_name_formatted}"
                     else:
                         print(f"  [URL FIX] ❌ '{country}' has no import data, keeping URL as-is")
                         return url
@@ -1903,9 +1908,14 @@ class ChatbotManager:
                         use_mirror = False
                         print(f"  [URL FIX] ✅ '{country}' has detailed_export - will use type=export")
                     elif has_mirror:
+                        # Mirror-only country - redirect to dashboard/support
                         use_mirror = True
                         print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_export (no detailed)")
-                        print(f"  [URL FIX] 🔧 Will change type to mirror_export")
+                        print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will trigger support options")
+
+                        # Return special marker to trigger support UI
+                        country_name_formatted = country.replace('-', ' ').title()
+                        return f"MIRROR_ONLY:{country_name_formatted}"
                     else:
                         print(f"  [URL FIX] ❌ '{country}' has no export data, keeping URL as-is")
                         return url
@@ -2354,6 +2364,11 @@ INTELLIGENCE PRINCIPLES:
 INTENTS (SEVEN TOTAL)
 ────────────────────────
 
+CRITICAL PRIORITY: Check for service_mismatch FIRST!
+Before classifying as search_trade_data, check if user is asking for EXECUTION services:
+- Personal action indicators: "I want to", "I need to", "help me", "how do I"
+- If present → Use out_of_scope (service_mismatch), NOT search_trade_data
+
 Choose exactly ONE intent:
 
 1. search_trade_data
@@ -2412,8 +2427,54 @@ Choose exactly ONE intent:
    → Output url = ""
 
 7. out_of_scope
-   → User asks about non-trade topics
-   → Questions completely unrelated to trade data
+   → User asks about non-trade topics OR requests services NOT provided
+   → IMPORTANT: Sub-classify into out_of_scope_type:
+
+     a) "off_topic" - Completely unrelated to trade/business
+        Examples: "What's the weather?", "How to cook pasta?", "Sports scores"
+        → Simple rejection, NO support needed
+
+     b) "service_mismatch" - Asking for EXECUTION services (not data)
+        User wants: buying/selling products, import/export execution, customs clearance,
+                    shipping logistics, finding brokers, help contacting suppliers
+
+        CRITICAL INDICATORS of service_mismatch (personal action/assistance):
+        - "I want to import/export [product]" → service_mismatch (NOT search_trade_data!)
+        - "I need to import/export" → service_mismatch
+        - "help me import/export" → service_mismatch
+        - "how do I import/export" → service_mismatch
+        - "Can you help me buy/sell" → service_mismatch
+        - "I want to buy/sell [product]" → service_mismatch
+        - "Find me a supplier/buyer/broker" → service_mismatch (direct execution)
+        - "Help with customs/shipping" → service_mismatch
+
+        VS. Data requests (use search_trade_data):
+        - "show me bike imports" → search_trade_data (data request)
+        - "bike import data" → search_trade_data
+        - "who imports bikes" → search_trade_data
+        - "top importers of bikes" → search_trade_data
+        - "import statistics for bikes" → search_trade_data
+
+        Examples of service_mismatch:
+        - "I want to import bikes" → service_mismatch (import_export_assistance)
+        - "Can you help me buy steel?" → service_mismatch (buying_selling)
+        - "I need import assistance" → service_mismatch (import_export_assistance)
+        - "Help with customs clearance" → service_mismatch (customs)
+        - "Find shipping company for me" → service_mismatch (shipping)
+        - "How do I start importing?" → service_mismatch (import_export_assistance)
+
+        → Clarification that we provide DATA, not execution services
+        → Also extract service_type: "buying_selling", "customs", "shipping", "import_export_assistance", or "other"
+
+     c) "borderline" - Unclear if user wants data or execution services
+        Examples:
+        - "I need China suppliers" (could mean "show me supplier data" OR "help me contact suppliers")
+        - "Help with imports" (could mean "show import data" OR "assist with import process")
+        → Need clarification question
+
+        Note: If query has clear action indicators ("I want to", "help me", "how do I"),
+        classify as service_mismatch, NOT borderline.
+
    → Output url = ""
 
 CRITICAL: Only use "unknown" as a last resort!
@@ -2440,6 +2501,12 @@ GLOBAL RULES
 ────────────────────────
 INTENT: search_trade_data
 ────────────────────────
+
+CRITICAL PRE-CHECK: Before using search_trade_data, verify it's a DATA request, not execution:
+- If user says "I want to import/export [product]" → Use out_of_scope (service_mismatch)
+- If user says "help me import/export" → Use out_of_scope (service_mismatch)
+- If user says "how do I import/export" → Use out_of_scope (service_mismatch)
+- Only use search_trade_data if user wants to VIEW/SEE/ANALYZE data
 
 Base URL:
 https://www.marketinsidedata.com/en/search-data/
@@ -2640,8 +2707,14 @@ FINAL OUTPUT FORMAT
     "destination_country": "",
     "entity_type": ""
   },
-  "url": ""
+  "url": "",
+  "out_of_scope_type": "",
+  "service_type": ""
 }
+
+NEW FIELDS (only for out_of_scope intent):
+- out_of_scope_type: "off_topic" | "service_mismatch" | "borderline" | "" (empty if not out_of_scope)
+- service_type: "buying_selling" | "customs" | "shipping" | "import_export_assistance" | "other" | "" (only if service_mismatch)
 
 entity_type values (for search_trade_data only):
 - "importer" → user asks about importers (e.g., "top importers of coal")
@@ -2779,9 +2852,22 @@ IMPORTANT
         if url and intent in ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]:
             url = await self._fix_url_data_type(url, intent, params)
 
-        print(f"  [INTENT] Detected: intent={intent}, confidence={confidence:.2f}, params={params}")
+        # Extract new out_of_scope fields
+        out_of_scope_type = parsed.get("out_of_scope_type", "")
+        service_type = parsed.get("service_type", "")
 
-        return {"intent": intent, "confidence": confidence, "params": params, "url": url}
+        print(f"  [INTENT] Detected: intent={intent}, confidence={confidence:.2f}, params={params}")
+        if intent == "out_of_scope" and out_of_scope_type:
+            print(f"  [INTENT] Out-of-scope type: {out_of_scope_type}, service: {service_type}")
+
+        return {
+            "intent": intent,
+            "confidence": confidence,
+            "params": params,
+            "url": url,
+            "out_of_scope_type": out_of_scope_type,
+            "service_type": service_type
+        }
 
     async def handle_dynamic_api_call(
         self,
@@ -3311,6 +3397,100 @@ IMPORTANT
             return
 
         # ========================================================================
+        # STEP 2.5: Handle out-of-scope service mismatch intelligently
+        # ========================================================================
+        if intent == "out_of_scope":
+            # Extract out_of_scope classification from intent detection
+            out_of_scope_type = intent_result.get("out_of_scope_type", "") if not is_slot_answer else ""
+            service_type = intent_result.get("service_type", "") if not is_slot_answer else ""
+
+            if out_of_scope_type == "service_mismatch":
+                # User is asking for execution services (buying/selling, customs, shipping)
+                # Check if we should show support options (frequency threshold)
+                from chatbot.services.support_trigger_tracker import get_support_trigger_tracker
+
+                support_tracker = get_support_trigger_tracker(self.redis)
+
+                # Get current message count
+                message_count = len(self._stream_history.get(session_id, [])) // 2
+
+                should_show, block_reason = support_tracker.should_show_support(
+                    session_id=session_id,
+                    trigger_type="service_scope_mismatch",
+                    current_message_count=message_count
+                )
+
+                if should_show:
+                    # Record the trigger
+                    support_tracker.record_trigger(
+                        session_id=session_id,
+                        trigger_type="service_scope_mismatch",
+                        message_count=message_count
+                    )
+
+                    print(f"  [STREAM] Service mismatch detected ({service_type}) - showing support options")
+
+                    # Track interaction in database
+                    if hasattr(self, 'support_interaction_service') and self.support_interaction_service:
+                        try:
+                            from chatbot.database.support_interaction_service import SupportInteraction, SupportInteractionType
+                            await self.support_interaction_service.track_interaction(
+                                SupportInteraction(
+                                    session_id=session_id,
+                                    interaction_type=SupportInteractionType.OTHER,
+                                    interaction_data={
+                                        "trigger_type": "service_scope_mismatch",
+                                        "query": message,
+                                        "service_type": service_type,
+                                        "out_of_scope_type": out_of_scope_type,
+                                        "shown_support": True
+                                    },
+                                    page_url="",
+                                    message_context=message[:200]
+                                )
+                            )
+                        except Exception as e:
+                            print(f"  [STREAM] Warning: Could not track service mismatch: {e}")
+
+                    # Generate contextual response message
+                    service_messages = {
+                        "buying_selling": "We don't provide buying or selling services. Market Inside provides trade DATA - shipment records, buyer databases, and market intelligence. Our team can show you how to find the right buyers/suppliers using our data. Would you like to connect?",
+                        "customs": "We don't handle customs clearance or shipping logistics. Market Inside provides customs RECORDS and trade data that can help you make informed decisions. Our team can show you the data we offer. Interested?",
+                        "shipping": "We don't provide shipping or logistics services. Market Inside specializes in trade DATA - shipment records and trade flow analysis. Our team can help you explore relevant data for your needs. Want to connect?",
+                        "import_export_assistance": "We don't provide import/export execution assistance. Market Inside is a trade database platform that provides historical shipment data, supplier contacts, and trade statistics. Our team can demonstrate how our data helps businesses in your industry. Interested?",
+                        "other": "Market Inside provides trade DATABASE and analytics - we don't directly provide execution services. Our team can help you explore relevant data for your needs. Would you like to connect?"
+                    }
+
+                    support_message = service_messages.get(service_type, service_messages["other"])
+
+                    # Save messages
+                    if self.redis:
+                        self.redis.save_message(session_id, {"role": "user", "content": message})
+                        self.redis.save_message(session_id, {
+                            "role": "assistant",
+                            "content": support_message
+                        })
+
+                    # Yield support UI
+                    yield json.dumps({
+                        "credit_exhausted": True,  # Reuse existing UI component
+                        "message": support_message,
+                        "actions": [
+                            {"type": "schedule_demo", "label": "Schedule a Demo"},
+                            {"type": "chat_with_us", "label": "Talk to Live Agent"},
+                            {"type": "whatsapp", "label": "WhatsApp"},
+                            {"type": "continue_chat", "label": "Continue Chat"}
+                        ],
+                        "done": True
+                    })
+                    return
+                else:
+                    print(f"  [STREAM] Service mismatch detected but threshold reached ({block_reason}) - continuing with normal flow")
+
+            # For off_topic or when threshold blocked, continue with normal LLM response
+            # The LLM will handle it based on the enhanced scope restriction prompt
+
+        # ========================================================================
         # STEP 3: Update slots and check for missing params
         # ========================================================================
         # Only check slots for data-specific intents
@@ -3507,6 +3687,54 @@ IMPORTANT
                     })
                     return
 
+                # Check if this is a MIRROR-ONLY COUNTRY (redirect to dashboard/support)
+                if explore_url and explore_url.startswith("MIRROR_ONLY:"):
+                    mirror_country_name = explore_url.replace("MIRROR_ONLY:", "")
+                    print(f"  [STREAM] Mirror-only country detected: {mirror_country_name} - redirecting to dashboard")
+
+                    # Save messages
+                    if self.redis:
+                        self.redis.save_message(session_id, {"role": "user", "content": message})
+
+                    # Response message
+                    mirror_message = f"We have {mirror_country_name} trade data available on our premium dashboard! For detailed shipment-level data including buyer/supplier information, complete HS codes, and comprehensive trade records, please connect with our team:"
+
+                    # Save assistant response
+                    if self.redis:
+                        self.redis.save_message(session_id, {
+                            "role": "assistant",
+                            "content": mirror_message
+                        })
+
+                    # Track this interaction
+                    try:
+                        await self.support_interaction_service.track_interaction(
+                            session_id=session_id,
+                            interaction_type="other",
+                            interaction_data={
+                                "trigger_type": "mirror_only_country",
+                                "country": mirror_country_name,
+                                "query": message,
+                                "shown_support": True
+                            }
+                        )
+                    except Exception as e:
+                        print(f"  [STREAM] Warning: Failed to track mirror-only interaction: {e}")
+
+                    # Use credit_exhausted format to reuse the same UI component
+                    yield json.dumps({
+                        "credit_exhausted": True,  # Reuse the same UI component as connect/support
+                        "message": mirror_message,
+                        "actions": [
+                            {"type": "schedule_demo", "label": "Schedule a Demo"},
+                            {"type": "chat_with_us", "label": "Talk to Live Agent"},
+                            {"type": "whatsapp", "label": "WhatsApp"},
+                            {"type": "continue_chat", "label": "Continue Chat"}
+                        ],
+                        "done": True
+                    })
+                    return
+
                 # Check if this is a CONTINENT query (use KB data, not API)
                 if explore_url and explore_url.startswith("CONTINENT:"):
                     is_continent_query = True
@@ -3568,7 +3796,7 @@ IMPORTANT
         if is_continent_query:
             fetch_url = ""
             print(f"  [STREAM] Continent query - skipping API call, using KB data")
-        elif explore_url and not explore_url.startswith("CONTINENT:"):
+        elif explore_url and not explore_url.startswith("CONTINENT:") and not explore_url.startswith("RESTRICTED:") and not explore_url.startswith("MIRROR_ONLY:"):
             fetch_url = explore_url
             print(f"  [STREAM] Using slot-generated URL: {fetch_url}")
         elif dynamic_url and "marketinsidedata.com" in dynamic_url:

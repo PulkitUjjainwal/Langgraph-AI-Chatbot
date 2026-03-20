@@ -1804,6 +1804,11 @@ export default function ChatWidget() {
         await callInitAndShowQuestions(assistantId);
         isSendingRef.current = false;
         setIsSending(false);
+
+        // Auto-focus input field after response
+        setTimeout(() => {
+          footerRef.current?.focus();
+        }, 100);
         return;
       }
 
@@ -1812,6 +1817,11 @@ export default function ChatWidget() {
         setMessages((prev) => [...prev, genericResponse]);
         isSendingRef.current = false;
         setIsSending(false);
+
+        // Auto-focus input field after response
+        setTimeout(() => {
+          footerRef.current?.focus();
+        }, 100);
         return;
       }
     }
@@ -1852,6 +1862,11 @@ export default function ChatWidget() {
     } finally {
       isSendingRef.current = false;
       setIsSending(false);
+
+      // Auto-focus input field after bot response completes
+      setTimeout(() => {
+        footerRef.current?.focus();
+      }, 100);
     }
   }
 
