@@ -149,9 +149,9 @@ def detect_greeting(query: str) -> Dict[str, any]:
     ):
         # Context-aware greeting responses
         responses = [
-            "Hello! I'm Alex from Export Genius. I help businesses find buyers, suppliers, and market opportunities using trade data from 190+ countries. What are you looking to achieve today?",
-            "Hi there! Welcome to Export Genius. I can help you discover new markets, find active importers, or track competitor activity. What would you like to explore?",
-            "Good to meet you! I'm here to help you leverage global trade data for your business growth. Are you looking to find buyers, research markets, or something else?"
+            "Hi! I'm Alex from Market Inside. How can I help you with global trade intelligence today?",
+            "Hi! I'm Alex from Market Inside. How can I help you with global trade intelligence today?",
+            "Hi! I'm Alex from Market Inside. How can I help you with global trade intelligence today?"
         ]
 
         # Pick response with variation

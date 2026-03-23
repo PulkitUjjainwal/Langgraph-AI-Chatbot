@@ -174,7 +174,7 @@ class ChatbotAgent:
         query_lower = query.lower().strip()
 
         if query_lower in greetings or any(query_lower.startswith(g) for g in greetings):
-            return "Hello! I'm Alex, your trade data consultant. I can help you find buyers, suppliers, explore markets, and analyze trade opportunities. What would you like to know?"
+            return "Hi! I'm Alex from Market Inside. I can help you find buyers, suppliers, explore markets, and analyze trade opportunities. What would you like to know?"
 
         return None
 
