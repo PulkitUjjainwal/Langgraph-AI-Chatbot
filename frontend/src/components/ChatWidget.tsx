@@ -99,9 +99,9 @@ const SESSION_STORAGE_KEY = "chat_session_id";
 
 // CTA questions to randomize for the 2nd slot
 const CTA_QUESTIONS = [
-  "I want to schedule a product demo",
-  "I want to find new customers",
-  "I need to consult with an expert"
+  "I Want To Schedule A Product Demo",
+  "I Want To Find New Customers",
+  "I Need To Consult With An Expert"
 ];
 
 // Get a random CTA question
@@ -113,9 +113,9 @@ function getRandomCTAQuestion(): string {
 // Generate initial questions with randomized CTA
 function getInitialQuestions(): string[] {
   return [
-    "I want to know about your products and services",
+    "I Want To Know About Your Products And Services",
     getRandomCTAQuestion(),
-    "I want to learn about your data"
+    "I Want To Learn About Your Data"
   ];
 }
 
@@ -548,11 +548,12 @@ export default function ChatWidget() {
         } catch {}
       }
 
+      // Don't show initial greeting - just show suggested questions
       // setMessages([
       //   {
       //     id: "welcome-1",
       //     role: "assistant",
-      //     text: "Hi! I'm your trade intelligence assistant. Ask me anything about markets, products, or companies.",
+      //     text: "Hello, I'm MI's AI! I'm your personal Trade Intelligence. You can ask me anything?",
       //   },
       // ]);
     }
@@ -1017,8 +1018,6 @@ export default function ChatWidget() {
     } else if (actionType === "whatsapp") {
       // Open the options menu and show the WhatsApp submenu so users can choose QR or link
       setShowOptionsMenu(true);
-      // small timeout to ensure menu container is visible before showing submenu
-      setTimeout(() => setShowWhatsAppSubmenu(true), 80);
     } else if (actionType === "call") {
       window.location.href = "tel:+4407727449124";
     } else if (actionType === "hubspot_chat" || actionType === "chat_with_us") {
@@ -2042,13 +2041,12 @@ export default function ChatWidget() {
   const [waDropdownRect, setWaDropdownRect] = useState<DOMRect | null>(null);
 
   const handleOpenOptionsMenu = () => {
-    console.log('[ChatWidget] Opening options menu');
-    setShowOptionsMenu(true);
-  };
-
-  const handleCloseOptionsMenu = () => {
-    setShowOptionsMenu(false);
-    setShowWhatsAppSubmenu(false);
+    console.log('[ChatWidget] Toggling options menu');
+    setShowOptionsMenu(!showOptionsMenu);
+    // Close WhatsApp submenu when toggling main menu
+    if (showOptionsMenu) {
+      setShowWhatsAppSubmenu(false);
+    }
   };
 
   const handleChatWithUs = () => {
@@ -2069,14 +2067,6 @@ export default function ChatWidget() {
     setShowOptionsMenu(false);
   };
 
-  const handleWhatsAppUs = () => {
-    console.log('[ChatWidget] WhatsApp clicked');
-    // Track WhatsApp menu open
-    trackActionClick(sessionId, 'whatsapp', { source: 'options_menu', action: 'menu_opened' });
-    // Toggle a small submenu with QR / Link options
-    setShowWhatsAppSubmenu((s) => !s);
-  };
-
   const openWhatsAppLink = () => {
     const wa = "https://wa.me/447727449124";
     trackWhatsAppClick(sessionId, 'direct_link');
@@ -2086,7 +2076,6 @@ export default function ChatWidget() {
       window.location.href = wa;
     }
     setShowOptionsMenu(false);
-    setShowWhatsAppSubmenu(false);
     setShowWhatsAppDropdown(false);
   };
 
@@ -2094,7 +2083,6 @@ export default function ChatWidget() {
     trackWhatsAppClick(sessionId, 'qr_code');
     // Close menus and show QR overlay inside chat
     setShowWhatsAppQR(true);
-    setShowWhatsAppSubmenu(false);
     setShowOptionsMenu(false);
     setShowWhatsAppDropdown(false);
   };
@@ -2466,34 +2454,49 @@ export default function ChatWidget() {
             <>
               {/* Input Field - AWS Style (at top, below header) */}
 
-              {/* Welcome Section with Suggested Questions - AWS Style */}
-              {questionCards.length > 0 && messages.length <= 1 && (
-            <div className="px-4 py-4 bg-white border-b border-gray-100">
-              <p className="text-sm font-medium text-gray-700 mb-2">
-                Want help getting started?
+              {/* Welcome Section with Suggested Questions */}
+              {questionCards.length > 0 && messages.length === 0 && (
+            <div className="px-4 py-4 bg-white">
+              <p className="text-base font-semibold text-gray-900 mb-1">
+                Want Help Getting Started?
               </p>
-              <p className="text-xs text-gray-500 mb-3">
-                Tell us a little bit about what you're looking for.
+              <p className="text-xs text-gray-500 mb-4">
+                Tell Us A Little Bit About What Are Your Looking For
               </p>
 
-              {/* AWS-style Question Buttons */}
-              <div className="space-y-2">
+              {/* Suggestion Buttons - With Animated Rainbow Gradient Border */}
+              <div className="space-y-2.5">
                 {questionCards.map((card, idx) => (
-                  <button
+                  <div
                     key={idx}
-                    onClick={() => {
-                      trackQuestionCardClick(sessionId, card.title, idx);
-                      handleSend(card.title);
+                    className="rounded-full p-[2px] bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 animate-gradient-x"
+                    style={{
+                      backgroundSize: '200% 200%',
+                      animation: 'gradient-x 3s ease infinite'
                     }}
-                    disabled={isSending}
-                    className="question-card w-full text-left px-4 py-3 rounded-lg bg-white border border-gray-200
-                      hover:bg-orange-50 hover:border-orange-300 disabled:opacity-50 disabled:cursor-not-allowed
-                      transition-all duration-200"
                   >
-                    <p className="question-title text-sm text-gray-700">
-                      {card.title}
-                    </p>
-                  </button>
+                    <button
+                      onClick={() => {
+                        trackQuestionCardClick(sessionId, card.title, idx);
+                        handleSend(card.title);
+                      }}
+                      disabled={isSending}
+                      className="
+                        w-full flex items-center gap-2.5 text-left px-4 py-2.5 rounded-full font-normal text-sm
+                        bg-white text-gray-800
+                        hover:bg-gray-50
+                        disabled:opacity-50 disabled:cursor-not-allowed
+                        transition-all duration-200
+                        cursor-pointer
+                      "
+                    >
+                      {/* Sparkle/Diamond Icon */}
+                      <svg className="w-4 h-4 flex-shrink-0 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                      </svg>
+                      <span>{card.title}</span>
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>
@@ -2513,7 +2516,7 @@ export default function ChatWidget() {
 
           {/* Data Collection UI (if needed) */}
           {isCollecting && (
-            <div className="border-t border-gray-200 px-4 py-3 bg-gray-50">
+            <div className="px-4 py-3 bg-white">
               {missingFields.length > 0 && (
                 <div className="mb-2 text-xs text-gray-500">
                   Needed: {missingFields.join(", ")}
@@ -2617,10 +2620,168 @@ export default function ChatWidget() {
               )}
             </div>
           )}
-           <ChatFooter ref={footerRef} onSend={handleSend} isSending={isSending} position="bottom" onOpenOptionsMenu={handleOpenOptionsMenu} />
+
+          {/* Options Menu Overlay - Dims the background */}
+          {showOptionsMenu && (
+            <div
+              className="absolute inset-0 z-50 flex flex-col justify-end rounded-2xl overflow-hidden cursor-pointer"
+              style={{
+                backgroundColor: 'rgba(130, 130, 130, 0.7)',
+                backdropFilter: 'blur(1.5px)',
+                animation: 'fadeIn 0.2s ease-out'
+              }}
+              onClick={() => {
+                setShowOptionsMenu(false);
+                setShowWhatsAppSubmenu(false);
+              }}
+            >
+              {/* Options Menu Cards - Positioned above input field, aligned left */}
+              <div className="px-4 pb-[130px] bg-transparent flex justify-start">
+                <div className="w-full max-w-[280px] space-y-2.5" style={{ animation: 'slideInFromBottom 0.3s ease-out' }} onClick={(e) => e.stopPropagation()}>
+
+                {/* Talk to Live Agent - Black icon */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); setShowOptionsMenu(false); handleChatWithUs(); }}
+                  className="w-full flex items-center gap-3 px-4 py-3 bg-white rounded-[20px] hover:shadow-2xl active:scale-[0.98] transition-all duration-200 cursor-pointer"
+                  style={{
+                    boxShadow: '0 3px 12px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05)'
+                  }}
+                >
+                  <div className="flex items-center justify-center w-10 h-10 rounded-full bg-black flex-shrink-0">
+                    <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                    </svg>
+                  </div>
+                  <div className="text-left flex-1">
+                    <p className="font-medium text-gray-900 text-sm">Talk to live agent</p>
+                    <p className="text-xs text-gray-500 mt-0.5">Talk to our support team</p>
+                  </div>
+                </button>
+
+                {/* Call Us - Orange icon */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); setShowOptionsMenu(false); handleCallUs(); }}
+                  className="w-full flex items-center gap-3 px-4 py-3 bg-white rounded-[20px] hover:shadow-2xl active:scale-[0.98] transition-all duration-200 cursor-pointer"
+                  style={{
+                    boxShadow: '0 3px 12px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05)'
+                  }}
+                >
+                  <div className="flex items-center justify-center w-10 h-10 rounded-full bg-orange-500 flex-shrink-0">
+                    <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                    </svg>
+                  </div>
+                  <div className="text-left flex-1">
+                    <p className="font-medium text-gray-900 text-sm">Call Us</p>
+                    <p className="text-xs text-gray-500 mt-0.5">+44 12345 67894</p>
+                  </div>
+                </button>
+
+                {/* WhatsApp Us - Green icon with submenu */}
+                <div className="w-full">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowWhatsAppSubmenu(!showWhatsAppSubmenu);
+                    }}
+                    className="w-full flex items-center gap-3 px-4 py-3 bg-white rounded-[20px] hover:shadow-2xl active:scale-[0.98] transition-all duration-200 cursor-pointer"
+                    style={{
+                      boxShadow: '0 3px 12px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05)'
+                    }}
+                  >
+                    <div className="flex items-center justify-center w-10 h-10 rounded-full bg-green-500 flex-shrink-0">
+                      <svg className="h-6 w-6 text-white" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+                      </svg>
+                    </div>
+                    <div className="text-left flex-1">
+                      <p className="font-medium text-gray-900 text-sm">WhatsApp Us</p>
+                      <p className="text-xs text-gray-500 mt-0.5">Message on Whatsapp</p>
+                    </div>
+                    {/* Chevron icon to indicate expandable */}
+                    <svg
+                      className={`h-5 w-5 text-gray-400 transition-transform duration-200 ${showWhatsAppSubmenu ? 'rotate-180' : ''}`}
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+
+                  {/* WhatsApp Submenu */}
+                  {showWhatsAppSubmenu && (
+                    <div className="mt-2 ml-4 space-y-2" style={{ animation: 'slideInFromBottom 0.2s ease-out' }}>
+                      {/* Show QR Code */}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowWhatsAppSubmenu(false);
+                          setShowOptionsMenu(false);
+                          openWhatsAppQRInChat();
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 bg-white rounded-[16px] hover:bg-gray-50 active:scale-[0.98] transition-all duration-200 cursor-pointer border border-gray-200"
+                      >
+                        <div className="flex items-center justify-center w-8 h-8 rounded-full bg-gray-100 flex-shrink-0">
+                          <svg className="h-4 w-4 text-gray-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                          </svg>
+                        </div>
+                        <div className="text-left flex-1">
+                          <p className="font-medium text-gray-900 text-sm">Show QR Code</p>
+                        </div>
+                      </button>
+
+                      {/* Open WhatsApp */}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowWhatsAppSubmenu(false);
+                          setShowOptionsMenu(false);
+                          openWhatsAppLink();
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 bg-white rounded-[16px] hover:bg-gray-50 active:scale-[0.98] transition-all duration-200 cursor-pointer border border-gray-200"
+                      >
+                        <div className="flex items-center justify-center w-8 h-8 rounded-full bg-gray-100 flex-shrink-0">
+                          <svg className="h-4 w-4 text-gray-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                          </svg>
+                        </div>
+                        <div className="text-left flex-1">
+                          <p className="font-medium text-gray-900 text-sm">Open WhatsApp</p>
+                        </div>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Reset Conversation - Orange icon */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); setShowOptionsMenu(false); handleResetConversation(); }}
+                  className="w-full flex items-center gap-3 px-4 py-3 bg-white rounded-[20px] hover:shadow-2xl active:scale-[0.98] transition-all duration-200 cursor-pointer"
+                  style={{
+                    boxShadow: '0 3px 12px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05)'
+                  }}
+                >
+                  <div className="flex items-center justify-center w-10 h-10 rounded-full bg-orange-500 flex-shrink-0">
+                    <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  </div>
+                  <div className="text-left flex-1">
+                    <p className="font-medium text-gray-900 text-sm">Reset Conversation</p>
+                    <p className="text-xs text-gray-500 mt-0.5">Start A New Conversation</p>
+                  </div>
+                </button>
+              </div>
+            </div>
+            </div>
+          )}
+
+           <ChatFooter ref={footerRef} onSend={handleSend} isSending={isSending} position="bottom" onOpenOptionsMenu={handleOpenOptionsMenu} onCloseOptionsMenu={() => { setShowOptionsMenu(false); setShowWhatsAppSubmenu(false); }} />
 
           {/* Disclaimer at bottom - AWS Style */}
-          <div className="px-4 py-2 bg-white border-t border-gray-100">
+          <div className="px-4 py-2 bg-white">
             <p className="text-[10px] text-gray-400 text-center">
               {/* you are agreeing to our terms&conditions */}
               By chatting, you are agreeing to our{" "}
@@ -2628,139 +2789,6 @@ export default function ChatWidget() {
             </p>
           </div>
 
-          {/* Options Menu Overlay */}
-          {showOptionsMenu && (
-            <div
-              className="fixed z-[2147483648] flex items-end justify-center rounded-2xl overflow-hidden"
-              style={{
-                width: 'var(--chat-widget-width, 380px)',
-                height: 'var(--chat-widget-height, 580px)',
-                maxWidth: 'min(var(--chat-widget-max-width, 380px), calc(100vw - 40px))',
-                maxHeight: 'min(var(--chat-widget-max-height, 580px), calc(100vh - 100px))',
-                bottom: 'var(--chat-widget-bottom, 96px)',
-                right: 'var(--chat-widget-right, 20px)',
-              }}
-            >
-              {/* Backdrop */}
-              <div
-                className="absolute inset-0 bg-black/30 rounded-2xl"
-                onClick={handleCloseOptionsMenu}
-              />
-              {/* Menu Panel */}
-              <div
-                className="relative w-full bg-white rounded-t-2xl shadow-xl flex items-end justify-center"
-                style={{
-                  animation: 'slideUp 0.3s ease-out forwards'
-                }}
-              >
-                <div className="w-full max-w-[90%] py-4 px-6">
-                  {/* Handle bar */}
-                  <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mb-4" />
-
-                  {/* Menu Title */}
-                  <h3 className="text-sm font-semibold text-gray-700 mb-3 px-4">Support Options</h3>
-
-                  {/* Menu Items */}
-                  <div className="space-y-1">
-                    <button
-                      onClick={handleChatWithUs}
-                      className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 rounded-xl transition-colors cursor-pointer"
-                    >
-                      <div className="flex items-center justify-center w-10 h-10 rounded-full bg-orange-100">
-                        <svg className="h-5 w-5 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                        </svg>
-                      </div>
-                      <div className="text-left">
-                        <p className="font-medium">Talk to Live Agent</p>
-                        <p className="text-xs text-gray-500">Talk to our support team</p>
-                      </div>
-                    </button>
-
-                    <button
-                      onClick={handleCallUs}
-                      className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 rounded-xl transition-colors cursor-pointer"
-                    >
-                      <div className="flex items-center justify-center w-10 h-10 rounded-full bg-green-100">
-                        <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-                        </svg>
-                      </div>
-                      <div className="text-left">
-                        <p className="font-medium">Call Us</p>
-                        <p className="text-xs text-gray-500">+44 07727 449124</p>
-                      </div>
-                    </button>
-
-                    <div className="relative">
-                      <button
-                        onClick={handleWhatsAppUs}
-                        className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 rounded-xl transition-colors cursor-pointer"
-                      >
-                        <div className="flex items-center justify-center w-10 h-10 rounded-full bg-green-100">
-                          <svg className="h-5 w-5 text-green-600" viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-                          </svg>
-                        </div>
-                        <div className="text-left">
-                          <p className="font-medium">WhatsApp Us</p>
-                          <p className="text-xs text-gray-500">Message us on WhatsApp</p>
-                        </div>
-                      </button>
-
-                      {showWhatsAppSubmenu && (
-                        <div className="absolute right-0 top-full mt-2 w-56 bg-white rounded-lg shadow-lg border p-2 z-50">
-                          <button
-                            onClick={openWhatsAppQRInChat}
-                            className="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-50 text-sm text-gray-700 flex items-center gap-2 cursor-pointer"
-                          >
-                            <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h2M4 8h12m4 0h2M4 16h4m12 0h2M4 20h4" />
-                            </svg>
-                            Show QR
-                          </button>
-                          <button
-                            onClick={openWhatsAppLink}
-                            className="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-50 text-sm text-gray-700 flex items-center gap-2 mt-1 cursor-pointer"
-                          >
-                            <svg className="w-4 h-4 text-[#25D366]" fill="currentColor" viewBox="0 0 24 24">
-                              <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-                            </svg>
-                            Open WhatsApp
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="border-t border-gray-100 my-2" />
-
-                    <button
-                      onClick={handleResetConversation}
-                      className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-red-50 rounded-xl transition-colors cursor-pointer"
-                    >
-                      <div className="flex items-center justify-center w-10 h-10 rounded-full bg-red-100">
-                        <svg className="h-5 w-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                        </svg>
-                      </div>
-                      <div className="text-left">
-                        <p className="font-medium">Reset Conversation</p>
-                        <p className="text-xs text-gray-500">Start a new chat session</p>
-                      </div>
-                    </button>
-                  </div>
-
-                  {/* Cancel Button */}
-                  <button
-                    onClick={handleCloseOptionsMenu}
-                    className="w-full mt-3 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 transition-colors cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
           </>
           </div>
           {/* End Conditional Rendering */}

@@ -698,22 +698,26 @@ export function ChatMessages({
                 <div
                   className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed overflow-hidden cursor-text ${
                     msg.role === "user"
-                      ? "bg-gray-100 text-chat-text rounded-bl-md"
-                      : "bg-gradient-to-br from-gray-700 to-gray-800 text-white rounded-br-md"
+                      ? "text-white rounded-br-md"
+                      : "text-gray-900 rounded-bl-md"
                   }`}
-                  style={{ wordBreak: 'break-word', overflowWrap: 'break-word' }}
+                  style={{
+                    wordBreak: 'break-word',
+                    overflowWrap: 'break-word',
+                    backgroundColor: msg.role === "user" ? '#333333' : '#fff6ed'
+                  }}
                 >
                   {isTyping || isWaitingForStream ? (
                     <div className="flex items-center gap-1 py-1">
-                      <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
-                      <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
-                      <span className="typing-dot inline-block w-2 h-2 bg-white rounded-full"></span>
+                      <span className={`typing-dot inline-block w-2 h-2 rounded-full ${msg.role === "user" ? "bg-white" : "bg-orange-500"}`}></span>
+                      <span className={`typing-dot inline-block w-2 h-2 rounded-full ${msg.role === "user" ? "bg-white" : "bg-orange-500"}`}></span>
+                      <span className={`typing-dot inline-block w-2 h-2 rounded-full ${msg.role === "user" ? "bg-white" : "bg-orange-500"}`}></span>
                     </div>
                   ) : (
                     <>
                       {renderMessageWithLinks(msg.text)}
                       {showStreamingCursor && (
-                        <span className="inline-block w-0.5 h-4 bg-white ml-0.5 animate-pulse" />
+                        <span className={`inline-block w-0.5 h-4 ml-0.5 animate-pulse ${msg.role === "user" ? "bg-white" : "bg-orange-500"}`} />
                       )}
                     </>
                   )}
@@ -818,17 +822,28 @@ export function ChatMessages({
               {msg.role === "assistant" && msg.suggestions && msg.suggestions.length > 0 && (
                 <div className="flex flex-wrap gap-2 mt-3 justify-end">
                   {msg.suggestions.map((suggestion, suggestionIdx) => (
-                    <button
+                    <div
                       key={suggestionIdx}
-                      onClick={() => onActionClick?.("chat", suggestion)}
-                      className="px-3 py-1 rounded-2xl rounded-br-md text-sm font-medium
-                        bg-white border-2 border-orange-300 text-orange-700
-                        hover:bg-orange-50 hover:border-orange-500
-                        transition-all duration-200 transform hover:scale-105
-                        shadow-sm hover:shadow-md cursor-pointer"
+                      className="rounded-full p-[2px] bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500"
+                      style={{
+                        backgroundSize: '200% 200%',
+                        animation: 'gradient-x 3s ease infinite'
+                      }}
                     >
-                      {suggestion}
-                    </button>
+                      <button
+                        onClick={() => onActionClick?.("chat", suggestion)}
+                        className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-normal
+                          bg-white text-gray-800
+                          hover:bg-gray-50
+                          transition-all duration-200 cursor-pointer"
+                      >
+                        {/* Sparkle/Diamond Icon */}
+                        <svg className="w-4 h-4 flex-shrink-0 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                        </svg>
+                        <span>{suggestion}</span>
+                      </button>
+                    </div>
                   ))}
                 </div>
               )}
@@ -895,10 +910,9 @@ export function ChatMessages({
             {/* MI Assistant avatar - shown on right for assistant messages */}
             {msg.role === "assistant" && (
               <div className="flex-shrink-0 ml-2 mt-1">
-                <div className="h-7 w-7 rounded-full overflow-hidden">
-                  <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-full w-full">
-                    <rect width="28" height="28" rx="14" fill="#374151"/>
-                    <text x="50%" y="54%" dominantBaseline="middle" textAnchor="middle" fill="white" fontSize="9" fontWeight="bold" fontFamily="Inter, sans-serif">MI</text>
+                <div className="h-8 w-8 rounded-full bg-orange-500 flex items-center justify-center">
+                  <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                   </svg>
                 </div>
               </div>
