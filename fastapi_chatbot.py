@@ -5849,8 +5849,8 @@ def _format_history_for_odoo(messages: List[Dict[str, Any]]) -> str:
         '<b>═══ 🤖 AI Chatbot Conversation History ═══</b><br><br>'
     )
     footer = (
-        '<br><br><b>═══ End of History ═══</b>'
-        '<br><br>'
+        # '<br><br><b>═══ End of History ═══</b>'
+        # '<br><br>'
         '<b>🔄 Transferring to a live agent...</b>'
     )
 

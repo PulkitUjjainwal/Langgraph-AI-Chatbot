@@ -985,7 +985,7 @@ export function ChatMessages({
 
       {/* Support Buttons Card (appears after 30 seconds of inactivity) */}
       {supportButtons.show && !supportButtons.dismissed && (
-        <div className="support-buttons-card mx-2 my-4 animate-fade-in max-h-[70vh] overflow-y-auto">
+        <div className="support-buttons-card mx-2 my-4 animate-fade-in">
           {/* Idle message bubble */}
           <div className="flex items-center justify-center mb-3">
             <div className="bg-blue-100 px-4 py-2 rounded-full text-sm text-blue-700 flex items-center gap-2">
@@ -997,7 +997,7 @@ export function ChatMessages({
           </div>
 
           {/* Support Card */}
-          <div className="bg-white rounded-2xl shadow-lg border border-blue-200 overflow-hidden max-h-[60vh]">
+          <div className="bg-white rounded-2xl shadow-lg border border-blue-200 overflow-hidden">
             <div className="bg-gradient-to-r from-blue-500 to-blue-600 px-5 py-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -1023,7 +1023,7 @@ export function ChatMessages({
             </div>
 
             {/* Support Options */}
-            <div className="p-5 space-y-3 max-h-[50vh] overflow-y-auto">
+            <div className="p-5 space-y-3">
               <button
                 onClick={() => handleSupportAction('get_help')}
                 className="w-full flex items-center gap-4 p-4 rounded-xl transition-all duration-200 hover:bg-orange-50 border-2 border-transparent hover:border-orange-200 group text-left"
@@ -1078,7 +1078,7 @@ export function ChatMessages({
                 </svg>
               </button>
 
-              <button
+              {/* <button
                 onClick={() => handleSupportAction('view_faq')}
                 className="w-full flex items-center gap-4 p-4 rounded-xl transition-all duration-200 hover:bg-blue-50 border-2 border-transparent hover:border-blue-200 group text-left"
               >
@@ -1094,7 +1094,7 @@ export function ChatMessages({
                 <svg className="w-5 h-5 text-gray-300 group-hover:text-blue-500 transition-all group-hover:translate-x-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                 </svg>
-              </button>
+              </button> */}
             </div>
           </div>
         </div>
