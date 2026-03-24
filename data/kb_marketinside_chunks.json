@@ -4903,5 +4903,23 @@
     "heading_context": "Office Location",
     "word_count": 96,
     "char_count": 625
+  },
+  {
+    "chunk_id": 545,
+    "chunk_text": "Market Inside Platform Overview and Access\n\nQ: Do you have a platform?\nA: Yes, Market Inside has a comprehensive web platform that provides access to global trade data, buyer/supplier information, shipment records, and analytics tools.\n\nQ: Give me link to your platform / What's your platform link?\nA: The platform overview and features page is available at: https://www.marketinsidedata.com/en/platform\n\nThis page showcases all the platform capabilities, features, and how it can help your business with trade intelligence.\n\nThe platform includes:\n- Global trade database with 6.13B+ shipment records\n- Buyer and supplier discovery tools\n- Market intelligence and analytics\n- Shipment tracking and alerts\n- Risk assessment tools\n- Customizable reports and exports\n\nFor hands-on data search and exploration, visit: https://www.marketinsidedata.com/en/search-data",
+    "page_title": "Platform Access | Market Inside Data",
+    "page_url": "https://www.marketinsidedata.com/en/platform",
+    "heading_context": "Platform Overview",
+    "word_count": 115,
+    "char_count": 782
+  },
+  {
+    "chunk_id": 546,
+    "chunk_text": "Platform vs Search Data Pages\n\nMarket Inside has two main access points:\n\n1. Platform Overview Page (https://www.marketinsidedata.com/en/platform)\n   - Marketing and feature showcase\n   - Learn about platform capabilities\n   - See what tools and analytics are available\n   - Understand how the platform works\n   - Best for: New visitors, learning about features, sales inquiries\n\n2. Search Data Page (https://www.marketinsidedata.com/en/search-data)\n   - Actual data search and exploration tool\n   - Requires login/dashboard access\n   - Hands-on data querying\n   - Best for: Active users, data analysis, research\n\nWhen someone asks for 'platform link' or 'do you have a platform', they want the overview page (/en/platform).\nWhen someone wants to search or explore data, direct them to the search page (/en/search-data).",
+    "page_title": "Platform Access Guide | Market Inside Data",
+    "page_url": "https://www.marketinsidedata.com/en/platform",
+    "heading_context": "Platform Access",
+    "word_count": 125,
+    "char_count": 879
   }
 ]

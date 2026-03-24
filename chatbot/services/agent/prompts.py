@@ -277,6 +277,56 @@ CORE VALUE PROPOSITION (mention naturally when relevant):
 """
 
     @staticmethod
+    def build_platform_links_instruction() -> str:
+        """
+        CRITICAL instruction for providing correct platform links.
+        Distinguishes between marketing platform page vs data search tool.
+        """
+        return """
+[CRITICAL] PLATFORM LINKS - USE THE CORRECT URL:
+
+Market Inside has TWO different pages - use the RIGHT one based on context:
+
+1. **PLATFORM PAGE** (Marketing/Sales): https://www.marketinsidedata.com/en/platform
+   Use when users ask:
+   • "Do you have a platform?"
+   • "Give me link to your platform"
+   • "Show me your platform"
+   • "What's your platform link?"
+   • "Platform page?"
+   • General questions about platform features/capabilities
+
+   FORMAT: "Yes, Market Inside has a comprehensive web platform that provides global trade data, buyer/supplier information, shipment records, and analytics tools.
+
+   📊 [Explore Our Platform](https://www.marketinsidedata.com/en/platform)"
+
+2. **SEARCH DATA PAGE** (Actual Data Tool): https://www.marketinsidedata.com/en/search-data
+   Use when:
+   • Showing actual data results
+   • User asks "where can I search for data?"
+   • Context is about using the search tool
+   • Following up after showing trade statistics
+
+   FORMAT: "📊 [Check Out Our Page for More Details](https://www.marketinsidedata.com/en/search-data)"
+
+EXAMPLES:
+
+✓ User: "Do you have a platform?"
+   Bot: "Yes! Market Inside has a comprehensive web platform with global trade data, shipment records, and analytics tools.
+
+   📊 [Explore Our Platform](https://www.marketinsidedata.com/en/platform)
+
+   Need help navigating it?"
+
+✓ User: "Give me link to your platform"
+   Bot: "https://www.marketinsidedata.com/en/platform
+
+   Need help with anything specific?"
+
+✗ WRONG - Don't give search-data link when they ask for "platform"!
+"""
+
+    @staticmethod
     def build_country_list_formatting() -> str:
         """
         Instruction for formatting country lists by region/continent.
@@ -319,7 +369,7 @@ FORMAT for specific availability:
 General question - "Tell me about Africa data coverage":
 "For Africa, Market Inside provides trade data coverage for countries including **Nigeria, South Africa, Egypt, Kenya, Ethiopia** and +49 more countries. Our data includes import/export records, buyer/supplier information, and shipment details.
 
-📊 [Check Out Our Page for More Details](https://www.marketinsidedata.com/en/search-data)"
+📊 [Explore Our Platform](https://www.marketinsidedata.com/en/platform)"
 
 Specific question - "Which countries available for Africa?":
 (Using context: "Countries covered in Africa: Algeria, Angola, Benin, Botswana...")
@@ -331,7 +381,7 @@ Specific question - "Which countries available for Africa?":
 - For GENERAL questions: Use world knowledge counts
 - For SPECIFIC "available/list" questions: Use CONTEXT data if available
 - ALWAYS order countries by GDP (highest first) when listing examples
-- ALWAYS include the search-data link
+- Use PLATFORM link for general overview, SEARCH-DATA link for specific data queries
 - Keep responses concise
 """
 
@@ -504,6 +554,7 @@ Need specific product details?"
         accuracy_instruction = cls.build_accuracy_instruction()
         company_data_instruction = cls.build_company_data_instruction(config.source_url) if config.has_dynamic_content else ""
         contact_info_instruction = cls.build_contact_info_instruction()
+        platform_links_instruction = cls.build_platform_links_instruction()
         response_structure = cls.build_response_structure(config.query_type)
         country_list_formatting = cls.build_country_list_formatting()
 
@@ -558,6 +609,7 @@ EXAMPLE — RIGHT: "Vietnam imported $1.2B of HS code 94 (furniture) in 2023, ma
 {scope_restriction}{brand_identity}{personality}
 {history_section}CONTEXT INFORMATION:
 {config.context}{accuracy_instruction}{company_data_instruction}{contact_info_instruction}
+{platform_links_instruction}
 {value_proposition}
 {country_list_formatting}
 {industry_section}{response_structure}
