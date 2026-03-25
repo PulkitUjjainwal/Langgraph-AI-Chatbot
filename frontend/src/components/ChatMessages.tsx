@@ -147,6 +147,7 @@ type Props = {
   onDelayedFeedbackSubmit?: (feedbackData: DelayedFeedbackData) => Promise<void>;
   sessionId?: string;
   pageUrl?: string;
+  onClose?: () => void;
 };
 
 export type FeedbackSubmitData = {
@@ -307,7 +308,8 @@ export function ChatMessages({
   onFeedbackSubmit,
   onDelayedFeedbackSubmit,
   sessionId = '',
-  pageUrl = ''
+  pageUrl = '',
+  onClose
 }: Props) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -621,10 +623,19 @@ export function ChatMessages({
       // Send a message to chatbot asking for help
       onActionClick?.('chat', 'I need help with something');
     } else if (action === 'schedule_demo') {
-      // Open schedule demo
-      if (typeof window !== 'undefined' && typeof (window as any).openScheduleDemo === 'function') {
-        (window as any).openScheduleDemo();
-      }
+      // Close/minimize the chatbot first
+      console.log('Closing chatbot...');
+      onClose?.();
+
+      // Then open schedule demo after a small delay
+      setTimeout(() => {
+        if (typeof window !== 'undefined' && typeof (window as any).openScheduleDemo === 'function') {
+          console.log('Opening schedule demo...');
+          (window as any).openScheduleDemo();
+        } else {
+          console.log('openScheduleDemo function not found on window');
+        }
+      }, 100);
     }
   };
 

@@ -300,6 +300,7 @@ class Config:
 
     # Performance optimization
     DISABLE_CHECKPOINTING = os.getenv("DISABLE_CHECKPOINTING", "false").lower() == "true"  # Set to "true" for 10-15s faster responses
+    USE_COMBINED_LLM_CALL = os.getenv("USE_COMBINED_LLM_CALL", "false").lower() == "true"  # Combine intent detection + content validation into single LLM call
 
     # Contact Information
     CONTACT_PHONE_NUMBER = "+44 7727 449124"
@@ -2901,6 +2902,178 @@ IMPORTANT
             "service_type": service_type
         }
 
+    async def _detect_intent_and_validate_content(
+        self,
+        query: str,
+        dynamic_url: Optional[str] = None,
+        dynamic_content: Optional[str] = None,
+        timeout: float = 10.0
+    ) -> Dict[str, Any]:
+        """
+        COMBINED LLM call for intent detection + content validation.
+
+        Single LLM call that:
+        1. Detects intent and extracts entities (URLs, params)
+        2. Validates if provided dynamic_content is relevant to query (if provided)
+        3. Extracts country name once
+
+        Args:
+            query: User's message
+            dynamic_url: Optional URL to validate against
+            dynamic_content: Optional content to validate (excerpt, ~1200 chars)
+            timeout: Max seconds for LLM call
+
+        Returns:
+            {
+                # Intent detection (from _detect_intent_and_entities)
+                "intent": str,
+                "confidence": float,
+                "params": dict,
+                "missing_params": list,
+                "clarifying_question": str,
+                "url": str,
+                "out_of_scope_type": str,
+                "service_type": str,
+
+                # Content validation (from is_query_related_via_llm) - only if dynamic_content provided
+                "content_related": bool,
+                "content_score": float,
+                "country": Optional[str]
+            }
+        """
+        # First check for greeting/general intents (no LLM needed)
+        greeting_result = self._check_greeting_or_general(query)
+        if greeting_result:
+            # Add content validation fields (not applicable for greetings)
+            greeting_result["content_related"] = False
+            greeting_result["content_score"] = 0.0
+            greeting_result["country"] = None
+            return greeting_result
+
+        # Build combined system prompt (includes FULL intent detection rules)
+        system_prompt = """You are an intelligent intent analyzer AND content validator for a trade data application.
+
+You must output ONLY valid JSON. No explanations. No markdown. No extra text.
+
+===== TASK 1: INTENT DETECTION =====
+
+Your job:
+- Understand the user query with contextual intelligence
+- Handle ambiguous queries by making smart assumptions
+- Decide the correct intent
+- Extract and normalize parameters intelligently
+- Generate the EXACT final URL based on rules below
+
+INTELLIGENCE PRINCIPLES:
+1. Context Awareness: In trade contexts, use reasonable defaults (e.g., "america" typically means USA)
+2. Pattern Recognition: Recognize entity-first patterns ("exporters argentina" = Argentina exporters)
+3. Smart Assumptions: Make informed assumptions based on common usage
+4. Normalization: Convert variations to standard forms ("us", "usa", "america" → "united states")
+
+INTENTS (SEVEN TOTAL):
+
+1. search_trade_data - User wants SPECIFIC trade records for a product/hs_code
+2. search_country_data - User wants HIGH-LEVEL country overview (NO specific product)
+3. country_to_country - Trade BETWEEN TWO specific countries
+4. hs_code - HS code, chapter, heading queries
+5. general - Platform questions, pricing, features
+6. greeting - Hello, hi, thanks, goodbye
+7. out_of_scope - Non-trade topics OR execution services
+
+IMPORTANT: Extract all relevant parameters (country, product, hs_code, direction, entity_type, etc.)
+"""
+
+        # If dynamic_content provided, add validation task
+        if dynamic_content:
+            excerpt = dynamic_content[:1200].replace("\n", " ").strip()
+            system_prompt += f"""
+
+===== TASK 2: CONTENT VALIDATION (perform this in same response) =====
+
+Additionally, validate if the provided content relates to the user query:
+- Determine if query matches the URL/page content
+- Check country alignment between query and content
+- Score relevance 0.0 to 1.0
+- Extract country name from query if explicitly mentioned
+
+Page excerpt: {excerpt}
+Page URL: {dynamic_url or "N/A"}
+"""
+
+        # Output format
+        if dynamic_content:
+            system_prompt += """
+
+OUTPUT JSON FORMAT (with content validation):
+{
+  "intent": "search_trade_data",
+  "confidence": 0.95,
+  "params": {"country": "india", "product": "coal", ...},
+  "missing_params": [],
+  "clarifying_question": "",
+  "url": "https://...",
+  "out_of_scope_type": "",
+  "service_type": "",
+  "content_related": true,
+  "content_score": 0.85,
+  "country": "India"
+}
+"""
+        else:
+            system_prompt += """
+
+OUTPUT JSON FORMAT (intent only, no content):
+{
+  "intent": "search_trade_data",
+  "confidence": 0.95,
+  "params": {"country": "india", "product": "coal", ...},
+  "missing_params": [],
+  "clarifying_question": "",
+  "url": "https://...",
+  "out_of_scope_type": "",
+  "service_type": ""
+}
+"""
+
+        # Call LLM
+        try:
+            llm = self._get_intent_classifier_llm()
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(llm.invoke, [HumanMessage(content=f"{system_prompt}\n\nUSER QUERY: {query}")]),
+                timeout=timeout
+            )
+
+            text = (getattr(resp, "content", "") or "").strip()
+            result = self._extract_json_object(text)
+
+            if not isinstance(result, dict):
+                raise ValueError("LLM did not return valid JSON object")
+
+            # Validate required fields
+            required = ["intent", "confidence", "params", "url"]
+            if not all(field in result for field in required):
+                raise ValueError(f"Missing required fields: {required}")
+
+            # Ensure all expected fields exist
+            result.setdefault("missing_params", [])
+            result.setdefault("clarifying_question", "")
+            result.setdefault("out_of_scope_type", "")
+            result.setdefault("service_type", "")
+
+            # Add content validation fields if not present
+            if "content_related" not in result:
+                result["content_related"] = False
+            if "content_score" not in result:
+                result["content_score"] = 0.0
+            if "country" not in result:
+                result["country"] = None
+
+            return result
+
+        except Exception as e:
+            print(f"[COMBINED_LLM] Error: {e}")
+            raise  # Re-raise to trigger fallback
+
     async def handle_dynamic_api_call(
         self,
         message: str,
@@ -3379,10 +3552,84 @@ IMPORTANT
             print(f"  [STREAM] Reconstructed LLM query: '{llm_query}'")
         else:
             # Normal intent detection
-            intent_result = await self._detect_intent_and_entities(message)
-            intent = intent_result.get("intent", "unknown")
-            params = intent_result.get("params", {})
-            intent_url = intent_result.get("url", "")
+            # ============================================================================
+            # OPTIMIZATION: Single LLM call (intent + validation combined)
+            # If flag is ON and dynamic_url has cached content, do BOTH in one call
+            # ============================================================================
+            cached_content_early = None
+            combined_validation_result = None  # Store validation result for later reuse
+            print(f"Config.USE_COMBINED_LLM_CALL: {Config.USE_COMBINED_LLM_CALL}")
+
+            # Step 1: Check cache early if optimization enabled
+            if Config.USE_COMBINED_LLM_CALL and dynamic_url and "marketinsidedata.com" in dynamic_url:
+                try:
+                    print(f"  [STREAM-OPT] Checking cache early for: {dynamic_url[:80]}...")
+                    cached_data_early = await self.dynamic_content_manager.get_embeddings_from_redis(dynamic_url, session_id)
+                    if cached_data_early:
+                        _, _, cached_content_early = cached_data_early
+                        print(f"  [STREAM-OPT] Cache HIT early: {len(cached_content_early)} chars available")
+                except Exception as e:
+                    print(f"  [STREAM-OPT] Early cache check failed: {e}")
+                    cached_content_early = None
+
+            # Step 2: Do SINGLE combined call if cache exists, otherwise original
+            print("Config.USE_COMBINED_LLM_CALL")
+            if Config.USE_COMBINED_LLM_CALL and cached_content_early:
+                try:
+                    print(f"  [STREAM-OPT] ✨ Using SINGLE combined LLM call (intent + validation)")
+                    combined_result = await self._detect_intent_and_validate_content(
+                        query=message,
+                        dynamic_url=dynamic_url,
+                        dynamic_content=cached_content_early[:1200],
+                        timeout=10.0
+                    )
+
+                    # Extract intent info (same fields as original)
+                    intent = combined_result.get("intent", "unknown")
+                    params = combined_result.get("params", {})
+                    intent_url = combined_result.get("url", "")
+                    intent_result = {
+                        "intent": intent,
+                        "confidence": combined_result.get("confidence", 0.0),
+                        "params": params,
+                        "missing_params": combined_result.get("missing_params", []),
+                        "clarifying_question": combined_result.get("clarifying_question", ""),
+                        "url": intent_url,
+                        "out_of_scope_type": combined_result.get("out_of_scope_type", ""),
+                        "service_type": combined_result.get("service_type", "")
+                    }
+
+                    # Store validation results for later reuse (skip 2nd LLM call)
+                    combined_validation_result = {
+                        "content_related": combined_result.get("content_related", False),
+                        "content_score": combined_result.get("content_score", 0.0),
+                        "country": combined_result.get("country", None),
+                        "dynamic_url": dynamic_url  # Track which URL was validated
+                    }
+
+                    print(f"  [STREAM-OPT] ✅ SINGLE LLM call SUCCESS!")
+                    print(f"  [STREAM-OPT]    Intent: {intent} (confidence: {intent_result['confidence']:.2f})")
+                    print(f"  [STREAM-OPT]    Content related: {combined_validation_result['content_related']}")
+                    print(f"  [STREAM-OPT]    Content score: {combined_validation_result['content_score']:.2f}")
+
+                except Exception as e:
+                    # AUTOMATIC FALLBACK to original method
+                    print(f"  [STREAM-OPT] ❌ Combined call failed: {e}")
+                    print(f"  [STREAM-OPT] 🔄 Falling back to original 2-call method")
+                    intent_result = await self._detect_intent_and_entities(message)
+                    intent = intent_result.get("intent", "unknown")
+                    params = intent_result.get("params", {})
+                    intent_url = intent_result.get("url", "")
+                    combined_validation_result = None  # Will do validation later
+            else:
+                # Feature flag OFF or no cache: Use original method
+                if Config.USE_COMBINED_LLM_CALL:
+                    print(f"  [STREAM-OPT] No cached content early, using original intent detection")
+                intent_result = await self._detect_intent_and_entities(message)
+                intent = intent_result.get("intent", "unknown")
+                params = intent_result.get("params", {})
+                intent_url = intent_result.get("url", "")
+                combined_validation_result = None  # Will do validation later if needed
 
             # ============================================================================
             # PARALLEL VALIDATION: Start validation in background for streaming
@@ -3844,7 +4091,18 @@ IMPORTANT
             cached_data = await self.dynamic_content_manager.get_embeddings_from_redis(fetch_url, session_id)
             if cached_data:
                 _, _, full_content = cached_data
-                related, score, _ = await self.is_query_related_via_llm(message, fetch_url, full_content)
+
+                # OPTIMIZATION: Check if we already validated this content in combined call
+                if combined_validation_result and combined_validation_result.get("dynamic_url") == fetch_url:
+                    # Reuse validation result from earlier combined call (NO additional LLM call!)
+                    related = combined_validation_result["content_related"]
+                    score = combined_validation_result["content_score"]
+                    print(f"  [STREAM-OPT] ♻️ Reusing validation from combined call: related={related}, score={score:.2f}")
+                else:
+                    # Need to validate content (original method, no optimization applied)
+                    related, score, _ = await self.is_query_related_via_llm(message, fetch_url, full_content)
+                    print(f"  [STREAM] Content validation: related={related}, score={score:.2f}")
+
                 if related and score >= 0.5:
                     dynamic_content = full_content
                     # Store the cached URL as source (only if valid)

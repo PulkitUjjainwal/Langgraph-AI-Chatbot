@@ -1014,7 +1014,14 @@ export default function ChatWidget() {
     trackActionClick(sessionId, actionType, { originalQuery });
 
     if (actionType === "schedule_demo") {
-      openScheduleDemo();
+      // Close the chatbot first
+      console.log('[handleActionClick] Closing chatbot for schedule_demo');
+      setOpen(false);
+
+      // Then open schedule demo after a small delay
+      setTimeout(() => {
+        openScheduleDemo();
+      }, 100);
     } else if (actionType === "whatsapp") {
       // Open the options menu and show the WhatsApp submenu so users can choose QR or link
       setShowOptionsMenu(true);
@@ -2512,6 +2519,7 @@ export default function ChatWidget() {
             onDelayedFeedbackSubmit={handleDelayedFeedbackSubmit}
             sessionId={sessionId}
             pageUrl={currentUrl}
+            onClose={() => setOpen(false)}
           />
 
           {/* Data Collection UI (if needed) */}
