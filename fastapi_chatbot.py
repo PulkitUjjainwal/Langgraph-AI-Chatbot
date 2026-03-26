@@ -393,7 +393,6 @@ def detect_contact_info_request(message: str) -> bool:
         'access contact',
         'have contact',
     ]
-
     # If asking about company contacts, DON'T intercept - let LLM handle
     if any(keyword in message_lower for keyword in company_contact_keywords):
         return False
@@ -1832,180 +1831,180 @@ class ChatbotManager:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.post(api_url, json={}, headers=headers)
 
-                print(f"  [URL FIX] API response status: {resp.status_code}")
+            print(f"  [URL FIX] API response status: {resp.status_code}")
 
-                if resp.status_code != 200:
-                    print(f"  [URL FIX] ❌ API returned {resp.status_code}, keeping URL as-is")
-                    return url
-
-                data = resp.json()
-                print(f"  [URL FIX] ✅ API returned data")
-                print(f"  [URL FIX] Response type: {type(data)}")
-                print(f"  [URL FIX] Response keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
-
-                # Handle different response formats
-                # API returns: {"success": true, "message": [{country1}, {country2}, ...]}
-                if isinstance(data, list):
-                    countries_list = data
-                elif isinstance(data, dict):
-                    # Try different possible keys in order of likelihood
-                    if "message" in data and isinstance(data["message"], list):
-                        # CORRECT format: {"success": true, "message": [...]}
-                        countries_list = data["message"]
-                        print(f"  [URL FIX] Found countries in 'message' key")
-                    elif "data" in data and isinstance(data["data"], list):
-                        countries_list = data["data"]
-                        print(f"  [URL FIX] Found countries in 'data' key")
-                    elif "countries" in data and isinstance(data["countries"], list):
-                        countries_list = data["countries"]
-                        print(f"  [URL FIX] Found countries in 'countries' key")
-                    elif "result" in data and isinstance(data["result"], list):
-                        countries_list = data["result"]
-                        print(f"  [URL FIX] Found countries in 'result' key")
-                    else:
-                        # Data might be the dict itself containing country data
-                        print(f"  [URL FIX] Data is dict but no list found in any key")
-                        print(f"  [URL FIX] Available keys: {list(data.keys())}")
-                        print(f"  [URL FIX] ❌ Invalid API response format, keeping URL as-is")
-                        return url
-                else:
-                    print(f"  [URL FIX] ❌ Invalid API response type: {type(data)}, keeping URL as-is")
-                    return url
-
-                if not isinstance(countries_list, list):
-                    print(f"  [URL FIX] ❌ countries_list is not a list: {type(countries_list)}, keeping URL as-is")
-                    return url
-
-                print(f"  [URL FIX] ✅ Got {len(countries_list)} countries from API")
-
-                # Find matching country
-                country_lower = country.lower().strip().replace('-', ' ')
-                available_types = []
-
-                for c in countries_list:
-                    if not isinstance(c, dict):
-                        continue
-
-                    c_name = (c.get("country_name") or "").strip().lower()
-                    c_code = (c.get("country_code") or "").strip().upper()
-
-                    # Match by name or code
-                    if (c_name == country_lower or
-                        c_name.replace(" ", "-") == country.lower() or
-                        (len(country) == 2 and c_code == country.upper())):
-                        available_types = c.get("data_type", [])
-                        print(f"  [URL FIX] Found country '{c_name}' (code: {c_code}) with types: {available_types}")
-                        break
-
-                if not available_types:
-                    print(f"  [URL FIX] No data types found for '{country}', keeping URL as-is")
-                    return url
-
-                # Determine the correct type parameter
-                is_import = current_direction == 'import'
-                use_mirror = False
-
-                print(f"  [URL FIX] Direction: {current_direction}, is_import={is_import}")
-                print(f"  [URL FIX] Available types for '{country}': {available_types}")
-
-                if is_import:
-                    # Check import data availability
-                    has_detailed = "detailed_import" in available_types
-                    has_mirror = "mirror_import" in available_types
-
-                    print(f"  [URL FIX] has_detailed_import={has_detailed}, has_mirror_import={has_mirror}")
-
-                    if has_detailed:
-                        use_mirror = False
-                        print(f"  [URL FIX] ✅ '{country}' has detailed_import - will use type=import")
-                    elif has_mirror:
-                        # Mirror-only country - redirect to dashboard/support
-                        use_mirror = True
-                        print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_import (no detailed)")
-                        print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will trigger support options")
-
-                        # Return special marker to trigger support UI
-                        country_name_formatted = country.replace('-', ' ').title()
-                        return f"MIRROR_ONLY:{country_name_formatted}"
-                    else:
-                        print(f"  [URL FIX] ❌ '{country}' has no import data, keeping URL as-is")
-                        return url
-                else:
-                    # Check export data availability
-                    has_detailed = "detailed_export" in available_types
-                    has_mirror = "mirror_export" in available_types
-
-                    print(f"  [URL FIX] has_detailed_export={has_detailed}, has_mirror_export={has_mirror}")
-
-                    if has_detailed:
-                        use_mirror = False
-                        print(f"  [URL FIX] ✅ '{country}' has detailed_export - will use type=export")
-                    elif has_mirror:
-                        # Mirror-only country - redirect to dashboard/support
-                        use_mirror = True
-                        print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_export (no detailed)")
-                        print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will trigger support options")
-
-                        # Return special marker to trigger support UI
-                        country_name_formatted = country.replace('-', ' ').title()
-                        return f"MIRROR_ONLY:{country_name_formatted}"
-                    else:
-                        print(f"  [URL FIX] ❌ '{country}' has no export data, keeping URL as-is")
-                        return url
-
-                print(f"  [URL FIX] DECISION: use_mirror={use_mirror}")
-
-                # Update URL based on intent and availability
-                if intent == "search_trade_data":
-                    # Update query parameter: type=import -> type=mirror_import
-                    print(f"  [URL FIX] ✅ Intent is search_trade_data, proceeding with URL update")
-                    parsed_url = urlparse(url)
-                    query_params = parse_qs(parsed_url.query)
-
-                    old_type = query_params.get('type', [''])[0]
-                    print(f"  [URL FIX] Current URL type parameter: '{old_type}'")
-
-                    if use_mirror:
-                        new_type = f"mirror_{current_direction}"
-                        print(f"  [URL FIX] Country needs MIRROR data, new_type='{new_type}'")
-                    else:
-                        new_type = current_direction
-                        print(f"  [URL FIX] Country has DETAILED data, new_type='{new_type}'")
-
-                    if old_type != new_type:
-                        print(f"  [URL FIX] ⚡ UPDATING URL TYPE: '{old_type}' → '{new_type}'")
-                        # Flatten query params for proper encoding
-                        flat_params = {k: v[0] if isinstance(v, list) and len(v) == 1 else v
-                                       for k, v in query_params.items()}
-                        flat_params['type'] = new_type
-
-                        # Use quote_via=quote to encode spaces as %20 (not +)
-                        from urllib.parse import quote
-                        new_query = urlencode(flat_params, quote_via=quote)
-
-                        url = urlunparse((
-                            parsed_url.scheme,
-                            parsed_url.netloc,
-                            parsed_url.path,
-                            parsed_url.params,
-                            new_query,
-                            parsed_url.fragment
-                        ))
-                        print(f"  [URL FIX] ✅ URL UPDATED SUCCESSFULLY!")
-                        print(f"  [URL FIX] NEW URL: {url}")
-                    else:
-                        print(f"  [URL FIX] ℹ Type already correct: '{new_type}' (no change needed)")
-
-                # Note: For country_data, country_to_country, and hs_code intents,
-                # the URLs don't have a "type" query parameter in the URL itself.
-                # The type is embedded in the path (/imports vs /exports) or determined server-side.
-                # The API client (unified_api_client.py) handles the detailed vs mirror
-                # selection when making the actual API calls.
-
-                print(f"\n{'='*70}")
-                print(f"[URL FIX] ✅ FUNCTION COMPLETE - Returning URL: {url}")
-                print(f"{'='*70}\n")
+            if resp.status_code != 200:
+                print(f"  [URL FIX] ❌ API returned {resp.status_code}, keeping URL as-is")
                 return url
+
+            data = resp.json()
+            print(f"  [URL FIX] ✅ API returned data")
+            print(f"  [URL FIX] Response type: {type(data)}")
+            print(f"  [URL FIX] Response keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
+
+            # Handle different response formats
+            # API returns: {"success": true, "message": [{country1}, {country2}, ...]}
+            if isinstance(data, list):
+                countries_list = data
+            elif isinstance(data, dict):
+                # Try different possible keys in order of likelihood
+                if "message" in data and isinstance(data["message"], list):
+                    # CORRECT format: {"success": true, "message": [...]}
+                    countries_list = data["message"]
+                    print(f"  [URL FIX] Found countries in 'message' key")
+                elif "data" in data and isinstance(data["data"], list):
+                    countries_list = data["data"]
+                    print(f"  [URL FIX] Found countries in 'data' key")
+                elif "countries" in data and isinstance(data["countries"], list):
+                    countries_list = data["countries"]
+                    print(f"  [URL FIX] Found countries in 'countries' key")
+                elif "result" in data and isinstance(data["result"], list):
+                    countries_list = data["result"]
+                    print(f"  [URL FIX] Found countries in 'result' key")
+                else:
+                    # Data might be the dict itself containing country data
+                    print(f"  [URL FIX] Data is dict but no list found in any key")
+                    print(f"  [URL FIX] Available keys: {list(data.keys())}")
+                    print(f"  [URL FIX] ❌ Invalid API response format, keeping URL as-is")
+                    return url
+            else:
+                print(f"  [URL FIX] ❌ Invalid API response type: {type(data)}, keeping URL as-is")
+                return url
+
+            if not isinstance(countries_list, list):
+                print(f"  [URL FIX] ❌ countries_list is not a list: {type(countries_list)}, keeping URL as-is")
+                return url
+
+            print(f"  [URL FIX] ✅ Got {len(countries_list)} countries from API")
+
+            # Find matching country
+            country_lower = country.lower().strip().replace('-', ' ')
+            available_types = []
+
+            for c in countries_list:
+                if not isinstance(c, dict):
+                    continue
+
+                c_name = (c.get("country_name") or "").strip().lower()
+                c_code = (c.get("country_code") or "").strip().upper()
+
+                # Match by name or code
+                if (c_name == country_lower or
+                    c_name.replace(" ", "-") == country.lower() or
+                    (len(country) == 2 and c_code == country.upper())):
+                    available_types = c.get("data_type", [])
+                    print(f"  [URL FIX] Found country '{c_name}' (code: {c_code}) with types: {available_types}")
+                    break
+
+            if not available_types:
+                print(f"  [URL FIX] No data types found for '{country}', keeping URL as-is")
+                return url
+
+            # Determine the correct type parameter
+            is_import = current_direction == 'import'
+            use_mirror = False
+
+            print(f"  [URL FIX] Direction: {current_direction}, is_import={is_import}")
+            print(f"  [URL FIX] Available types for '{country}': {available_types}")
+
+            if is_import:
+                # Check import data availability
+                has_detailed = "detailed_import" in available_types
+                has_mirror = "mirror_import" in available_types
+
+                print(f"  [URL FIX] has_detailed_import={has_detailed}, has_mirror_import={has_mirror}")
+
+                if has_detailed:
+                    use_mirror = False
+                    print(f"  [URL FIX] ✅ '{country}' has detailed_import - will use type=import")
+                elif has_mirror:
+                    # Mirror-only country - redirect to dashboard/support
+                    use_mirror = True
+                    print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_import (no detailed)")
+                    print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will trigger support options")
+
+                    # Return special marker to trigger support UI
+                    country_name_formatted = country.replace('-', ' ').title()
+                    return f"MIRROR_ONLY:{country_name_formatted}"
+                else:
+                    print(f"  [URL FIX] ❌ '{country}' has no import data, keeping URL as-is")
+                    return url
+            else:
+                # Check export data availability
+                has_detailed = "detailed_export" in available_types
+                has_mirror = "mirror_export" in available_types
+
+                print(f"  [URL FIX] has_detailed_export={has_detailed}, has_mirror_export={has_mirror}")
+
+                if has_detailed:
+                    use_mirror = False
+                    print(f"  [URL FIX] ✅ '{country}' has detailed_export - will use type=export")
+                elif has_mirror:
+                    # Mirror-only country - redirect to dashboard/support
+                    use_mirror = True
+                    print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_export (no detailed)")
+                    print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will trigger support options")
+
+                    # Return special marker to trigger support UI
+                    country_name_formatted = country.replace('-', ' ').title()
+                    return f"MIRROR_ONLY:{country_name_formatted}"
+                else:
+                    print(f"  [URL FIX] ❌ '{country}' has no export data, keeping URL as-is")
+                    return url
+
+            print(f"  [URL FIX] DECISION: use_mirror={use_mirror}")
+
+            # Update URL based on intent and availability
+            if intent == "search_trade_data":
+                # Update query parameter: type=import -> type=mirror_import
+                print(f"  [URL FIX] ✅ Intent is search_trade_data, proceeding with URL update")
+                parsed_url = urlparse(url)
+                query_params = parse_qs(parsed_url.query)
+
+                old_type = query_params.get('type', [''])[0]
+                print(f"  [URL FIX] Current URL type parameter: '{old_type}'")
+
+                if use_mirror:
+                    new_type = f"mirror_{current_direction}"
+                    print(f"  [URL FIX] Country needs MIRROR data, new_type='{new_type}'")
+                else:
+                    new_type = current_direction
+                    print(f"  [URL FIX] Country has DETAILED data, new_type='{new_type}'")
+
+                if old_type != new_type:
+                    print(f"  [URL FIX] ⚡ UPDATING URL TYPE: '{old_type}' → '{new_type}'")
+                    # Flatten query params for proper encoding
+                    flat_params = {k: v[0] if isinstance(v, list) and len(v) == 1 else v
+                                   for k, v in query_params.items()}
+                    flat_params['type'] = new_type
+
+                    # Use quote_via=quote to encode spaces as %20 (not +)
+                    from urllib.parse import quote
+                    new_query = urlencode(flat_params, quote_via=quote)
+
+                    url = urlunparse((
+                        parsed_url.scheme,
+                        parsed_url.netloc,
+                        parsed_url.path,
+                        parsed_url.params,
+                        new_query,
+                        parsed_url.fragment
+                    ))
+                    print(f"  [URL FIX] ✅ URL UPDATED SUCCESSFULLY!")
+                    print(f"  [URL FIX] NEW URL: {url}")
+                else:
+                    print(f"  [URL FIX] ℹ Type already correct: '{new_type}' (no change needed)")
+
+            # Note: For country_data, country_to_country, and hs_code intents,
+            # the URLs don't have a "type" query parameter in the URL itself.
+            # The type is embedded in the path (/imports vs /exports) or determined server-side.
+            # The API client (unified_api_client.py) handles the detailed vs mirror
+            # selection when making the actual API calls.
+
+            print(f"\n{'='*70}")
+            print(f"[URL FIX] ✅ FUNCTION COMPLETE - Returning URL: {url}")
+            print(f"{'='*70}\n")
+            return url
 
         except Exception as e:
             print(f"\n{'='*70}")
@@ -2544,18 +2543,38 @@ CRITICAL PRE-CHECK: Before using search_trade_data, verify it's a DATA request, 
 Base URL:
 https://www.marketinsidedata.com/en/search-data/
 
+🚨 CRITICAL BUSINESS LOGIC - SUPPLIER/BUYER DIRECTION MAPPING:
+
+Suppliers = EXPORTERS (they SUPPLY/EXPORT products):
+- "suppliers" → entity_type: "suppliers", direction: "export"
+- "suppliers in Turkey" → Shows companies that EXPORT from Turkey
+- "scrap metal suppliers" → Shows companies that EXPORT scrap metal
+
+Buyers = IMPORTERS (they BUY/IMPORT products):
+- "buyers" → entity_type: "buyers", direction: "import"
+- "buyers in USA" → Shows companies that IMPORT into USA
+- "steel buyers" → Shows companies that IMPORT steel
+
+Importers = IMPORTERS (explicit):
+- "importers" → entity_type: "importer", direction: "import"
+
+Exporters = EXPORTERS (explicit):
+- "exporters" → entity_type: "exporter", direction: "export"
+
 Entity → entity_type param mapping:
-- "importers", "top importers" → entity_type: "importer"
-- "exporters", "top exporters" → entity_type: "exporter"
-- "suppliers" → entity_type: "suppliers"
-- "buyers" → entity_type: "buyers"
+- "importers", "top importers" → entity_type: "importer", direction: "import"
+- "exporters", "top exporters" → entity_type: "exporter", direction: "export"
+- "suppliers" → entity_type: "suppliers", direction: "export" (SUPPLIERS EXPORT)
+- "buyers" → entity_type: "buyers", direction: "import" (BUYERS IMPORT)
 - "trade data", general → entity_type: "trade"
 
 IMPORTANT: Extract entity_type when user mentions importers/exporters/suppliers/buyers
 
-Direction mapping:
+Direction mapping (default logic):
 - import → "import"
 - export → "export"
+- suppliers → "export" (OVERRIDE: suppliers always export)
+- buyers → "import" (OVERRIDE: buyers always import)
 
 URL rules:
 - country is REQUIRED (ask if missing)
@@ -2568,7 +2587,8 @@ CRITICAL EXAMPLES - Use search_trade_data when PRODUCT is mentioned:
 "top importers of coal" → params: {product: "coal", entity_type: "importer", direction: "import"}
 "top coal importers in India" → params: {country: "india", product: "coal", entity_type: "importer", direction: "import"}
 "steel exporters" → params: {product: "steel", entity_type: "exporter", direction: "export"}
-"oil suppliers in China" → params: {country: "china", product: "oil", entity_type: "suppliers", direction: "import"}
+"oil suppliers in China" → params: {country: "china", product: "oil", entity_type: "suppliers", direction: "export"}
+   CRITICAL: Suppliers = EXPORTERS (they supply/export products)
 
 INTELLIGENT COUNTRY NORMALIZATION (Handle ambiguous country names):
 "imports from america" → params: {country: "united states", direction: "import"}, intent: search_country_data
@@ -2589,15 +2609,21 @@ ENTITY-FIRST QUERY PATTERNS (Entity mentioned BEFORE country):
    URL: https://www.marketinsidedata.com/en/search-data/exporter?type=export&country=argentina
 
 "importers china" → params: {country: "china", entity_type: "importer", direction: "import"}
-"suppliers germany" → params: {country: "germany", entity_type: "suppliers", direction: "import"}
-"buyers usa" → params: {country: "united states", entity_type: "buyers", direction: "export"}
+"suppliers germany" → params: {country: "germany", entity_type: "suppliers", direction: "export"}
+   CRITICAL: Suppliers = EXPORTERS (direction should be "export")
+"buyers usa" → params: {country: "united states", entity_type: "buyers", direction: "import"}
+   CRITICAL: Buyers = IMPORTERS (direction should be "import")
    REASON: Handle "country after entity" pattern, normalize "usa" → "united states"
 
 IMPORTANT: Extract country when mentioned with "from", "in", "to", or "of":
-"I need supplies from Taiwan" → params: {country: "taiwan", entity_type: "suppliers", direction: "import"} (NO product yet - will ask)
-"suppliers from India" → params: {country: "india", entity_type: "suppliers", direction: "import"} (NO product yet - will ask)
+"I need supplies from Taiwan" → params: {country: "taiwan", entity_type: "suppliers", direction: "export"} (NO product yet - will ask)
+   CRITICAL: Suppliers FROM a country = EXPORTERS from that country
+"suppliers from India" → params: {country: "india", entity_type: "suppliers", direction: "export"} (NO product yet - will ask)
+   CRITICAL: Suppliers = EXPORTERS (they export/supply products)
 "exporters in China" → params: {country: "china", entity_type: "exporter", direction: "export"} (NO product yet - will ask)
 "importers of steel" → params: {product: "steel", entity_type: "importer", direction: "import"} (NO country yet - will ask)
+"buyers in Turkey" → params: {country: "turkey", entity_type: "buyers", direction: "import"} (NO product yet - will ask)
+   CRITICAL: Buyers = IMPORTERS (they import/buy products)
 
 Use search_country_data when NO product (general overview):
 "top importers in Indonesia" → intent: search_country_data (no product!)
@@ -2618,13 +2644,13 @@ Exporter:
 https://www.marketinsidedata.com/en/search-data/exporter?type=export&country={country}&product={product}
 https://www.marketinsidedata.com/en/search-data/exporter?type=export&country={country}&hs_code={hs_code}
 
-Supplier:
-https://www.marketinsidedata.com/en/search-data/suppliers?type=import&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/suppliers?type=import&country={country}&hs_code={hs_code}
+Supplier (CRITICAL: Suppliers = EXPORTERS):
+https://www.marketinsidedata.com/en/search-data/suppliers?type=export&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/suppliers?type=export&country={country}&hs_code={hs_code}
 
-Buyer:
-https://www.marketinsidedata.com/en/search-data/buyers?type=export&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/buyers?type=export&country={country}&hs_code={hs_code}
+Buyer (CRITICAL: Buyers = IMPORTERS):
+https://www.marketinsidedata.com/en/search-data/buyers?type=import&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/buyers?type=import&country={country}&hs_code={hs_code}
 
 ────────────────────────
 INTENT: search_country_data
@@ -3067,6 +3093,9 @@ OUTPUT JSON FORMAT (intent only, no content):
                 result["content_score"] = 0.0
             if "country" not in result:
                 result["country"] = None
+
+            # NOTE: URL fixing is done later in the flow (line 3958, 4264)
+            # to avoid duplicate API calls and hangs
 
             return result
 
@@ -3557,8 +3586,9 @@ OUTPUT JSON FORMAT (intent only, no content):
             # If flag is ON and dynamic_url has cached content, do BOTH in one call
             # ============================================================================
             cached_content_early = None
-            combined_validation_result = None  # Store validation result for later reuse
+            com2bined_validation_result = None  # Store validation result for later reuse
             print(f"Config.USE_COMBINED_LLM_CALL: {Config.USE_COMBINED_LLM_CALL}")
+            # print("f")
 
             # Step 1: Check cache early if optimization enabled
             if Config.USE_COMBINED_LLM_CALL and dynamic_url and "marketinsidedata.com" in dynamic_url:
@@ -3573,7 +3603,6 @@ OUTPUT JSON FORMAT (intent only, no content):
                     cached_content_early = None
 
             # Step 2: Do SINGLE combined call if cache exists, otherwise original
-            print("Config.USE_COMBINED_LLM_CALL")
             if Config.USE_COMBINED_LLM_CALL and cached_content_early:
                 try:
                     print(f"  [STREAM-OPT] ✨ Using SINGLE combined LLM call (intent + validation)")
@@ -7555,9 +7584,9 @@ async def init_url_validator():
             password=Config.REDIS_PASSWORD if Config.REDIS_PASSWORD else None
         )
         url_validator = get_url_validator(redis_manager)
-        print("[URL Validator] ✓ Initialized with Redis caching")
+        print("[URL Validator] OK - Initialized with Redis caching")
     except Exception as e:
-        print(f"[URL Validator] ⚠️ Failed to initialize: {e}")
+        print(f"[URL Validator] WARNING - Failed to initialize: {e}")
         print(f"[URL Validator] URLs will not be validated (all URLs will be shown)")
 
 

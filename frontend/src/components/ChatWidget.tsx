@@ -1021,7 +1021,7 @@ export default function ChatWidget() {
       // Then open schedule demo after a small delay
       setTimeout(() => {
         openScheduleDemo();
-      }, 100);
+      }, 75);
     } else if (actionType === "whatsapp") {
       // Open the options menu and show the WhatsApp submenu so users can choose QR or link
       setShowOptionsMenu(true);
