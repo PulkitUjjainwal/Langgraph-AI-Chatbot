@@ -77,6 +77,9 @@ class URLValidator:
         """
         Validate URL by making HTTP request (may take 1-5 seconds)
 
+        OPTIMIZATION: Skip validation for our own generated URLs (marketinsidedata.com)
+        to save ~0.5-1 second per request
+
         Args:
             url: URL to validate
 
@@ -85,6 +88,14 @@ class URLValidator:
         """
         if not url:
             return False
+
+        # OPTIMIZATION: Trust our own generated URLs (skip HEAD request)
+        # Saves ~0.5-1 second per request
+        # Only validate external/user-provided URLs
+        if "marketinsidedata.com" in url.lower():
+            print(f"[URLValidator] ✅ Trusting internal URL (skip HEAD): {url[:80]}...")
+            await self._cache_result(url, True)
+            return True
 
         try:
             response = await self.http_client.head(url, timeout=5.0)

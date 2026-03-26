@@ -915,9 +915,33 @@ class SlotManager:
                     print(f"  [SLOTS] Cannot generate URL: invalid country '{country}' for search_trade_data")
                     return None
 
-            # ALWAYS use "trade" endpoint for search_trade_data intent
-            # The entity_type (buyers/suppliers/importers/exporters) is contextual info only
-            endpoint = "trade"
+            # 🚨 CRITICAL BUSINESS LOGIC: Map entity_type to correct endpoint
+            # REMEMBER: Suppliers = EXPORTERS (they export/supply products)
+            #           Buyers = IMPORTERS (they buy/import products)
+            #
+            # URL Endpoints Available:
+            # - /suppliers?type=export = domestic suppliers (who export)
+            # - /buyers?type=import = domestic buyers (who import)
+            # - /exporter?type=export = domestic exporters
+            # - /importer?type=import = domestic importers
+            # - /buyers?type=export = foreign buyers (of our exports)
+            # - /suppliers?type=import = foreign suppliers (to our imports)
+
+            if entity_type == "suppliers":
+                endpoint = "suppliers"  # Use suppliers endpoint
+                direction = "export"    # Suppliers export
+            elif entity_type == "buyers":
+                endpoint = "buyers"     # Use buyers endpoint
+                direction = "import"    # Buyers import
+            elif entity_type == "importers":
+                endpoint = "importer"   # Use importer endpoint
+                direction = "import"
+            elif entity_type == "exporters":
+                endpoint = "exporter"   # Use exporter endpoint
+                direction = "export"
+            else:
+                # Default: use generic trade endpoint
+                endpoint = "trade"
 
             # Format country with + for spaces (URL encoding) instead of hyphens
             country_formatted = country.replace("-", "+")

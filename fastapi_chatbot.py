@@ -1661,6 +1661,11 @@ Remember: Brevity is key. Every word must add value. Shorter responses are ALWAY
 class ChatbotManager:
     """Manages multiple chatbot sessions with Redis persistence"""
 
+    # Class-level cache for country availability (shared across all instances)
+    _country_cache = None
+    _country_cache_time = None
+    _country_cache_ttl = 3600  # Cache for 1 hour (country availability rarely changes)
+
     def __init__(self, kb_retriever: KnowledgeBaseRetriever, redis_manager: RedisMemoryManager, hostility_detector=None):
         self.kb_retriever = kb_retriever
         self.redis = redis_manager
@@ -1817,27 +1822,41 @@ class ChatbotManager:
 
             # Get available data types for this country
             print(f"  [URL FIX] ✅ Extracted country='{country}', direction='{current_direction}'")
-            print(f"  [URL FIX] 🌐 Checking availability via API...")
 
-            import httpx
-            api_url = "https://api-dp.marketinsidedata.com/api/v1/users/detailed-mirror-countries-list"
-            headers = {
-                "Content-Type": "application/json",
-                "Origin": "https://www.marketinsidedata.com",
-                "accept": "application/json",
-                "Authorization": f"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMwNzk0OWNiLWZmODItNGVkOS1hNzZhLWMxOGRmOThiZDZkYyIsImlhdCI6MTcwNDU0OTU4MH0.sMR6ZZ52KNkiXG8V-Y6JxjkscCOOEDY7DPEFc5nMU88",
-            }
+            # Check cache first (avoids duplicate API calls)
+            import time
+            current_time = time.time()
+            if (ChatbotManager._country_cache is not None and
+                ChatbotManager._country_cache_time is not None and
+                current_time - ChatbotManager._country_cache_time < ChatbotManager._country_cache_ttl):
+                print(f"  [URL FIX] ✅ Using cached country data (age: {int(current_time - ChatbotManager._country_cache_time)}s)")
+                data = ChatbotManager._country_cache
+            else:
+                print(f"  [URL FIX] 🌐 Fetching country availability from API...")
+                import httpx
+                api_url = "https://api-dp.marketinsidedata.com/api/v1/users/detailed-mirror-countries-list"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Origin": "https://www.marketinsidedata.com",
+                    "accept": "application/json",
+                    "Authorization": f"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMwNzk0OWNiLWZmODItNGVkOS1hNzZhLWMxOGRmOThiZDZkYyIsImlhdCI6MTcwNDU0OTU4MH0.sMR6ZZ52KNkiXG8V-Y6JxjkscCOOEDY7DPEFc5nMU88",
+                }
 
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.post(api_url, json={}, headers=headers)
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.post(api_url, json={}, headers=headers)
 
-            print(f"  [URL FIX] API response status: {resp.status_code}")
+                print(f"  [URL FIX] API response status: {resp.status_code}")
 
-            if resp.status_code != 200:
-                print(f"  [URL FIX] ❌ API returned {resp.status_code}, keeping URL as-is")
-                return url
+                if resp.status_code != 200:
+                    print(f"  [URL FIX] ❌ API returned {resp.status_code}, keeping URL as-is")
+                    return url
 
-            data = resp.json()
+                data = resp.json()
+
+                # Cache the response
+                ChatbotManager._country_cache = data
+                ChatbotManager._country_cache_time = current_time
+                print(f"  [URL FIX] ✅ Cached country data for {ChatbotManager._country_cache_ttl}s")
             print(f"  [URL FIX] ✅ API returned data")
             print(f"  [URL FIX] Response type: {type(data)}")
             print(f"  [URL FIX] Response keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
