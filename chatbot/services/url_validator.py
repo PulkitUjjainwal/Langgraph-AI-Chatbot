@@ -115,7 +115,10 @@ class URLValidator:
         if not api_data:
             return False
 
-        # Check for explicit zero indicators
+        # CRITICAL: Only check Total Shipments and Total Value, not N/A company names
+        # Company names can be N/A but data still exists (shipment records, values, etc.)
+
+        # Check for explicit zero indicators in totals
         zero_indicators = [
             "Total Shipments: 0",
             "Total Value: $0",
@@ -129,13 +132,8 @@ class URLValidator:
             if indicator in api_data:
                 return True
 
-        # Check for empty lists (all N/A)
-        if "Top 10 Shipment Records:" in api_data:
-            # Extract the records section
-            records_section = api_data.split("Top 10 Shipment Records:")[1].split("===")[0]
-            # Check if it's all N/A
-            if records_section.count("N/A") >= 8:  # Most records are N/A
-                return True
+        # DO NOT check for N/A in records - company names can be N/A but data exists
+        # The shipment records, values, and trade data are what matter, not company names
 
         return False
 
