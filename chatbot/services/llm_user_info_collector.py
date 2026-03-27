@@ -86,14 +86,15 @@ class LLMUserInfoCollector:
         conversation_history: List[Dict[str, str]]
     ) -> Optional[str]:
         """
-        SMART USER INFO COLLECTION - Ask when appropriate, extract in background.
+        INTELLIGENT USER INFO COLLECTION - LLM-driven, context-aware, natural.
 
-        Strategy:
-        1. Extract info from user messages in background (non-blocking)
-        2. After message 2+, start asking for missing critical fields
-        3. Use template prompts (instant) to avoid LLM call delays
+        Next-Level Strategy:
+        1. LLM analyzes conversation history to detect resistance patterns
+        2. Intelligently decides WHICH field to ask for (or skip if user declined 4+ times)
+        3. Natural, human-like adaptation to user preferences
+        4. Background extraction (non-blocking)
 
-        Performance: ~1-2ms (Redis check + template generation)
+        Performance: ~1-2ms for instant path, ~2-3s for LLM decision (first time, then cached)
         """
         print(f"[COLLECTOR_INTERNAL] analyze_and_collect_async: msg_count={message_count}")
 
@@ -123,12 +124,9 @@ class LLMUserInfoCollector:
             )
         )
 
-        # SMART PROMPTING: Ask for info based on priority and engagement
+        # INTELLIGENT PROMPTING: INSTANT with background intelligence
         # Priority order for REAL-TIME collection: name > email > phone
         # NOTE: Requirements are collected AFTER session ends (not asked during conversation)
-        priority_order = ['name', 'email', 'phone']
-
-        # Remove requirements from missing list (collected later)
         missing_realtime = [f for f in missing if f != 'requirements']
 
         # Ask starting from message 2, then every 3 messages (2, 5, 8, 11...)
@@ -136,14 +134,63 @@ class LLMUserInfoCollector:
         should_ask = message_count >= 2 and (message_count - 2) % 3 == 0
 
         if should_ask and missing_realtime:
-            # Ask for highest priority missing field
-            # Use template prompts (reliable and fast) instead of LLM generation
-            for field in priority_order:
-                if field in missing_realtime:
-                    # Use simple template prompt (fast and reliable)
-                    prompt = self._generate_template_prompt(field, user_message)
-                    print(f"[LLM_COLLECTOR] Asking for '{field}': {prompt[:60]}...")
-                    return f"\n\n{prompt}"
+            # INSTANT DECISION: Check cache first (0ms)
+            cache_key = f"field_decision:{session_id}"
+            cached_field = self._detection_cache.get(cache_key)
+
+            if cached_field and cached_field in missing_realtime:
+                # Use cached decision (instant)
+                field_to_ask = cached_field
+                print(f"[LLM_COLLECTOR] ⚡ Using cached field decision: '{field_to_ask}'")
+            else:
+                # No cache: Use priority order (instant fallback)
+                priority_order = ['name', 'email', 'phone']
+                field_to_ask = None
+                for field in priority_order:
+                    if field in missing_realtime:
+                        field_to_ask = field
+                        break
+
+                if not field_to_ask:
+                    return None
+
+                print(f"[LLM_COLLECTOR] ⚡ Using priority order (instant): '{field_to_ask}'")
+
+                # Run intelligent analysis in BACKGROUND for next time (non-blocking)
+                asyncio.create_task(
+                    self._intelligent_field_selection_background(
+                        session_id=session_id,
+                        missing_fields=missing_realtime,
+                        conversation_history=conversation_history,
+                        user_message=user_message
+                    )
+                )
+
+            # INSTANT PROMPT: Check cache first
+            prompt_cache_key = f"prompt:{field_to_ask}:{session_id}"
+            cached_prompt = self._prompt_cache.get(prompt_cache_key)
+
+            if cached_prompt:
+                # Use cached prompt (instant)
+                print(f"[LLM_COLLECTOR] ⚡ Using cached intelligent prompt: {cached_prompt[:60]}...")
+                return f"\n\n{cached_prompt}"
+            else:
+                # No cache: Use template (instant)
+                prompt = self._generate_template_prompt(field_to_ask, user_message)
+                print(f"[LLM_COLLECTOR] ⚡ Using template prompt (instant): {prompt[:60]}...")
+
+                # Generate intelligent prompt in BACKGROUND for next time (non-blocking)
+                asyncio.create_task(
+                    self._generate_intelligent_prompt_background(
+                        session_id=session_id,
+                        field=field_to_ask,
+                        user_message=user_message,
+                        bot_response=bot_response,
+                        conversation_history=conversation_history
+                    )
+                )
+
+                return f"\n\n{prompt}"
 
         return None
 
@@ -727,6 +774,335 @@ Your response:"""
                 print(f"[LLM_COLLECTOR] * Cached improved LLM prompt for '{field}': {llm_prompt[:60]}...")
         except Exception as e:
             print(f"[LLM_COLLECTOR] Background LLM prompt generation failed: {e}")
+
+    async def _intelligent_field_selection_background(
+        self,
+        session_id: str,
+        missing_fields: List[str],
+        conversation_history: List[Dict[str, str]],
+        user_message: str
+    ):
+        """
+        BACKGROUND TASK: Run intelligent field selection and cache for next time.
+        This doesn't block the response - results are cached for future use.
+        """
+        try:
+            field = await self._intelligent_field_selection(
+                session_id=session_id,
+                missing_fields=missing_fields,
+                conversation_history=conversation_history,
+                user_message=user_message
+            )
+
+            if field:
+                # Cache for next time (instant decision)
+                cache_key = f"field_decision:{session_id}"
+                self._detection_cache[cache_key] = field
+                print(f"[LLM_COLLECTOR] 💾 Cached field decision for next time: '{field}'")
+
+        except Exception as e:
+            print(f"[LLM_COLLECTOR] ❌ Background field selection error: {e}")
+
+    async def _generate_intelligent_prompt_background(
+        self,
+        session_id: str,
+        field: str,
+        user_message: str,
+        bot_response: str,
+        conversation_history: List[Dict[str, str]]
+    ):
+        """
+        BACKGROUND TASK: Generate intelligent prompt and cache for next time.
+        This doesn't block the response - results are cached for future use.
+        """
+        try:
+            prompt = await self._generate_intelligent_prompt(
+                field=field,
+                user_message=user_message,
+                bot_response=bot_response,
+                conversation_history=conversation_history
+            )
+
+            if prompt:
+                # Cache for next time (instant prompt)
+                cache_key = f"prompt:{field}:{session_id}"
+                self._prompt_cache[cache_key] = prompt
+                print(f"[LLM_COLLECTOR] 💾 Cached intelligent prompt for next time: {prompt[:60]}...")
+
+        except Exception as e:
+            print(f"[LLM_COLLECTOR] ❌ Background prompt generation error: {e}")
+
+    async def _intelligent_field_selection(
+        self,
+        session_id: str,
+        missing_fields: List[str],
+        conversation_history: List[Dict[str, str]],
+        user_message: str
+    ) -> Optional[str]:
+        """
+        INTELLIGENT FIELD SELECTION using LLM.
+
+        The LLM analyzes the full conversation to:
+        1. Detect if user has declined specific fields multiple times (4+)
+        2. Understand user's willingness to share different types of info
+        3. Intelligently select which field to ask for next
+        4. Skip fields that user clearly doesn't want to provide
+
+        Returns: Field name to ask for, or None if should skip this turn
+        """
+        if not self._ollama_client or not conversation_history:
+            # Fallback: simple priority order
+            return missing_fields[0] if missing_fields else None
+
+        try:
+            # Build conversation context (last 10 exchanges)
+            context = ""
+            bot_ask_history = {field: [] for field in ['name', 'email', 'phone']}
+
+            # Track what we've asked for and user's responses
+            for i, msg in enumerate(conversation_history[-20:]):  # Last 20 messages
+                role = "Bot" if msg['role'] == 'assistant' else "User"
+                content = msg['content'][:200]
+                context += f"{role}: {content}\n"
+
+                # Track when bot asked for specific fields
+                msg_lower = content.lower()
+                if role == "Bot":
+                    if 'name' in msg_lower and any(q in msg_lower for q in ['?', 'share', 'could', 'may i']):
+                        bot_ask_history['name'].append(i)
+                    if 'email' in msg_lower and any(q in msg_lower for q in ['?', 'share', 'could', 'may i']):
+                        bot_ask_history['email'].append(i)
+                    if 'phone' in msg_lower and any(q in msg_lower for q in ['?', 'share', 'could', 'may i']):
+                        bot_ask_history['phone'].append(i)
+
+            # Count how many times each field was asked
+            ask_counts = {field: len(asks) for field, asks in bot_ask_history.items()}
+
+            # Build intelligent prompt for LLM
+            missing_str = ', '.join(missing_fields)
+            ask_summary = '\n'.join([f"- {field}: asked {count} times" for field, count in ask_counts.items() if count > 0])
+
+            system_prompt = f"""You are an intelligent assistant analyzing user behavior to optimize information collection.
+
+CONVERSATION HISTORY (last 10 exchanges):
+{context}
+
+MISSING INFORMATION: {missing_str}
+
+ASK HISTORY:
+{ask_summary if ask_summary else 'No fields asked yet'}
+
+YOUR TASK: Analyze the conversation and decide which field to ask for next (or skip).
+
+INTELLIGENT DECISION RULES:
+
+1. DETECT RESISTANCE PATTERNS:
+   - If user declined a specific field 4+ times → PERMANENTLY SKIP that field
+   - Examples of decline signals:
+     * Direct: "no", "skip", "prefer not to", "don't want to share"
+     * Indirect: ignoring the question, changing topic, giving fake info
+     * Repeated vague answers without providing the info
+
+2. FIELD-SPECIFIC INTELLIGENCE:
+   - User may be willing to share EMAIL but not PHONE
+   - User may be willing to share NAME but not EMAIL
+   - Each field is independent - don't give up on all fields if one is declined
+
+3. SELECTION PRIORITY:
+   - Prefer: name > email > phone
+   - BUT: Skip fields with 4+ decline signals
+   - AND: Consider user's current context (what they're asking about)
+
+4. CONTEXT-AWARE:
+   - If user is asking about pricing → good time for email
+   - If user mentions callback/demo → good time for phone
+   - If user is engaged and helpful → good time for name
+
+ANALYZE THE PATTERN:
+- How many times was each field asked?
+- How did user respond each time?
+- Is there a clear pattern of declining specific fields?
+- Which field should we ask for now (or should we skip)?
+
+OUTPUT FORMAT (JSON only):
+{{
+  "field_to_ask": "name|email|phone|none",
+  "reason": "brief explanation",
+  "declined_fields": ["list", "of", "fields", "user", "declined", "4+", "times"]
+}}
+
+Your response:"""
+
+            response = await self._call_llm_with_timeout(
+                model='qwen3.5:cloud',
+                messages=[{'role': 'user', 'content': system_prompt}],
+                options={
+                    'temperature': 0.1,  # Low temperature for consistent decisions
+                    'num_predict': 150,
+                    'thinking': False,
+                    'num_ctx': 4096
+                },
+                timeout=10.0
+            )
+
+            if not response:
+                print("[LLM_COLLECTOR] ⏱️ Field selection timed out - using fallback")
+                return missing_fields[0] if missing_fields else None
+
+            # Parse JSON response
+            response_text = response['message'].get('content', '').strip()
+            if not response_text and 'thinking' in response['message']:
+                response_text = response['message']['thinking'].strip()
+
+            # ROBUST JSON EXTRACTION - handle thinking text and various formats
+            import re
+
+            # Remove markdown code blocks
+            response_text = re.sub(r'```(?:json)?\s*|\s*```', '', response_text).strip()
+
+            # Remove thinking process text (common prefix in responses)
+            response_text = re.sub(r'^.*?Thinking Process:.*?\n\n', '', response_text, flags=re.DOTALL | re.IGNORECASE)
+            response_text = re.sub(r'^.*?Analysis:.*?\n\n', '', response_text, flags=re.DOTALL | re.IGNORECASE)
+
+            # Find JSON object - look for {...} with our expected keys
+            json_patterns = [
+                r'\{[^{}]*"field_to_ask"[^{}]*\}',  # Contains our key
+                r'\{(?:[^{}]|"[^"]*")*\}',  # Any valid JSON object
+            ]
+
+            json_match = None
+            for pattern in json_patterns:
+                json_match = re.search(pattern, response_text, re.DOTALL)
+                if json_match:
+                    break
+
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(0))
+                    field = data.get('field_to_ask', '').lower()
+                    reason = data.get('reason', '')
+                    declined = data.get('declined_fields', [])
+
+                    print(f"[LLM_COLLECTOR] 🧠 Intelligent decision: field='{field}', reason='{reason}'")
+                    if declined:
+                        print(f"[LLM_COLLECTOR] 🚫 User declined: {declined}")
+
+                    if field == 'none' or field not in missing_fields:
+                        return None
+
+                    return field
+                except json.JSONDecodeError as e:
+                    print(f"[LLM_COLLECTOR] ⚠️ JSON parse error: {e}, using fallback")
+                    return missing_fields[0] if missing_fields else None
+            else:
+                print(f"[LLM_COLLECTOR] ⚠️ No JSON found in response, using fallback")
+                print(f"[LLM_COLLECTOR] Response preview: {response_text[:200]}")
+                return missing_fields[0] if missing_fields else None
+
+        except Exception as e:
+            print(f"[LLM_COLLECTOR] ❌ Intelligent field selection error: {e}")
+            import traceback
+            traceback.print_exc()
+            return missing_fields[0] if missing_fields else None
+
+    async def _generate_intelligent_prompt(
+        self,
+        field: str,
+        user_message: str,
+        bot_response: str,
+        conversation_history: List[Dict[str, str]]
+    ) -> Optional[str]:
+        """
+        GENERATE INTELLIGENT, CONTEXT-AWARE PROMPT using LLM.
+
+        The LLM creates a natural, conversational prompt that:
+        1. Matches the tone and context of the conversation
+        2. References what user is asking about
+        3. Explains value of providing the info
+        4. Feels human and not robotic
+
+        Returns: Natural prompt string
+        """
+        if not self._ollama_client:
+            return self._generate_template_prompt(field, user_message)
+
+        try:
+            # Build context
+            context = ""
+            if conversation_history:
+                recent = conversation_history[-6:]  # Last 3 exchanges
+                for msg in recent:
+                    role = "Bot" if msg['role'] == 'assistant' else "User"
+                    content = msg['content'][:150]
+                    context += f"{role}: {content}\n"
+
+            field_descriptions = {
+                'name': 'their name (to personalize the conversation)',
+                'email': 'their work email (to send detailed information and resources)',
+                'phone': 'their phone number (for callback or demo scheduling)'
+            }
+
+            system_prompt = f"""You are a friendly, professional assistant for Market Inside Data (trade intelligence platform).
+
+CONVERSATION CONTEXT:
+{context}
+User's latest: "{user_message}"
+Bot's response: "{bot_response[:200]}..."
+
+YOUR TASK: Generate a natural, conversational prompt to ask for {field_descriptions.get(field, field)}.
+
+REQUIREMENTS:
+1. Be warm, friendly, and professional
+2. Reference the conversation context naturally
+3. Explain briefly WHY you need this info (value for the user)
+4. Keep it SHORT (1 sentence, max 20 words)
+5. Make it feel human, not scripted or robotic
+6. Match the user's communication style
+
+EXAMPLES:
+- "To send you that pricing breakdown, what's your work email?"
+- "I'd love to personalize this - may I know your name?"
+- "For a quick callback about the demo, what number works best?"
+
+Generate ONLY the prompt (no quotes, no explanation):"""
+
+            response = await self._call_llm_with_timeout(
+                model='qwen3.5:cloud',
+                messages=[{'role': 'user', 'content': system_prompt}],
+                options={
+                    'temperature': 0.7,  # Creative for natural variation
+                    'num_predict': 60,
+                    'thinking': False
+                },
+                timeout=10.0
+            )
+
+            if not response:
+                return self._generate_template_prompt(field, user_message)
+
+            prompt = response['message'].get('content', '').strip()
+            if not prompt and 'thinking' in response['message']:
+                prompt = response['message']['thinking'].strip()
+
+            # Clean up
+            prompt = prompt.strip('"\'')
+            if '\n' in prompt:
+                lines = [l.strip() for l in prompt.split('\n') if l.strip()]
+                for line in reversed(lines):
+                    if '?' in line and 10 < len(line) < 150:
+                        prompt = line.strip('"\'')
+                        break
+
+            # Validate
+            if 10 < len(prompt) < 150 and ('?' in prompt or 'please' in prompt.lower()):
+                return prompt
+
+            # Fallback to template
+            return self._generate_template_prompt(field, user_message)
+
+        except Exception as e:
+            print(f"[LLM_COLLECTOR] ❌ Intelligent prompt error: {e}")
+            return self._generate_template_prompt(field, user_message)
 
     async def _generate_contextual_prompt(
         self,

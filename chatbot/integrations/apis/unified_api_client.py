@@ -440,9 +440,17 @@ class UnifiedAPIClient:
 
         try:
             client = self._get_client(platform)
+            request_body = {
+                "data_type": "",
+                "continent": "",
+                "direction": "",
+                "searchQuery": "",
+                "pageNumber": 1,
+                "pageSize": 100000
+            }
             response = await client.call_endpoint(
                 "/detailed-mirror-countries-list",
-                {}  # Empty body for POST request
+                request_body
             )
 
             if response.success and isinstance(response.data, dict):

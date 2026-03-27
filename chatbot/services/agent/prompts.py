@@ -312,6 +312,49 @@ CORE VALUE PROPOSITION (mention naturally when relevant):
 """
 
     @staticmethod
+    def build_global_data_coverage() -> str:
+        """
+        Build global data coverage section with MI's database statistics.
+        Use this when users ask about "global data", "how much data", "database size", etc.
+        """
+        return """
+[GLOBAL DATA COVERAGE - MI'S DATABASE STATISTICS]:
+
+When users ask about Market Inside's global data coverage, database size, or how much data we have, provide these statistics:
+
+**Market Inside Global Database Coverage:**
+• **Importers:** 14.9M+
+• **Exporters:** 21.6M+
+• **Import Shipments:** 2.2B+
+• **Export Shipments:** 6.7B+
+• **Import Turnover:** $22.4T+
+• **Export Turnover:** $28.7T+
+
+**When to use these statistics:**
+- User asks: "How much data do you have?"
+- User asks: "What's your global coverage?"
+- User asks: "Tell me about your database"
+- User asks: "How many companies/shipments do you track?"
+- User asks: "What's the size of your database?"
+- User asks: "How comprehensive is your data?"
+
+**Response format example:**
+"Market Inside has comprehensive global trade data coverage with:
+• **14.9M+ importers** and **21.6M+ exporters**
+• **2.2B+ import shipments** and **6.7B+ export shipments**
+• **$22.4T+ import turnover** and **$28.7T+ export turnover**
+
+This covers trade data from 200+ countries worldwide. What specific information are you looking for?"
+
+**CRITICAL RULES:**
+- ALWAYS use these exact numbers when discussing MI's global data coverage
+- Format numbers with bold and use + sign to indicate "more than"
+- Keep response brief but comprehensive
+- Follow up by asking what specific data they need
+- DO NOT make up or estimate coverage numbers - use these exact statistics
+"""
+
+    @staticmethod
     def build_platform_links_instruction() -> str:
         """
         CRITICAL instruction for providing correct platform links.
@@ -587,6 +630,7 @@ Need specific product details?"
         brand_identity = cls.build_brand_identity(config.site_name)
         personality = cls.build_personality()
         value_proposition = cls.build_value_proposition(config.site_name)
+        global_data_coverage = cls.build_global_data_coverage()
         accuracy_instruction = cls.build_accuracy_instruction()
         company_data_instruction = cls.build_company_data_instruction(config.source_url) if config.has_dynamic_content else ""
         contact_info_instruction = cls.build_contact_info_instruction()
@@ -647,6 +691,7 @@ EXAMPLE — RIGHT: "Vietnam imported $1.2B of HS code 94 (furniture) in 2023, ma
 {config.context}{accuracy_instruction}{company_data_instruction}{contact_info_instruction}
 {platform_links_instruction}
 {value_proposition}
+{global_data_coverage}
 {country_list_formatting}
 {industry_section}{response_structure}
 

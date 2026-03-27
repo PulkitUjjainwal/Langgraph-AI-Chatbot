@@ -418,7 +418,7 @@ def detect_contact_info_request(message: str) -> bool:
 def get_contact_info_response() -> str:
     """Get formatted contact information response"""
     return (
-        f"📞 You can reach us at: **{Config.CONTACT_PHONE_NUMBER}**\n\n"
+        f"📞 You can reach us at: {Config.CONTACT_PHONE_NUMBER}\n\n"
         "Our team is available to assist you with:\n"
         "• Trade data inquiries\n"
         "• Custom reports and analysis\n"
@@ -1692,23 +1692,67 @@ class ChatbotManager:
         url = f"https://api-dp.marketinsidedata.com/api/v1/users/detailed-mirror-countries-list"
 
         headers = {
-            "Content-Type": "application/json",
-            "Origin":"https://www.marketinsidedata.com",
-            "accept": "application/json",
-            "Authorization": f"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMwNzk0OWNiLWZmODItNGVkOS1hNzZhLWMxOGRmOThiZDZkYyIsImlhdCI6MTcwNDU0OTU4MH0.sMR6ZZ52KNkiXG8V-Y6JxjkscCOOEDY7DPEFc5nMU88",
+            "accept": "application/json, text/plain, */*",
+            "accept-language": "en-US,en;q=0.9",
+            "authorization": f"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMwNzk0OWNiLWZmODItNGVkOS1hNzZhLWMxOGRmOThiZDZkYyIsImlhdCI6MTcwNDU0OTU4MH0.sMR6ZZ52KNkiXG8V-Y6JxjkscCOOEDY7DPEFc5nMU88",
+            "cache-control": "no-cache",
+            "content-type": "application/json",
+            "origin": "https://www.marketinsidedata.com",
+            "referer": "https://www.marketinsidedata.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
         }
-        
+
+        request_body = {
+            "data_type": "",
+            "continent": "",
+            "direction": "",
+            "searchQuery": "",
+            "pageNumber": 1,
+            "pageSize": 100000
+        }
+
         try:
+            # Retry logic for temporary failures
+            max_retries = 3
+            retry_delay = 1.0
+            resp = None
+
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, json={}, headers=headers)
-            
-            if resp.status_code != 200:
-                print(f"  [WARN] Country list API returned {resp.status_code}")
+                for attempt in range(max_retries):
+                    try:
+                        resp = await client.post(url, json=request_body, headers=headers)
+
+                        if resp.status_code == 200:
+                            break
+                        elif resp.status_code == 503 and attempt < max_retries - 1:
+                            import asyncio
+                            wait_time = retry_delay * (2 ** attempt)
+                            print(f"  [WARN] 503 error, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                            await asyncio.sleep(wait_time)
+                        else:
+                            break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            import asyncio
+                            await asyncio.sleep(retry_delay)
+                        else:
+                            print(f"  [WARN] Country list API failed after {max_retries} attempts")
+                            return "mirror"
+
+            if not resp or resp.status_code != 200:
+                print(f"  [WARN] Country list API returned {resp.status_code if resp else 'no response'}")
                 return "mirror"
-            
+
             data = resp.json()
-            countries = data.get("data", data) if isinstance(data, dict) else data
-            
+
+            # Extract countries list - API returns {"totalCountries": 231, "countries": [...]}
+            if isinstance(data, dict):
+                countries = data.get("countries", data.get("data", data.get("message", [])))
+            elif isinstance(data, list):
+                countries = data
+            else:
+                countries = []
+
             if not isinstance(countries, list):
                 return "mirror"
             
@@ -1796,11 +1840,18 @@ class ChatbotManager:
                     return url
 
             elif intent == "country_to_country":
-                # URL pattern: /cntry/Taiwan-import-China
-                match = re.search(r'/cntry/([^/-]+)-(import|export)-', url)
+                # URL pattern: /cntry/Origin-export-Destination or /cntry/Origin-import-Destination
+                # For country-to-country, we need to check BOTH countries
+                # Only show support if BOTH are mirror-only
+                match = re.search(r'/cntry/([^/-]+)-(import|export)-([^/?]+)', url)
                 if match:
-                    country = match.group(1).lower().replace('%20', '-').replace(' ', '-')
+                    origin_country = match.group(1).lower().replace('%20', '-').replace(' ', '-')
                     current_direction = match.group(2)
+                    destination_country = match.group(3).lower().replace('%20', '-').replace(' ', '-')
+
+                    # Store both countries for later processing
+                    # We'll handle this differently after fetching the country list
+                    country = origin_country  # For now, set to origin for compatibility
                 else:
                     return url
 
@@ -1836,19 +1887,58 @@ class ChatbotManager:
                 import httpx
                 api_url = "https://api-dp.marketinsidedata.com/api/v1/users/detailed-mirror-countries-list"
                 headers = {
-                    "Content-Type": "application/json",
-                    "Origin": "https://www.marketinsidedata.com",
-                    "accept": "application/json",
-                    "Authorization": f"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMwNzk0OWNiLWZmODItNGVkOS1hNzZhLWMxOGRmOThiZDZkYyIsImlhdCI6MTcwNDU0OTU4MH0.sMR6ZZ52KNkiXG8V-Y6JxjkscCOOEDY7DPEFc5nMU88",
+                    "accept": "application/json, text/plain, */*",
+                    "accept-language": "en-US,en;q=0.9",
+                    "authorization": f"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMwNzk0OWNiLWZmODItNGVkOS1hNzZhLWMxOGRmOThiZDZkYyIsImlhdCI6MTcwNDU0OTU4MH0.sMR6ZZ52KNkiXG8V-Y6JxjkscCOOEDY7DPEFc5nMU88",
+                    "cache-control": "no-cache",
+                    "content-type": "application/json",
+                    "origin": "https://www.marketinsidedata.com",
+                    "referer": "https://www.marketinsidedata.com/",
+                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
                 }
 
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    resp = await client.post(api_url, json={}, headers=headers)
+                request_body = {
+                    "data_type": "",
+                    "continent": "",
+                    "direction": "",
+                    "searchQuery": "",
+                    "pageNumber": 1,
+                    "pageSize": 100000
+                }
 
-                print(f"  [URL FIX] API response status: {resp.status_code}")
+                # Retry logic for temporary failures (503, timeouts)
+                max_retries = 3
+                retry_delay = 1.0  # seconds
+                resp = None
 
-                if resp.status_code != 200:
-                    print(f"  [URL FIX] ❌ API returned {resp.status_code}, keeping URL as-is")
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    for attempt in range(max_retries):
+                        try:
+                            resp = await client.post(api_url, json=request_body, headers=headers)
+                            print(f"  [URL FIX] API response status: {resp.status_code} (attempt {attempt + 1}/{max_retries})")
+
+                            if resp.status_code == 200:
+                                break  # Success!
+                            elif resp.status_code == 503 and attempt < max_retries - 1:
+                                # Service unavailable - retry with backoff
+                                import asyncio
+                                wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                                print(f"  [URL FIX] ⚠️ 503 Service Unavailable, retrying in {wait_time}s...")
+                                await asyncio.sleep(wait_time)
+                            else:
+                                # Other error or final attempt - give up
+                                break
+                        except Exception as e:
+                            print(f"  [URL FIX] ⚠️ Request failed (attempt {attempt + 1}): {str(e)[:100]}")
+                            if attempt < max_retries - 1:
+                                import asyncio
+                                await asyncio.sleep(retry_delay)
+                            else:
+                                print(f"  [URL FIX] ❌ All retry attempts failed, keeping URL as-is")
+                                return url
+
+                if not resp or resp.status_code != 200:
+                    print(f"  [URL FIX] ❌ API returned {resp.status_code if resp else 'no response'}, keeping URL as-is")
                     return url
 
                 data = resp.json()
@@ -1862,21 +1952,22 @@ class ChatbotManager:
             print(f"  [URL FIX] Response keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
 
             # Handle different response formats
-            # API returns: {"success": true, "message": [{country1}, {country2}, ...]}
+            # API returns: {"totalCountries": 231, "countries": [{country1}, {country2}, ...]}
             if isinstance(data, list):
                 countries_list = data
             elif isinstance(data, dict):
                 # Try different possible keys in order of likelihood
-                if "message" in data and isinstance(data["message"], list):
-                    # CORRECT format: {"success": true, "message": [...]}
+                if "countries" in data and isinstance(data["countries"], list):
+                    # CURRENT format: {"totalCountries": 231, "countries": [...]}
+                    countries_list = data["countries"]
+                    print(f"  [URL FIX] Found countries in 'countries' key ({len(countries_list)} countries)")
+                elif "message" in data and isinstance(data["message"], list):
+                    # Legacy format: {"success": true, "message": [...]}
                     countries_list = data["message"]
                     print(f"  [URL FIX] Found countries in 'message' key")
                 elif "data" in data and isinstance(data["data"], list):
                     countries_list = data["data"]
                     print(f"  [URL FIX] Found countries in 'data' key")
-                elif "countries" in data and isinstance(data["countries"], list):
-                    countries_list = data["countries"]
-                    print(f"  [URL FIX] Found countries in 'countries' key")
                 elif "result" in data and isinstance(data["result"], list):
                     countries_list = data["result"]
                     print(f"  [URL FIX] Found countries in 'result' key")
@@ -1896,6 +1987,68 @@ class ChatbotManager:
 
             print(f"  [URL FIX] ✅ Got {len(countries_list)} countries from API")
 
+            # Helper function to get country data types
+            def get_country_types(country_name: str, countries_data: list) -> list:
+                """Get available data types for a country from the API response."""
+                country_normalized = country_name.lower().strip().replace('-', ' ')
+                for c in countries_data:
+                    if not isinstance(c, dict):
+                        continue
+                    c_name = (c.get("country_name") or "").strip().lower()
+                    c_code = (c.get("country_code") or "").strip().upper()
+
+                    if (c_name == country_normalized or
+                        c_name.replace(" ", "-") == country_name.lower() or
+                        (len(country_name) == 2 and c_code == country_name.upper())):
+                        return c.get("data_type", [])
+                return []
+
+            # SPECIAL HANDLING FOR COUNTRY_TO_COUNTRY
+            # Check BOTH countries - only show support if BOTH are mirror-only
+            if intent == "country_to_country":
+                print(f"  [URL FIX] 🌍 Country-to-Country Query Detected")
+                print(f"  [URL FIX] Origin: '{origin_country}', Destination: '{destination_country}', Direction: '{current_direction}'")
+
+                # Get data types for both countries
+                origin_types = get_country_types(origin_country, countries_list)
+                destination_types = get_country_types(destination_country, countries_list)
+
+                print(f"  [URL FIX] Origin '{origin_country}' types: {origin_types}")
+                print(f"  [URL FIX] Destination '{destination_country}' types: {destination_types}")
+
+                # Check if origin has detailed data
+                origin_has_detailed = any(dt.startswith("detailed_") for dt in origin_types)
+                origin_has_mirror = any(dt.startswith("mirror_") for dt in origin_types)
+
+                # Check if destination has detailed data
+                destination_has_detailed = any(dt.startswith("detailed_") for dt in destination_types)
+                destination_has_mirror = any(dt.startswith("mirror_") for dt in destination_types)
+
+                print(f"  [URL FIX] Origin: detailed={origin_has_detailed}, mirror={origin_has_mirror}")
+                print(f"  [URL FIX] Destination: detailed={destination_has_detailed}, mirror={destination_has_mirror}")
+
+                # LOGIC: Only show support if BOTH countries are mirror-only (no detailed data)
+                both_mirror_only = (not origin_has_detailed and origin_has_mirror and
+                                   not destination_has_detailed and destination_has_mirror)
+
+                if both_mirror_only:
+                    # Both countries are mirror-only - show support options
+                    print(f"  [URL FIX] 🚨 BOTH countries are MIRROR-ONLY - redirecting to support")
+                    origin_formatted = origin_country.replace('-', ' ').title()
+                    destination_formatted = destination_country.replace('-', ' ').title()
+                    return f"MIRROR_ONLY:BOTH:{origin_formatted}:{destination_formatted}:{current_direction}"
+                else:
+                    # At least one country has detailed data - proceed normally
+                    if origin_has_detailed or destination_has_detailed:
+                        print(f"  [URL FIX] ✅ At least one country has DETAILED data - allowing query")
+                        print(f"  [URL FIX] URL: {url}")
+                        return url  # Return URL as-is for country-to-country
+                    else:
+                        # Neither has data at all
+                        print(f"  [URL FIX] ❌ Neither country has available data")
+                        return url
+
+            # REGULAR SINGLE-COUNTRY HANDLING (for other intents)
             # Find matching country
             country_lower = country.lower().strip().replace('-', ' ')
             available_types = []
@@ -2412,7 +2565,7 @@ INTELLIGENCE PRINCIPLES:
 4. Normalization: Convert variations to standard forms ("us", "usa", "america" → "united states")
 
 ────────────────────────
-INTENTS (SEVEN TOTAL)
+INTENTS (EIGHT TOTAL)
 ────────────────────────
 
 CRITICAL PRIORITY: Check for service_mismatch FIRST!
@@ -2477,7 +2630,21 @@ Choose exactly ONE intent:
    → Simple greetings or pleasantries
    → Output url = ""
 
-7. out_of_scope
+7. contact_support
+   → User explicitly wants to connect with support, sales, or a human agent
+   → The chatbot cannot answer their needs through conversation alone
+   → Examples:
+     - "I want to talk to someone"
+     - "Can I speak to a person?"
+     - "Connect me with support"
+     - "I need to talk to your team"
+     - "Can I schedule a demo?"
+     - "I want to contact sales"
+   → IMPORTANT: Use this ONLY when user explicitly requests human contact
+   → NOT for general questions that the bot can answer
+   → Output url = ""
+
+8. out_of_scope
    → User asks about non-trade topics OR requests services NOT provided
    → IMPORTANT: Sub-classify into out_of_scope_type:
 
@@ -2854,7 +3021,7 @@ IMPORTANT
         intent = parsed.get("intent", "unknown")
         valid_intents = (
             "search_country_data", "search_trade_data", "country_to_country",
-            "hs_code", "general", "greeting", "out_of_scope", "unknown"
+            "hs_code", "general", "greeting", "contact_support", "out_of_scope", "unknown"
         )
         if intent not in valid_intents:
             intent = "unknown"
@@ -3011,7 +3178,7 @@ INTELLIGENCE PRINCIPLES:
 3. Smart Assumptions: Make informed assumptions based on common usage
 4. Normalization: Convert variations to standard forms ("us", "usa", "america" → "united states")
 
-INTENTS (SEVEN TOTAL):
+INTENTS (EIGHT TOTAL):
 
 1. search_trade_data - User wants SPECIFIC trade records for a product/hs_code
 2. search_country_data - User wants HIGH-LEVEL country overview (NO specific product)
@@ -3019,7 +3186,8 @@ INTENTS (SEVEN TOTAL):
 4. hs_code - HS code, chapter, heading queries
 5. general - Platform questions, pricing, features
 6. greeting - Hello, hi, thanks, goodbye
-7. out_of_scope - Non-trade topics OR execution services
+7. contact_support - User explicitly requests human contact (talk to someone, connect me, schedule demo)
+8. out_of_scope - Non-trade topics OR execution services
 
 IMPORTANT: Extract all relevant parameters (country, product, hs_code, direction, entity_type, etc.)
 """
@@ -3765,6 +3933,54 @@ OUTPUT JSON FORMAT (intent only, no content):
             return
 
         # ========================================================================
+        # STEP 2.4: Handle contact_support intent - User explicitly wants human contact
+        # ========================================================================
+        if intent == "contact_support":
+            print(f"  [STREAM] Contact support intent detected - showing support options")
+
+            # Track interaction in database
+            if hasattr(self, 'support_interaction_service') and self.support_interaction_service:
+                try:
+                    from chatbot.database.support_interaction_service import SupportInteraction, SupportInteractionType
+                    await self.support_interaction_service.track_interaction(
+                        SupportInteraction(
+                            session_id=session_id,
+                            interaction_type=SupportInteractionType.OTHER,
+                            interaction_data={
+                                "trigger_type": "contact_support_intent",
+                                "query": message,
+                                "detected_by": "llm_intent_detection"
+                            },
+                            page_url="",
+                            message_context=message[:200]
+                        )
+                    )
+                except Exception as e:
+                    print(f"  [STREAM] Warning: Could not track contact support intent: {e}")
+
+            # Save messages
+            if self.redis:
+                self.redis.save_message(session_id, {"role": "user", "content": message})
+                self.redis.save_message(session_id, {
+                    "role": "assistant",
+                    "content": "I'd be happy to connect you with our team! Choose the option that works best for you:"
+                })
+
+            # Yield support UI
+            yield json.dumps({
+                "credit_exhausted": True,  # Reuse existing UI component
+                "message": "I'd be happy to connect you with our team! Choose the option that works best for you:",
+                "actions": [
+                    {"type": "schedule_demo", "label": "Schedule a Demo"},
+                    {"type": "chat_with_us", "label": "Talk to Live Agent"},
+                    {"type": "whatsapp", "label": "WhatsApp"},
+                    {"type": "continue_chat", "label": "Continue Chat"}
+                ],
+                "done": True
+            })
+            return
+
+        # ========================================================================
         # STEP 2.5: Handle out-of-scope service mismatch intelligently
         # ========================================================================
         if intent == "out_of_scope":
@@ -3878,8 +4094,11 @@ OUTPUT JSON FORMAT (intent only, no content):
             # COMPLEX QUERY DETECTION - Check FIRST before any other processing
             # Complex queries (comparisons, multiple countries, trend analysis)
             # should redirect to support/dashboard instead of partial answers
+            # NOTE: country_to_country queries skip this check (have smart mirror logic)
             # ================================================================
-            is_complex, complex_reason = slot_mgr.is_complex_query(message, params)
+            # Add intent to params for complex query detection
+            params_with_intent = {**params, "intent": intent}
+            is_complex, complex_reason = slot_mgr.is_complex_query(message, params_with_intent)
             if is_complex:
                 print(f"  [STREAM] Complex query detected: {complex_reason} - redirecting to dashboard/support")
 
@@ -4059,32 +4278,97 @@ OUTPUT JSON FORMAT (intent only, no content):
                 # Check if this is a MIRROR-ONLY COUNTRY (provide country page + support info)
                 is_mirror_country = False
                 mirror_country_info = None
+                is_both_mirror = False
                 if explore_url and explore_url.startswith("MIRROR_ONLY:"):
                     is_mirror_country = True
-                    # Parse: MIRROR_ONLY:Afghanistan:import
+                    # Parse formats:
+                    # Single country: MIRROR_ONLY:Afghanistan:import
+                    # Both countries: MIRROR_ONLY:BOTH:China:Afghanistan:export
                     parts = explore_url.replace("MIRROR_ONLY:", "").split(":")
-                    mirror_country_name = parts[0] if len(parts) > 0 else "Unknown"
-                    mirror_direction = parts[1] if len(parts) > 1 else "import"
+
+                    if parts[0] == "BOTH":
+                        # Country-to-country query where BOTH are mirror-only
+                        is_both_mirror = True
+                        origin_country_name = parts[1] if len(parts) > 1 else "Unknown"
+                        destination_country_name = parts[2] if len(parts) > 2 else "Unknown"
+                        mirror_direction = parts[3] if len(parts) > 3 else "export"
+                        mirror_country_name = f"{origin_country_name} to {destination_country_name}"
+                    else:
+                        # Single country query
+                        mirror_country_name = parts[0] if len(parts) > 0 else "Unknown"
+                        mirror_direction = parts[1] if len(parts) > 1 else "import"
 
                     print(f"  [STREAM] Mirror-only country detected: {mirror_country_name} ({mirror_direction})")
-                    print(f"  [STREAM] Will provide country page URL + intelligent explanation from LLM")
 
-                    # Generate country page URL (not generic platform page!)
-                    # Map country name to URL slug
-                    country_slug = mirror_country_name.lower().replace(' ', '-')
-                    direction_suffix = "imports" if mirror_direction == "import" else "exports"
+                    if is_both_mirror:
+                        # Country-to-country query where BOTH countries are mirror-only
+                        # Show support options since detailed data requires dashboard access
+                        print(f"  [STREAM] Both countries are mirror-only - will show support options")
 
-                    # Generate proper country page URL
-                    explore_url = f"https://www.marketinsidedata.com/en/country/{country_slug}/{direction_suffix}"
-                    print(f"  [STREAM] Generated country page URL: {explore_url}")
+                        # Save messages
+                        if self.redis:
+                            self.redis.save_message(session_id, {"role": "user", "content": message})
 
-                    # Store info for LLM context (will explain limitations intelligently)
-                    mirror_country_info = {
-                        "country": mirror_country_name,
-                        "direction": mirror_direction,
-                        "data_type": "mirror",
-                        "explanation": f"{mirror_country_name} has limited mirror trade data. Detailed shipment-level data with buyer/supplier names, complete HS codes, and comprehensive records requires dashboard access."
-                    }
+                        # Response message for both mirror scenario
+                        both_mirror_message = f"For detailed {origin_country_name} to {destination_country_name} trade data including buyer/supplier names, complete shipment records, and comprehensive trade insights, dashboard access is required."
+
+                        # Save assistant response
+                        if self.redis:
+                            self.redis.save_message(session_id, {
+                                "role": "assistant",
+                                "content": both_mirror_message
+                            })
+
+                        # Track interaction
+                        try:
+                            await self.support_interaction_service.track_interaction(
+                                session_id=session_id,
+                                interaction_type="other",
+                                interaction_data={
+                                    "trigger_type": "mirror_only_country_to_country",
+                                    "origin_country": origin_country_name,
+                                    "destination_country": destination_country_name,
+                                    "query": message,
+                                    "shown_support": True
+                                }
+                            )
+                        except Exception as e:
+                            print(f"  [STREAM] Warning: Failed to track mirror-only interaction: {e}")
+
+                        # Show support UI
+                        yield json.dumps({
+                            "credit_exhausted": True,
+                            "message": both_mirror_message,
+                            "actions": [
+                                {"type": "schedule_demo", "label": "Schedule a Demo"},
+                                {"type": "chat_with_us", "label": "Talk to Live Agent"},
+                                {"type": "whatsapp", "label": "WhatsApp"},
+                                {"type": "continue_chat", "label": "Continue Chat"}
+                            ],
+                            "done": True
+                        })
+                        return
+
+                    else:
+                        # Single country mirror-only case
+                        print(f"  [STREAM] Will provide country page URL + intelligent explanation from LLM")
+
+                        # Generate country page URL (not generic platform page!)
+                        # Map country name to URL slug
+                        country_slug = mirror_country_name.lower().replace(' ', '-')
+                        direction_suffix = "imports" if mirror_direction == "import" else "exports"
+
+                        # Generate proper country page URL
+                        explore_url = f"https://www.marketinsidedata.com/en/country/{country_slug}/{direction_suffix}"
+                        print(f"  [STREAM] Generated country page URL: {explore_url}")
+
+                        # Store info for LLM context (will explain limitations intelligently)
+                        mirror_country_info = {
+                            "country": mirror_country_name,
+                            "direction": mirror_direction,
+                            "data_type": "mirror",
+                            "explanation": f"{mirror_country_name} has limited mirror trade data. Detailed shipment-level data with buyer/supplier names, complete HS codes, and comprehensive records requires dashboard access."
+                        }
 
                     # Track this interaction
                     try:
@@ -4269,7 +4553,7 @@ OUTPUT JSON FORMAT (intent only, no content):
         # KB context is only needed for data queries and platform/API questions
         # This saves 1-2 seconds on embeddings + vector search
         # ========================================================================
-        simple_intents_no_kb = ["greeting", "general"]  # Simple intents don't need KB context
+        simple_intents_no_kb = ["greeting", "general", "contact_support"]  # Simple intents don't need KB context
         skip_kb = intent in simple_intents_no_kb
 
         # Get KB context using correct method and field name
@@ -4332,6 +4616,10 @@ IMPORTANT INSTRUCTIONS FOR YOUR RESPONSE:
             # Greetings don't need history
             history_text = ""
             print(f"  [HISTORY] ⚡ Skipping history for greeting (faster)")
+        elif intent == "contact_support":
+            # Contact support doesn't need history
+            history_text = ""
+            print(f"  [HISTORY] ⚡ Skipping history for contact_support (faster)")
         elif intent == "general":
             # General queries need minimal history (last 4 messages)
             history_text = build_conversation_history(history_messages, max_messages=4, max_chars=800)
@@ -4463,6 +4751,9 @@ if query is for platform
         if intent == "greeting":
             num_predict_optimized = 60  # Short, friendly greeting (6s instead of 15s)
             print(f"  [STREAM] ⚡⚡ Optimizing for 'greeting': num_predict={num_predict_optimized}")
+        elif intent == "contact_support":
+            num_predict_optimized = 50  # Minimal - support UI will be shown
+            print(f"  [STREAM] ⚡⚡ Optimizing for 'contact_support': num_predict={num_predict_optimized}")
         elif intent == "general":
             num_predict_optimized = 180  # Concise but complete (18s instead of 30s)
             print(f"  [STREAM] ⚡ Optimizing for 'general': num_predict={num_predict_optimized}")
@@ -5281,6 +5572,10 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
 
 def is_connect_help_intent(message: str) -> bool:
     """
+    DEPRECATED: This function is no longer used.
+    Support intent detection is now handled by the LLM through the 'contact_support' intent.
+    This provides more intelligent, context-aware detection instead of hardcoded keywords.
+
     Check if the user message indicates they want to connect with support/team.
     Returns True if connect/help intent is detected.
     """
@@ -5421,33 +5716,6 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
             }
         )
 
-    # Check for connect/help intent FIRST - before any LLM processing
-    if is_connect_help_intent(request.message):
-        print(f"[CHAT STREAM] Connect/help intent detected - returning support options")
-        async def connect_support_response():
-            response_data = {
-                "credit_exhausted": True,  # Reuse the same UI component
-                "message": "I'd be happy to connect you with our team! Choose the option that works best for you:",
-                "actions": [
-                    {"type": "schedule_demo", "label": "Schedule a Demo"},
-                    {"type": "chat_with_us", "label": "Talk to Live Agent"},
-                    {"type": "whatsapp", "label": "WhatsApp"},
-                    {"type": "continue_chat", "label": "Continue Chat"}
-                ],
-                "done": True
-            }
-            yield f"data: {json.dumps(response_data)}\n\n"
-
-        return StreamingResponse(
-            connect_support_response(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            }
-        )
-
     if not chatbot_manager:
         raise HTTPException(status_code=503, detail="Chatbot not initialized")
 
@@ -5564,6 +5832,7 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
 
             # ====================================================================
             # NEW: LLM-DRIVEN USER INFO COLLECTION (Fast, Contextual, Non-blocking)
+            # CRITICAL: Must not block or fail the stream - wrap in comprehensive error handling
             # ====================================================================
             user_info_prompt = ""
 
@@ -5596,34 +5865,46 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
 
                     print(f"[LLM_COLLECTOR] Starting analysis for session {request.session_id}, msg count: {actual_message_count}")
 
-                    # Fast, contextual analysis (no blocking LLM calls)
-                    prompt = await llm_user_info_collector.analyze_and_collect_async(
-                        session_id=request.session_id,
-                        user_message=request.message,
-                        bot_response=full_response,
-                        message_count=actual_message_count,
-                        conversation_history=messages
-                    )
+                    # INSTANT analysis with background intelligence (0-2ms)
+                    # Uses cached decisions when available, templates as fallback
+                    # Background tasks improve future responses without blocking
+                    try:
+                        prompt = await llm_user_info_collector.analyze_and_collect_async(
+                            session_id=request.session_id,
+                            user_message=request.message,
+                            bot_response=full_response,
+                            message_count=actual_message_count,
+                            conversation_history=messages
+                        )
 
-                    print(f"[LLM_COLLECTOR] analyze_and_collect_async returned: {prompt if prompt else 'None'}")
+                        print(f"[LLM_COLLECTOR] analyze_and_collect_async returned: {prompt if prompt else 'None'}")
 
-                    if prompt:
-                        user_info_prompt += prompt
-                        print(f"[LLM_COLLECTOR] ✓ Generated contextual prompt: {prompt[:50]}...")
-                    else:
-                        print(f"[LLM_COLLECTOR] No prompt generated (returned None)")
+                        if prompt:
+                            user_info_prompt += prompt
+                            print(f"[LLM_COLLECTOR] ✓ Generated prompt: {prompt[:50]}...")
+                        else:
+                            print(f"[LLM_COLLECTOR] No prompt generated (returned None)")
+
+                    except Exception as inner_e:
+                        print(f"[LLM_COLLECTOR] ❌ Error during analysis: {inner_e}")
+                        import traceback
+                        traceback.print_exc()
 
                 except Exception as e:
-                    print(f"[LLM_COLLECTOR] Error: {e}")
+                    print(f"[LLM_COLLECTOR] ❌ Outer error: {e}")
                     import traceback
                     traceback.print_exc()
             else:
                 print(f"[LLM_COLLECTOR] SKIPPED - llm_user_info_collector is None/False")
 
             # Stream user info prompt if available
-            if user_info_prompt:
-                full_response += user_info_prompt
-                yield f"data: {json.dumps({'chunk': user_info_prompt, 'done': False})}\n\n"
+            # CRITICAL: Always complete even if user_info_prompt is empty
+            try:
+                if user_info_prompt:
+                    full_response += user_info_prompt
+                    yield f"data: {json.dumps({'chunk': user_info_prompt, 'done': False})}\n\n"
+            except Exception as e:
+                print(f"[LLM_COLLECTOR] ❌ Error streaming user info prompt: {e}")
 
             # ====================================================================
             # LEAD CAPTURE - Check if we should prompt for lead

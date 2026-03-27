@@ -294,8 +294,17 @@ class DataValidator:
         try:
             api_url = "https://api-dp.marketinsidedata.com/api/v1/users/detailed-mirror-countries-list"
 
+            request_body = {
+                "data_type": "",
+                "continent": "",
+                "direction": "",
+                "searchQuery": "",
+                "pageNumber": 1,
+                "pageSize": 100000
+            }
+
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(api_url, json={}, headers=self.api_headers)
+                response = await client.post(api_url, json=request_body, headers=self.api_headers)
 
                 if response.status_code != 200:
                     print(f"  [VALIDATOR] API returned {response.status_code}")

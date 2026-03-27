@@ -606,6 +606,10 @@ class SlotManager:
         Complex = needs data from 2+ specific countries (multiple API calls).
         NOT complex = general questions, single country queries, time ranges for one country.
 
+        NOTE: country_to_country queries are NOT marked as complex since we have
+        smart logic in _fix_url_data_type() to handle them intelligently based on
+        whether both countries are mirror-only or if at least one has detailed data.
+
         Args:
             message: User's query message
             params: Extracted parameters from intent detection
@@ -614,6 +618,12 @@ class SlotManager:
             Tuple of (is_complex: bool, reason: str)
         """
         if not message:
+            return False, ""
+
+        # Check if this is a country_to_country intent
+        # These are handled by smart mirror detection logic, not complex query handler
+        if params and params.get("intent") == "country_to_country":
+            print(f"  [COMPLEX] Skipping complex check for country_to_country intent (has smart mirror logic)")
             return False, ""
 
         message_lower = message.lower()
