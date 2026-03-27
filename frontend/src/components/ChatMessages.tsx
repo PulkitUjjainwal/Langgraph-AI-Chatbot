@@ -321,6 +321,23 @@ export function ChatMessages({
     userQuery: undefined
   });
 
+  // Randomized thinking keywords
+  const thinkingKeywords = [
+    "Thinking",
+    "Analyzing",
+    "Processing",
+    "Understanding",
+    "Searching",
+    "Exploring",
+    "Reviewing",
+    "Evaluating",
+    "Researching",
+    "Examining"
+  ];
+  const [thinkingText] = useState(() => {
+    return thinkingKeywords[Math.floor(Math.random() * thinkingKeywords.length)] + "...";
+  });
+
   // Delayed feedback state
   const [delayedFeedback, setDelayedFeedback] = useState<DelayedFeedbackState>({
     show: false,
@@ -736,7 +753,7 @@ export function ChatMessages({
                         <span className={`typing-dot inline-block w-2.5 h-2.5 rounded-full ${msg.role === "user" ? "bg-white" : "bg-orange-500"}`}></span>
                       </div>
                       <span className={`text-xs ${msg.role === "user" ? "text-white/70" : "text-orange-600/70"}`}>
-                        Analyzing your query...
+                        {thinkingText}
                       </span>
                     </div>
                   ) : (
