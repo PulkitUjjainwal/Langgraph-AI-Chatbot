@@ -2562,38 +2562,34 @@ CRITICAL PRE-CHECK: Before using search_trade_data, verify it's a DATA request, 
 Base URL:
 https://www.marketinsidedata.com/en/search-data/
 
-🚨 CRITICAL BUSINESS LOGIC - SUPPLIER/BUYER DIRECTION MAPPING:
+🚨 CRITICAL BUSINESS LOGIC - SUPPLIER/BUYER = EXPORTER/IMPORTER MAPPING:
 
-Suppliers = EXPORTERS (they SUPPLY/EXPORT products):
-- "suppliers" → entity_type: "suppliers", direction: "export"
-- "suppliers in Turkey" → Shows companies that EXPORT from Turkey
-- "scrap metal suppliers" → Shows companies that EXPORT scrap metal
+**CORE RULE: Suppliers = Exporters, Buyers = Importers**
 
-Buyers = IMPORTERS (they BUY/IMPORT products):
-- "buyers" → entity_type: "buyers", direction: "import"
-- "buyers in USA" → Shows companies that IMPORT into USA
-- "steel buyers" → Shows companies that IMPORT steel
+When user asks for:
+- "suppliers" or "exporters" → entity_type: "exporters", direction: "export"
+- "buyers" or "importers" → entity_type: "importers", direction: "import"
 
-Importers = IMPORTERS (explicit):
-- "importers" → entity_type: "importer", direction: "import"
+Examples:
+- "suppliers in Turkey" → entity_type: "exporters", direction: "export" (shows companies that EXPORT from Turkey)
+- "scrap metal suppliers" → entity_type: "exporters", direction: "export" (companies that EXPORT scrap metal)
+- "buyers in USA" → entity_type: "importers", direction: "import" (shows companies that IMPORT into USA)
+- "steel buyers" → entity_type: "importers", direction: "import" (companies that IMPORT steel)
+- "india exporters" → entity_type: "exporters", direction: "export"
+- "china importers" → entity_type: "importers", direction: "import"
 
-Exporters = EXPORTERS (explicit):
-- "exporters" → entity_type: "exporter", direction: "export"
+Entity → entity_type param mapping (USE THIS EXACTLY):
+- User says "suppliers" → YOU SET entity_type: "exporters" (because suppliers = exporters)
+- User says "buyers" → YOU SET entity_type: "importers" (because buyers = importers)
+- User says "importers" → YOU SET entity_type: "importers"
+- User says "exporters" → YOU SET entity_type: "exporters"
+- User says "trade data" (general) → YOU SET entity_type: "trade"
 
-Entity → entity_type param mapping:
-- "importers", "top importers" → entity_type: "importer", direction: "import"
-- "exporters", "top exporters" → entity_type: "exporter", direction: "export"
-- "suppliers" → entity_type: "suppliers", direction: "export" (SUPPLIERS EXPORT)
-- "buyers" → entity_type: "buyers", direction: "import" (BUYERS IMPORT)
-- "trade data", general → entity_type: "trade"
+IMPORTANT: ALWAYS map suppliers→exporters and buyers→importers in your response
 
-IMPORTANT: Extract entity_type when user mentions importers/exporters/suppliers/buyers
-
-Direction mapping (default logic):
-- import → "import"
-- export → "export"
-- suppliers → "export" (OVERRIDE: suppliers always export)
-- buyers → "import" (OVERRIDE: buyers always import)
+Direction mapping:
+- importers/buyers → direction: "import"
+- exporters/suppliers → direction: "export"
 
 URL rules:
 - country is REQUIRED (ask if missing)
@@ -2659,17 +2655,17 @@ Importer:
 https://www.marketinsidedata.com/en/search-data/importer?type=import&country={country}&product={product}
 https://www.marketinsidedata.com/en/search-data/importer?type=import&country={country}&hs_code={hs_code}
 
-Exporter:
+Exporter (also called Suppliers):
 https://www.marketinsidedata.com/en/search-data/exporter?type=export&country={country}&product={product}
 https://www.marketinsidedata.com/en/search-data/exporter?type=export&country={country}&hs_code={hs_code}
 
-Supplier (CRITICAL: Suppliers = EXPORTERS):
-https://www.marketinsidedata.com/en/search-data/suppliers?type=export&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/suppliers?type=export&country={country}&hs_code={hs_code}
+🚨 CRITICAL: When user asks for "suppliers", use /exporter endpoint (suppliers = exporters)
 
-Buyer (CRITICAL: Buyers = IMPORTERS):
-https://www.marketinsidedata.com/en/search-data/buyers?type=import&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/buyers?type=import&country={country}&hs_code={hs_code}
+Importer (also called Buyers):
+https://www.marketinsidedata.com/en/search-data/importer?type=import&country={country}&product={product}
+https://www.marketinsidedata.com/en/search-data/importer?type=import&country={country}&hs_code={hs_code}
+
+🚨 CRITICAL: When user asks for "buyers", use /importer endpoint (buyers = importers)
 
 ────────────────────────
 INTENT: search_country_data

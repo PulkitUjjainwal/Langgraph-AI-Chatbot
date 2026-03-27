@@ -915,30 +915,25 @@ class SlotManager:
                     print(f"  [SLOTS] Cannot generate URL: invalid country '{country}' for search_trade_data")
                     return None
 
-            # 🚨 CRITICAL BUSINESS LOGIC: Map entity_type to correct endpoint
-            # REMEMBER: Suppliers = EXPORTERS (they export/supply products)
-            #           Buyers = IMPORTERS (they buy/import products)
+            # 🚨 CRITICAL BUSINESS LOGIC: Suppliers = Exporters, Buyers = Importers
+            #
+            # CORE RULE:
+            # - When user asks for "suppliers" → Use /exporter endpoint (suppliers = exporters)
+            # - When user asks for "buyers" → Use /importer endpoint (buyers = importers)
             #
             # URL Endpoints Available:
-            # - /suppliers?type=export = domestic suppliers (who export)
-            # - /buyers?type=import = domestic buyers (who import)
-            # - /exporter?type=export = domestic exporters
-            # - /importer?type=import = domestic importers
-            # - /buyers?type=export = foreign buyers (of our exports)
-            # - /suppliers?type=import = foreign suppliers (to our imports)
+            # - /exporter?type=export = exporters/suppliers (they export/supply products)
+            # - /importer?type=import = importers/buyers (they import/buy products)
+            # - /trade?type={import|export} = general trade data
 
-            if entity_type == "suppliers":
-                endpoint = "suppliers"  # Use suppliers endpoint
-                direction = "export"    # Suppliers export
-            elif entity_type == "buyers":
-                endpoint = "buyers"     # Use buyers endpoint
-                direction = "import"    # Buyers import
-            elif entity_type == "importers":
-                endpoint = "importer"   # Use importer endpoint
-                direction = "import"
-            elif entity_type == "exporters":
-                endpoint = "exporter"   # Use exporter endpoint
+            if entity_type in ["exporters", "suppliers"]:
+                # SUPPLIERS = EXPORTERS: Use exporter endpoint for both
+                endpoint = "exporter"
                 direction = "export"
+            elif entity_type in ["importers", "buyers"]:
+                # BUYERS = IMPORTERS: Use importer endpoint for both
+                endpoint = "importer"
+                direction = "import"
             else:
                 # Default: use generic trade endpoint
                 endpoint = "trade"
