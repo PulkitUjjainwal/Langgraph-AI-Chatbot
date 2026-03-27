@@ -1656,6 +1656,9 @@ export default function ChatWidget() {
                   console.log('[Stream] Updated messages:', updated.filter(m => m.id === assistantMsgId));
                   return updated;
                 });
+
+                // Close the reader and break out of the loop
+                await reader.cancel();
                 return data.message;
               }
 
@@ -1672,6 +1675,9 @@ export default function ChatWidget() {
                     } : m
                   )
                 );
+
+                // Close the reader and break out of the loop
+                await reader.cancel();
                 return data.question;
               }
 
@@ -1700,7 +1706,18 @@ export default function ChatWidget() {
               }
 
               if (data.chunk) {
+                const isFirstChunk = accumulatedText === "";
                 accumulatedText += data.chunk;
+
+                // Log first chunk arrival (thinking indicator will be cleared)
+                if (isFirstChunk) {
+                  console.log('[Stream] ✅ First chunk received - thinking indicator cleared', {
+                    chunk: data.chunk.substring(0, 20),
+                    length: data.chunk.length
+                  });
+                }
+
+                // Update message immediately with new chunk
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === assistantMsgId ? { ...m, text: accumulatedText } : m
@@ -1834,18 +1851,26 @@ export default function ChatWidget() {
 
     // Not a generic question, proceed with streaming API
     console.log('[ChatWidget] Starting to show loader and close suggestions');
+
+    // IMPORTANT: Set state synchronously before adding message to ensure loader shows immediately
+    // This ensures React batches these updates together and isSending is true when ChatMessages renders
+    setIsSending(true); // Re-assert to ensure state is set (in case React batched the earlier call)
+    setSuggestedQuestions([]); // Close suggestions immediately
+
     setMessages((prev) => {
       const newMessages = [
         ...prev,
-        { id: assistantId, role: "assistant" as const, text: "" },
+        { id: assistantId, role: "assistant" as const, text: "" }, // Empty text triggers thinking dots
       ];
-      console.log('[ChatWidget] Added empty assistant message for loader', { assistantId, messageCount: newMessages.length });
+      console.log('[ChatWidget] ✨ Added empty assistant message for thinking indicator', {
+        assistantId,
+        messageCount: newMessages.length,
+        isSendingRef: isSendingRef.current
+      });
       return newMessages;
     });
-    
-    // Close suggested questions after adding the loader message
-    setSuggestedQuestions([]);
-    console.log('[ChatWidget] Closed suggested questions, isSending=true');
+
+    console.log('[ChatWidget] ⏳ Thinking indicator should be visible now');
 
     try {
       await sendStreamingRequest(text, assistantId, slotValues);

@@ -151,7 +151,7 @@ class SupportTriggerTracker:
         try:
             if self.redis:
                 key = f"{self.REDIS_KEY_PREFIX}{session_id}"
-                self.redis.redis_client.delete(key)
+                self.redis.client.delete(key)
             else:
                 self._memory_store.pop(session_id, None)
 
@@ -172,7 +172,7 @@ class SupportTriggerTracker:
             if self.redis:
                 # Try Redis first
                 key = f"{self.REDIS_KEY_PREFIX}{session_id}"
-                data = self.redis.redis_client.get(key)
+                data = self.redis.client.get(key)
 
                 if data:
                     triggers = json.loads(data)
@@ -204,7 +204,7 @@ class SupportTriggerTracker:
                 # Save to Redis with TTL
                 key = f"{self.REDIS_KEY_PREFIX}{session_id}"
                 data = json.dumps(triggers)
-                self.redis.redis_client.setex(key, self.TTL_SECONDS, data)
+                self.redis.client.setex(key, self.TTL_SECONDS, data)
             else:
                 # Fallback to in-memory
                 self._memory_store[session_id] = triggers

@@ -95,6 +95,7 @@ class CreditManager:
             "continue_chat_used": False,
             "multiplier": 1.0,
             "exhausted_at": None,
+            "exhaustion_notified": False,  # Track if user was already notified
             "last_deduction": None,
             "created_at": datetime.now().isoformat()
         }
@@ -181,6 +182,10 @@ class CreditManager:
 
         # Check if already exhausted
         if state.get("exhausted_at") and not state.get("continue_chat_used"):
+            # Mark that user has been notified (to avoid showing message repeatedly)
+            if not state.get("exhaustion_notified"):
+                state["exhaustion_notified"] = True
+                self._save_state(session_id, state)
             return False, state
 
         # Get base cost for intent
@@ -201,6 +206,7 @@ class CreditManager:
             # Credits exhausted
             state["exhausted_at"] = datetime.now().isoformat()
             state["remaining"] = 0
+            state["exhaustion_notified"] = False  # Will notify on this return
             self._save_state(session_id, state)
 
             print(f"[CREDITS] Session {session_id} exhausted. Intent: {intent}")

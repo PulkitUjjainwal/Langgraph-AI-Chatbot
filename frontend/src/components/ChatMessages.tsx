@@ -674,14 +674,24 @@ export function ChatMessages({
         const isWaitingForStream = msg.role === "assistant" && msg.text === "" && isLastMessage && isStreaming;
         const showStreamingCursor = msg.role === "assistant" && msg.text !== "" && isLastMessage && isStreaming;
 
-        // Debug logging for loader
+        // Enhanced debug logging for thinking indicator
         if (msg.role === "assistant" && msg.text === "" && isLastMessage) {
-          console.log('[ChatMessages] Loader check:', { 
-            msgId: msg.id, 
-            isLastMessage, 
-            isStreaming, 
+          console.log('[ChatMessages] ⏳ Thinking indicator check:', {
+            msgId: msg.id,
+            isLastMessage,
+            isStreaming,
             isWaitingForStream,
-            messageCount: messages.length 
+            messageCount: messages.length,
+            status: isWaitingForStream ? '✅ SHOWING DOTS' : '❌ NOT SHOWING'
+          });
+        }
+
+        // Log when streaming starts showing content
+        if (msg.role === "assistant" && msg.text !== "" && isLastMessage && isStreaming && msg.text.length < 20) {
+          console.log('[ChatMessages] 📝 Content streaming started:', {
+            msgId: msg.id,
+            textLength: msg.text.length,
+            preview: msg.text.substring(0, 20)
           });
         }
 
@@ -711,18 +721,23 @@ export function ChatMessages({
                     msg.role === "user"
                       ? "text-white rounded-br-md"
                       : "text-gray-900 rounded-bl-md"
-                  }`}
+                  } ${isWaitingForStream ? 'animate-pulse-soft' : ''}`}
                   style={{
                     wordBreak: 'break-word',
                     overflowWrap: 'break-word',
-                    backgroundColor: msg.role === "user" ? '#333333' : '#fff6ed'
+                    backgroundColor: msg.role === "user" ? '#333333' : (isWaitingForStream ? '#ffedd5' : '#fff6ed')
                   }}
                 >
                   {isTyping || isWaitingForStream ? (
-                    <div className="flex items-center gap-1 py-1">
-                      <span className={`typing-dot inline-block w-2 h-2 rounded-full ${msg.role === "user" ? "bg-white" : "bg-orange-500"}`}></span>
-                      <span className={`typing-dot inline-block w-2 h-2 rounded-full ${msg.role === "user" ? "bg-white" : "bg-orange-500"}`}></span>
-                      <span className={`typing-dot inline-block w-2 h-2 rounded-full ${msg.role === "user" ? "bg-white" : "bg-orange-500"}`}></span>
+                    <div className="flex flex-col gap-1.5 py-2 px-1" role="status" aria-label="Thinking">
+                      <div className="flex items-center gap-1.5">
+                        <span className={`typing-dot inline-block w-2.5 h-2.5 rounded-full ${msg.role === "user" ? "bg-white" : "bg-orange-500"}`}></span>
+                        <span className={`typing-dot inline-block w-2.5 h-2.5 rounded-full ${msg.role === "user" ? "bg-white" : "bg-orange-500"}`}></span>
+                        <span className={`typing-dot inline-block w-2.5 h-2.5 rounded-full ${msg.role === "user" ? "bg-white" : "bg-orange-500"}`}></span>
+                      </div>
+                      <span className={`text-xs ${msg.role === "user" ? "text-white/70" : "text-orange-600/70"}`}>
+                        Analyzing your query...
+                      </span>
                     </div>
                   ) : (
                     <>

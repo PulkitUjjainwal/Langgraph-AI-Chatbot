@@ -276,7 +276,7 @@ class Config:
     TEMPERATURE = 0.2
     TOP_P = 0.8
     TOP_K = 40
-    NUM_PREDICT = 400  # Reduced from 650 for faster responses (chatbot should be brief anyway)
+    NUM_PREDICT = int(os.getenv("LLM_MAX_TOKENS", "400"))  # Limit response length for consistent 8-12s timing (was 10-80 chunks = 5-27s)
     NUM_CTX = 3400
 
     DYNAMIC_MAX_CHUNKS = 10
@@ -1937,14 +1937,14 @@ class ChatbotManager:
                     use_mirror = False
                     print(f"  [URL FIX] ✅ '{country}' has detailed_import - will use type=import")
                 elif has_mirror:
-                    # Mirror-only country - redirect to dashboard/support
+                    # Mirror-only country - will show support options BUT still provide country page
                     use_mirror = True
                     print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_import (no detailed)")
-                    print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will trigger support options")
+                    print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will provide limited data + support options")
 
-                    # Return special marker to trigger support UI
+                    # Return special marker with direction info for country page URL generation
                     country_name_formatted = country.replace('-', ' ').title()
-                    return f"MIRROR_ONLY:{country_name_formatted}"
+                    return f"MIRROR_ONLY:{country_name_formatted}:import"
                 else:
                     print(f"  [URL FIX] ❌ '{country}' has no import data, keeping URL as-is")
                     return url
@@ -1959,14 +1959,14 @@ class ChatbotManager:
                     use_mirror = False
                     print(f"  [URL FIX] ✅ '{country}' has detailed_export - will use type=export")
                 elif has_mirror:
-                    # Mirror-only country - redirect to dashboard/support
+                    # Mirror-only country - will show support options BUT still provide country page
                     use_mirror = True
                     print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_export (no detailed)")
-                    print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will trigger support options")
+                    print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will provide limited data + support options")
 
-                    # Return special marker to trigger support UI
+                    # Return special marker with direction info for country page URL generation
                     country_name_formatted = country.replace('-', ' ').title()
-                    return f"MIRROR_ONLY:{country_name_formatted}"
+                    return f"MIRROR_ONLY:{country_name_formatted}:export"
                 else:
                     print(f"  [URL FIX] ❌ '{country}' has no export data, keeping URL as-is")
                     return url
@@ -3525,6 +3525,45 @@ OUTPUT JSON FORMAT (intent only, no content):
         print(f"[STREAM] Query: {message[:100]}...")
         print(f"{'='*70}")
 
+        # ========================================================================
+        # INSTANT CACHE: Common greetings & queries (0ms response time)
+        # ========================================================================
+        message_lower = message.lower().strip()
+
+        # Expand cache to include more variations (huge speed boost!)
+        common_responses = {
+            # Greetings
+            'hi': "Hi! I'm Alex from Market Inside - your trade data expert. What would you like to know about global trade data or finding buyers/suppliers?",
+            'hello': "Hello! I'm Alex from Market Inside. I help businesses find buyers, suppliers, and market opportunities worldwide. What would you like to know about global trade data?",
+            'hey': "Hey! I'm Alex from Market Inside. How can I help you with global trade intelligence today?",
+            'hi there': "Hi there! I'm Alex from Market Inside - your trade data consultant. What can I help you with today?",
+            'good morning': "Good morning! I'm Alex from Market Inside. How can I assist you with global trade data today?",
+            'good afternoon': "Good afternoon! I'm Alex from Market Inside. What trade intelligence can I help you with?",
+
+            # Common simple queries
+            'ok': "Great! How else can I help you with trade data?",
+            'okay': "Perfect! What other information do you need?",
+            'thanks': "You're welcome! Let me know if you need anything else about global trade data.",
+            'thank you': "You're welcome! Feel free to ask if you have more questions about our trade intelligence services.",
+            'yes': "Great! What specific information can I help you find?",
+            'no': "No problem! Is there anything else I can help you with?",
+        }
+
+        if message_lower in common_responses:
+            cached_response = common_responses[message_lower]
+            print(f"  [CACHE] ⚡⚡⚡ Instant cached response for '{message_lower}' (0ms)")
+            yield cached_response
+
+            # Still save to history
+            self._stream_history[session_id].append({"role": "user", "content": message})
+            self._stream_history[session_id].append({"role": "assistant", "content": cached_response})
+
+            if self.redis:
+                self.redis.save_message(session_id, {"role": "user", "content": message})
+                self.redis.save_message(session_id, {"role": "assistant", "content": cached_response})
+
+            return
+
         # Get credit and slot managers
         from chatbot.services.credit_manager import get_credit_manager
         from chatbot.services.slot_manager import get_slot_manager
@@ -3704,7 +3743,13 @@ OUTPUT JSON FORMAT (intent only, no content):
         can_proceed, credit_state = credit_mgr.deduct_credits(session_id, intent)
 
         if not can_proceed:
-            # Credits exhausted - yield exhaustion response
+            # Credits exhausted - check if user was already notified
+            if credit_state.get("exhaustion_notified"):
+                # User already saw exhaustion message, just ignore subsequent messages
+                print(f"  [STREAM] Credits already exhausted, user already notified. Ignoring message.")
+                return
+
+            # First time exhaustion - show message
             exhaustion = credit_mgr.get_exhaustion_response()
             print(f"  [STREAM] Credits exhausted for session {session_id}")
 
@@ -3825,6 +3870,7 @@ OUTPUT JSON FORMAT (intent only, no content):
         explore_url = ""
         is_continent_query = False  # Flag for continent queries (use KB, not API)
         is_restricted_country = False  # Flag for restricted countries (redirect to support)
+        mirror_country_info = None  # Flag for mirror countries (limited data, country-specific URL)
         continent_name = ""
         restricted_country_name = ""
 
@@ -4014,24 +4060,35 @@ OUTPUT JSON FORMAT (intent only, no content):
                     })
                     return
 
-                # Check if this is a MIRROR-ONLY COUNTRY (redirect to dashboard/support)
+                # Check if this is a MIRROR-ONLY COUNTRY (provide country page + support info)
+                is_mirror_country = False
+                mirror_country_info = None
                 if explore_url and explore_url.startswith("MIRROR_ONLY:"):
-                    mirror_country_name = explore_url.replace("MIRROR_ONLY:", "")
-                    print(f"  [STREAM] Mirror-only country detected: {mirror_country_name} - redirecting to dashboard")
+                    is_mirror_country = True
+                    # Parse: MIRROR_ONLY:Afghanistan:import
+                    parts = explore_url.replace("MIRROR_ONLY:", "").split(":")
+                    mirror_country_name = parts[0] if len(parts) > 0 else "Unknown"
+                    mirror_direction = parts[1] if len(parts) > 1 else "import"
 
-                    # Save messages
-                    if self.redis:
-                        self.redis.save_message(session_id, {"role": "user", "content": message})
+                    print(f"  [STREAM] Mirror-only country detected: {mirror_country_name} ({mirror_direction})")
+                    print(f"  [STREAM] Will provide country page URL + intelligent explanation from LLM")
 
-                    # Response message
-                    mirror_message = f"We have {mirror_country_name} trade data available on our premium dashboard! For detailed shipment-level data including buyer/supplier information, complete HS codes, and comprehensive trade records, please connect with our team:"
+                    # Generate country page URL (not generic platform page!)
+                    # Map country name to URL slug
+                    country_slug = mirror_country_name.lower().replace(' ', '-')
+                    direction_suffix = "imports" if mirror_direction == "import" else "exports"
 
-                    # Save assistant response
-                    if self.redis:
-                        self.redis.save_message(session_id, {
-                            "role": "assistant",
-                            "content": mirror_message
-                        })
+                    # Generate proper country page URL
+                    explore_url = f"https://www.marketinsidedata.com/en/country/{country_slug}/{direction_suffix}"
+                    print(f"  [STREAM] Generated country page URL: {explore_url}")
+
+                    # Store info for LLM context (will explain limitations intelligently)
+                    mirror_country_info = {
+                        "country": mirror_country_name,
+                        "direction": mirror_direction,
+                        "data_type": "mirror",
+                        "explanation": f"{mirror_country_name} has limited mirror trade data. Detailed shipment-level data with buyer/supplier names, complete HS codes, and comprehensive records requires dashboard access."
+                    }
 
                     # Track this interaction
                     try:
@@ -4042,25 +4099,15 @@ OUTPUT JSON FORMAT (intent only, no content):
                                 "trigger_type": "mirror_only_country",
                                 "country": mirror_country_name,
                                 "query": message,
-                                "shown_support": True
+                                "shown_support": False,  # Not showing support UI, letting LLM handle
+                                "provided_country_url": True
                             }
                         )
                     except Exception as e:
                         print(f"  [STREAM] Warning: Failed to track mirror-only interaction: {e}")
 
-                    # Use credit_exhausted format to reuse the same UI component
-                    yield json.dumps({
-                        "credit_exhausted": True,  # Reuse the same UI component as connect/support
-                        "message": mirror_message,
-                        "actions": [
-                            {"type": "schedule_demo", "label": "Schedule a Demo"},
-                            {"type": "chat_with_us", "label": "Talk to Live Agent"},
-                            {"type": "whatsapp", "label": "WhatsApp"},
-                            {"type": "continue_chat", "label": "Continue Chat"}
-                        ],
-                        "done": True
-                    })
-                    return
+                    # Continue to LLM response (don't return early)
+                    # LLM will intelligently explain + provide country page link
 
                 # Check if this is a CONTINENT query (use KB data, not API)
                 if explore_url and explore_url.startswith("CONTINENT:"):
@@ -4221,29 +4268,56 @@ OUTPUT JSON FORMAT (intent only, no content):
                 })
                 return
 
+        # ========================================================================
+        # OPTIMIZATION: Skip KB retrieval for simple intents (greeting, general)
+        # KB context is only needed for data queries and platform/API questions
+        # This saves 1-2 seconds on embeddings + vector search
+        # ========================================================================
+        simple_intents_no_kb = ["greeting", "general"]  # Simple intents don't need KB context
+        skip_kb = intent in simple_intents_no_kb
+
         # Get KB context using correct method and field name
-        # Use llm_query (reconstructed) for better KB matching
+        # OPTIMIZATION: Reduce KB chunks for faster processing (2 instead of 3)
         kb_context = ""
-        if self.kb_retriever:
+        if self.kb_retriever and not skip_kb:
             try:
                 kb_results = await asyncio.wait_for(
-                    asyncio.to_thread(self.kb_retriever.retrieve, llm_query, 3),
-                    timeout=5.0
+                    asyncio.to_thread(self.kb_retriever.retrieve, llm_query, 2),  # Reduced from 3 to 2
+                    timeout=3.0  # Reduced timeout from 5s to 3s
                 )
                 # Use 'chunk_text' field (same as main chat function)
-                kb_context = "\n".join([doc.get("chunk_text", "") for doc in kb_results[:3]])
-                print(f"  [STREAM] KB context retrieved: {len(kb_context)} chars")
+                # Truncate each chunk to 500 chars max for faster processing
+                kb_context = "\n".join([doc.get("chunk_text", "")[:500] for doc in kb_results[:2]])
+                print(f"  [STREAM] KB context retrieved: {len(kb_context)} chars (optimized)")
             except asyncio.TimeoutError:
-                print(f"  [STREAM] KB retrieval timed out (5s) - using empty context")
+                print(f"  [STREAM] KB retrieval timed out (3s) - using empty context")
             except Exception as e:
                 print(f"  [STREAM] KB retrieval failed: {type(e).__name__}: {e}")
-                import traceback
-                print(f"  [STREAM] Traceback: {traceback.format_exc()}")
+        elif skip_kb:
+            print(f"  [STREAM] ⚡ Skipping KB retrieval for '{intent}' intent (not needed)")
 
         # Merge context
         merged_context = ""
+
+        # Add mirror country explanation if applicable (CRITICAL for intelligent response)
+        if mirror_country_info:
+            merged_context += f"""[MIRROR COUNTRY - LIMITED DATA]
+Country: {mirror_country_info['country']}
+Data Type: Mirror trade data (limited detail)
+Explanation: {mirror_country_info['explanation']}
+
+IMPORTANT INSTRUCTIONS FOR YOUR RESPONSE:
+1. Acknowledge we have SOME data available for {mirror_country_info['country']}
+2. Explain that mirror data has limitations (aggregate values, limited details)
+3. PROVIDE the country page URL from the explore link below so users can view available data
+4. Mention that detailed shipment-level data requires dashboard access
+5. Be helpful and informative, not apologetic
+
+"""
+            print(f"  [STREAM] Added mirror country context for {mirror_country_info['country']}")
+
         if dynamic_content:
-            merged_context = f"DYNAMIC CONTENT:\n{dynamic_content[:2500]}\n\n"
+            merged_context += f"DYNAMIC CONTENT:\n{dynamic_content[:2500]}\n\n"
             print(f"  [STREAM] Dynamic content added to context: {len(dynamic_content)} chars")
         else:
             print(f"  [STREAM] WARNING: No dynamic content available!")
@@ -4253,13 +4327,24 @@ OUTPUT JSON FORMAT (intent only, no content):
         print(f"  [STREAM] Total merged context: {len(merged_context)} chars")
 
         # Build conversation history using smart history manager
+        # OPTIMIZATION: Reduce history for simple intents (faster processing)
         from chatbot.utils.conversation_history_manager import build_conversation_history
         history_messages = self._stream_history[session_id]
-        history_text = build_conversation_history(history_messages)
 
-        # DEBUG: Log history context being used
-        print(f"  [HISTORY] Building context from {len(history_messages)} messages")
-        print(f"  [HISTORY] Generated history: {len(history_text)} chars")
+        # Adjust history size based on intent (less history = faster)
+        if intent == "greeting":
+            # Greetings don't need history
+            history_text = ""
+            print(f"  [HISTORY] ⚡ Skipping history for greeting (faster)")
+        elif intent == "general":
+            # General queries need minimal history (last 4 messages)
+            history_text = build_conversation_history(history_messages, max_messages=4, max_chars=800)
+            print(f"  [HISTORY] Building minimal context from {len(history_messages)} messages → {len(history_text)} chars")
+        else:
+            # Data queries need more context (last 10 messages)
+            history_text = build_conversation_history(history_messages, max_messages=10, max_chars=2000)
+            print(f"  [HISTORY] Building context from {len(history_messages)} messages → {len(history_text)} chars")
+
         if history_text:
             # Show first 200 chars of history for debugging
             preview = history_text[:200].replace('\n', ' | ')
@@ -4310,8 +4395,10 @@ OUTPUT JSON FORMAT (intent only, no content):
 
 ABSOLUTE FORMAT RULES — NEVER VIOLATE:
 FORBIDDEN: "Let's break down" / "Let me analyze" / "## Step 1:" / "## Step 2:" / any "Step X:" headers / numbered analysis (1. Understand... 2. Analyze...) / section headers.
-REQUIRED: Start with the direct answer. 1-3 sentences. No structured breakdown. No analytical framing.
+FORBIDDEN: <think> tags or reasoning blocks. NEVER wrap content in <think></think> tags.
+REQUIRED: Start with the direct answer. 1-3 sentences. No structured breakdown. No analytical framing. Respond DIRECTLY without thinking tags.
 WRONG: "Let's break down systematically. ## Step 1: Understand the Data..."
+WRONG: "<think>analyzing the data...</think> Vietnam imported..."
 RIGHT: "Vietnam imported $1.2B of HS 94 in 2023, mainly from China. Want more details?"
 
 PROGRESSIVE QUESTIONING (SMART FOLLOW-UP):
@@ -4371,11 +4458,30 @@ if query is for platform
 """
 
         # Create LLM for streaming
-        # Using gpt-oss:20b-cloud which works reliably (no num_predict limits needed)
+        # Using DeepSeek v3.1 for high-quality responses
+        # CRITICAL FIX: System prompt explicitly forbids <think> tags, and chunk filtering strips them in real-time
+        # This prevents 18s delays from thinking mode
+
+        # AGGRESSIVE OPTIMIZATION: Minimize tokens for DeepSeek 671B speed
+        # With 671B params, each token takes ~100ms, so reduce aggressively
+        if intent == "greeting":
+            num_predict_optimized = 60  # Short, friendly greeting (6s instead of 15s)
+            print(f"  [STREAM] ⚡⚡ Optimizing for 'greeting': num_predict={num_predict_optimized}")
+        elif intent == "general":
+            num_predict_optimized = 180  # Concise but complete (18s instead of 30s)
+            print(f"  [STREAM] ⚡ Optimizing for 'general': num_predict={num_predict_optimized}")
+        elif intent in ["search_trade_data", "search_country_data", "country_to_country"]:
+            num_predict_optimized = 300  # Data queries need more detail
+            print(f"  [STREAM] 📊 Data query tokens: num_predict={num_predict_optimized}")
+        else:
+            num_predict_optimized = 400  # Default reduced from 650
+            print(f"  [STREAM] Standard tokens: num_predict={num_predict_optimized}")
+
         llm_kwargs = {
             'model': Config.LLM_MODEL,
             'temperature': 0.5,
             'request_timeout': 90.0,  # 90s timeout to prevent silent hangs
+            'num_predict': num_predict_optimized,  # Optimized: 150 for simple, 250 for complex
         }
 
         # SMART ROUTING: Use local by default, cloud only if API key is set
@@ -4429,18 +4535,19 @@ if query is for platform
 
                     raw_accumulated += chunk.content
 
-                    # Track open/close think tags to know if we're mid-block
-                    open_tags = raw_accumulated.count('<think>')
-                    close_tags = raw_accumulated.count('</think>')
-                    in_think_block = open_tags > close_tags
-
-                    if in_think_block:
-                        # Still inside a think block — don't yield anything yet
-                        continue
-
-                    # Strip all complete <think>...</think> blocks from accumulated text
+                    # CRITICAL FIX: Strip think blocks in real-time without blocking
+                    # This ensures content streams immediately even if model generates <think> tags
                     import re as _re
+
+                    # Remove all complete <think>...</think> blocks from accumulated text
                     cleaned = _re.sub(r'<think>.*?</think>', '', raw_accumulated, flags=_re.DOTALL)
+
+                    # Also remove any incomplete opening <think> tag at the end (partial chunk)
+                    cleaned = _re.sub(r'<think>[^<]*$', '', cleaned)
+
+                    # MONITORING: Warn if think tags detected (shouldn't happen after fix)
+                    if total_chunks_received == 10 and '<think>' in raw_accumulated:
+                        print(f"  [STREAM WARNING] Model still generating <think> tags despite system prompt - stripping in real-time")
 
                     # Yield only the new portion we haven't sent yet
                     new_content = cleaned[yielded_length:]
@@ -4455,7 +4562,9 @@ if query is for platform
                 # CRITICAL: If we received chunks but yielded nothing, yield what we have
                 if total_chunks_received > 0 and chunk_count == 0:
                     print(f"  [STREAM ERROR] Received {total_chunks_received} chunks but yielded nothing!")
-                    print(f"  [STREAM ERROR] This indicates a model compatibility issue")
+                    print(f"  [STREAM ERROR] Raw content length: {len(raw_accumulated)}, Cleaned: {len(cleaned)}")
+                    print(f"  [STREAM ERROR] Contains <think> tags: {'<think>' in raw_accumulated}")
+                    print(f"  [STREAM ERROR] This should NOT happen after chunk filtering fix!")
 
                     # Force yield the content, stripping think blocks if present
                     if cleaned:

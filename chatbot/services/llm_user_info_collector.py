@@ -46,6 +46,37 @@ class LLMUserInfoCollector:
         self._prompt_cache = {}  # Cache for LLM-generated prompts (field -> prompt)
         self._ollama_client = ollama_cloud_client  # For LLM detection calls
 
+    async def _call_llm_with_timeout(self, model: str, messages: list, options: dict, timeout: float = 10.0):
+        """
+        Call LLM with timeout to prevent hanging.
+
+        Args:
+            model: Model name
+            messages: Messages to send
+            options: Ollama options
+            timeout: Timeout in seconds (default 10s)
+
+        Returns:
+            Response dict or None if timeout/error
+        """
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._ollama_client.chat,
+                    model=model,
+                    messages=messages,
+                    options=options
+                ),
+                timeout=timeout
+            )
+            return response
+        except asyncio.TimeoutError:
+            print(f"[LLM_COLLECTOR] ⏱️ LLM call timed out after {timeout}s")
+            return None
+        except Exception as e:
+            print(f"[LLM_COLLECTOR] ❌ LLM call error: {e}")
+            return None
+
     async def analyze_and_collect_async(
         self,
         session_id: str,
@@ -106,9 +137,10 @@ class LLMUserInfoCollector:
 
         if should_ask and missing_realtime:
             # Ask for highest priority missing field
+            # Use template prompts (reliable and fast) instead of LLM generation
             for field in priority_order:
                 if field in missing_realtime:
-                    # Use template prompt (instant, no LLM call)
+                    # Use simple template prompt (fast and reliable)
                     prompt = self._generate_template_prompt(field, user_message)
                     print(f"[LLM_COLLECTOR] Asking for '{field}': {prompt[:60]}...")
                     return f"\n\n{prompt}"
@@ -296,12 +328,22 @@ class LLMUserInfoCollector:
                     # Bot asked for name, check if user provided simple text response
                     # Must be: 2-50 chars, mostly letters, not a question, not a common phrase
                     # Accept both capitalized AND lowercase names (e.g., "Pulkit" or "pulkit")
+                    # CRITICAL: Filter out affirmations, negations, and common non-name responses
+                    # This prevents "yes" (from "Was this helpful?") being treated as a name
+                    affirmative_responses = ['yes', 'no', 'ok', 'sure', 'nope', 'yeah', 'yep', 'nah',
+                                            'okay', 'fine', 'alright', 'thanks', 'thank you',
+                                            'great', 'good', 'perfect', 'nice']
+                    common_countries = ['usa', 'india', 'china', 'uk', 'brazil', 'germany', 'russia',
+                                       'japan', 'france', 'canada', 'mexico', 'italy', 'spain']
+                    greetings = ['hi', 'hello', 'hey', 'greetings', 'sup', 'howdy']
+
                     is_likely_name = (
                         2 <= len(message_stripped) <= 50 and
                         sum(c.isalpha() or c.isspace() for c in message_stripped) / len(message_stripped) > 0.6 and
                         '?' not in message_stripped and
-                        not any(word in user_lower for word in ['yes', 'no', 'ok', 'sure', 'nope', 'yeah']) and
-                        message_stripped.lower() not in ['hi', 'hello', 'hey', 'usa', 'india', 'china', 'uk', 'brazil', 'germany'] and
+                        message_stripped.lower() not in affirmative_responses and
+                        message_stripped.lower() not in common_countries and
+                        message_stripped.lower() not in greetings and
                         # Simple word with mostly letters (accept both "Pulkit" and "pulkit")
                         (len(message_stripped) <= 20 and
                          sum(c.isalpha() or c.isspace() for c in message_stripped) >= len(message_stripped) * 0.8)
@@ -347,22 +389,44 @@ class LLMUserInfoCollector:
 
         # Build focused prompt with context
         fields_str = ', '.join(missing_fields)
-        prompt = f"""You are a data extraction assistant. Analyze the conversation and detect if the user provided: {fields_str}.
+        prompt = f"""You are an intelligent data extraction assistant. Analyze the FULL conversation context to determine if the user provided: {fields_str}.
 
-Conversation history:
+CONVERSATION CONTEXT (last few exchanges):
 {context}
 
-Current user message: "{user_message}"
+CURRENT USER MESSAGE: "{user_message}"
 
-Detection rules:
-- Name: User providing their name (e.g., "my name is John", "I'm Sarah", "call me Alex", or direct answer to name question like "pulkit")
-- Email: Valid email address (e.g., user@domain.com)
-- Phone: Phone number (e.g., +1234567890 or similar)
-- Requirements: User expressing needs (e.g., "I need import data", "looking for statistics")
+INTELLIGENT DETECTION RULES:
 
-CRITICAL: Return ONLY a valid JSON object, nothing else. No thinking, no explanation, no markdown.
+1. NAME:
+   ✅ ACTUAL names: "My name is John", "I'm Sarah", "Call me Alex", "Pulkit", "John Smith", "Sarah Johnson"
+   ✅ Direct answers to name questions: Bot asks "What's your name?" → User: "Michael"
 
-Format: {{"name": true/false, "email": true/false, "phone": true/false, "requirements": true/false}}
+   ❌ NOT affirmations: "yes", "no", "ok", "sure", "thanks", "great", "fine", "alright", "yeah", "yep"
+   ❌ NOT acknowledgments to OTHER questions: If user says "yes" after "Was this helpful?", that's NOT their name!
+   ❌ NOT countries/products: "USA", "India", "Indonesia", "oil", "electronics"
+   ❌ NOT polite rejections: "not now", "maybe later", "skip", "no thanks"
+
+   CONTEXT MATTERS: Look at what the bot asked MOST RECENTLY. If bot asked "Was this helpful?" and user says "yes", that's an affirmation, NOT a name!
+
+2. EMAIL:
+   ✅ Valid format: user@domain.com, contact@company.co.uk
+
+3. PHONE:
+   ✅ Phone formats: +1234567890, (123) 456-7890, 123-456-7890
+
+4. REQUIREMENTS:
+   ✅ SPECIFIC needs: "I need Brazil import data", "Looking for electronics suppliers in Vietnam"
+   ❌ NOT vague: "yes", "no", "help me", "tell me more", "sure"
+
+CRITICAL ANALYSIS:
+- Read the conversation history to understand what question the user is answering
+- If bot just asked "Was this helpful?" and user says "yes" → that's an AFFIRMATION, not data
+- If bot just asked "Could you share your name?" and user says "John" → that's a NAME
+- Single word responses need context to interpret correctly!
+
+OUTPUT FORMAT (JSON only):
+{{"name": true/false, "email": true/false, "phone": true/false, "requirements": true/false}}
 
 Your response:"""
 
@@ -373,7 +437,7 @@ Your response:"""
                 print("[COLLECTOR_INTERNAL] No Ollama client, using fallback regex detection")
                 return self._fallback_regex_detection(user_message, missing_fields)
 
-            response = self._ollama_client.chat(
+            response = await self._call_llm_with_timeout(
                 model='qwen3.5:cloud',  # Cloud model (same as main)
                 messages=[{'role': 'user', 'content': prompt}],
                 options={
@@ -381,8 +445,13 @@ Your response:"""
                     'num_predict': 100,  # Reduced for faster response
                     'thinking': False,  # Disable thinking output
                     'num_ctx': 2048  # Reduced context for speed
-                }
+                },
+                timeout=10.0
             )
+
+            if not response:
+                print("[COLLECTOR_INTERNAL] LLM detection timed out, using fallback")
+                return self._fallback_regex_detection(user_message, missing_fields)
 
             # Parse JSON response with robust extraction
             # Handle models that put output in 'thinking' field (e.g., gpt-oss:20b-cloud)
@@ -659,6 +728,137 @@ Your response:"""
         except Exception as e:
             print(f"[LLM_COLLECTOR] Background LLM prompt generation failed: {e}")
 
+    async def _generate_contextual_prompt(
+        self,
+        field: str,
+        user_message: str,
+        bot_response: str,
+        conversation_history: List[Dict[str, str]]
+    ) -> Optional[str]:
+        """
+        INTELLIGENT LLM-driven prompt generation with FULL conversation context.
+
+        The LLM analyzes the conversation to decide:
+        1. Should we ask right now? (or skip if user just said "yes"/"no" to something else)
+        2. If yes, what's the most natural way to ask given the context?
+        3. How to handle affirmations ("Thanks for confirmation! Could you share...?")
+        4. How to handle negations (skip gracefully or wait)
+
+        Returns: Prompt string OR None (if LLM decides not to ask now)
+        """
+        if not self._ollama_client:
+            # Fallback to template if no LLM
+            return self._generate_template_prompt(field, user_message)
+
+        # Define what we're asking for
+        field_descriptions = {
+            'name': 'their name',
+            'email': 'their work email address',
+            'phone': 'their phone number'
+        }
+
+        # Build conversation context (last 4 exchanges for better understanding)
+        context = ""
+        if conversation_history:
+            recent = conversation_history[-8:]  # Last 4 exchanges
+            for msg in recent:
+                role = "Bot" if msg['role'] == 'assistant' else "User"
+                content = msg['content'][:200]
+                context += f"{role}: {content}\n"
+
+        # Add current exchange
+        context += f"Bot: {bot_response[:200]}\nUser: {user_message}\n"
+
+        # INTELLIGENT LLM prompt that understands context
+        system_prompt = f"""You are an intelligent assistant for Market Inside Data. Analyze the FULL conversation to decide how to ask for {field_descriptions.get(field, field)}.
+
+CONVERSATION HISTORY:
+{context}
+
+CRITICAL ANALYSIS - What is the user responding to?
+1. Look at the MOST RECENT bot message (the one right before user's response)
+2. Determine what question the user is answering
+
+SCENARIO HANDLING:
+
+IF bot just asked "Could you share your name?" AND user said "yes"/"sure"/"okay":
+→ User is confirming they're WILLING to share
+→ Acknowledge confirmation + ask for ACTUAL {field}
+→ Response: "Great! Thanks for confirming. What's your {field}?"
+
+IF bot just asked "Was this helpful?" AND user said "yes":
+→ User is answering THAT question (not about sharing {field})
+→ Don't ask for {field} yet - return "SKIP"
+
+IF bot asked about {field} AND user said "no"/"not now":
+→ User declined
+→ Return exactly "SKIP"
+
+IF user asked a substantive question (>5 words):
+→ Ask naturally: "I'd love to help! To personalize this, could you share {field_descriptions.get(field, field)}?"
+
+RULES:
+- SHORT responses (1-2 words like "yes", "no", "sure") are answers to the MOST RECENT bot question
+- Check what the bot asked LAST to understand user's answer
+- If asking for {field} is appropriate, be warm and natural (max 25 words)
+- If not appropriate right now, return exactly "SKIP"
+
+OUTPUT:
+- The prompt text (if asking is appropriate)
+- OR "SKIP" (if not appropriate now)
+
+Your response:"""
+
+        try:
+            # Add timeout to prevent hanging (max 10 seconds)
+            import asyncio
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._ollama_client.chat,
+                        model='qwen3.5:cloud',
+                        messages=[{'role': 'user', 'content': system_prompt}],
+                        options={
+                            'temperature': 0.7,
+                            'num_predict': 100,
+                            'thinking': False
+                        }
+                    ),
+                    timeout=10.0  # 10 second timeout
+                )
+            except asyncio.TimeoutError:
+                print(f"[LLM_COLLECTOR] ⏱️ LLM prompt generation timed out after 10s - using fallback")
+                return self._generate_template_prompt(field, user_message)
+
+            generated = response['message'].get('content', '').strip()
+
+            # Check if LLM decided to skip
+            if 'SKIP' in generated.upper() or len(generated) < 10:
+                print(f"[LLM_COLLECTOR] ⚡ LLM decided to skip asking for '{field}' (context: '{user_message}')")
+                return None
+
+            # Clean up response
+            generated = generated.strip('"\'')
+
+            # Extract just the prompt if there's extra text
+            if '\n' in generated:
+                lines = [l.strip() for l in generated.split('\n') if l.strip()]
+                for line in reversed(lines):
+                    if '?' in line and len(line) > 15:
+                        generated = line.strip('"\'')
+                        break
+
+            # Validate prompt
+            if len(generated) > 15 and len(generated) < 200:
+                print(f"[LLM_COLLECTOR] ✓ LLM generated contextual prompt: {generated[:60]}...")
+                return generated
+
+            return None
+
+        except Exception as e:
+            print(f"[LLM_COLLECTOR] Contextual prompt error: {e}, using fallback")
+            return self._generate_template_prompt(field, user_message)
+
     async def _generate_llm_prompt(
         self,
         field: str,
@@ -667,6 +867,7 @@ Your response:"""
     ) -> Optional[str]:
         """
         Use LLM to generate a personalized prompt based on conversation context.
+        (Legacy function - kept for backward compatibility)
         """
 
         # Define what we're asking for
@@ -696,15 +897,20 @@ Bot's last response: "{bot_response[:200]}..."
 Generate ONLY the prompt text (no quotes, no explanation):"""
 
         try:
-            response = self._ollama_client.chat(
+            response = await self._call_llm_with_timeout(
                 model='qwen3.5:cloud',  # Cloud model (same as main)
                 messages=[{'role': 'user', 'content': system_prompt}],
                 options={
                     'temperature': 0.7,  # Creative but controlled
                     'num_predict': 100,  # Increased for qwen
                     'thinking': False  # Disable thinking output
-                }
+                },
+                timeout=10.0
             )
+
+            if not response:
+                print(f"[LLM_COLLECTOR] Prompt generation timed out")
+                return None
 
             # Handle models that put output in 'thinking' field
             generated_prompt = response['message'].get('content', '').strip()
@@ -739,7 +945,8 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
 
     def _generate_template_prompt(self, field: str, user_message: str) -> str:
         """
-        Fallback template-based prompts (used if LLM fails).
+        Simple fallback template-based prompts (used if LLM fails).
+        No manual affirmation checking - LLM should handle that.
         """
 
         user_lower = user_message.lower()
@@ -821,12 +1028,11 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
         messages = conversation_history if conversation_history else self.redis.get_conversation(session_id)
 
         # ALWAYS try to extract name (allows updates like "pulkit" -> "pulkit ujjainwal")
-        # Try LLM first, then regex fallback if LLM fails
+        # Use LLM ONLY for name extraction (no regex fallback)
+        # Regex is unreliable and causes false positives like "Looking For"
         name = await self._extract_name_llm(user_message, messages)
 
-        # If LLM failed or returned None, try regex fallback
-        if not name:
-            name = self._extract_name_regex_fallback(user_message)
+        # Trust LLM result - if LLM says no name, don't use unreliable regex
 
         if name:
             # Check if this is an UPDATE (better/more complete name)
@@ -992,7 +1198,8 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
 
             # Query patterns (prevent extracting user queries as names)
             'general', 'overview', 'phones', 'used phones', 'data for',
-            'tell me', 'show me', 'find', 'search', 'get', 'about'
+            'tell me', 'show me', 'find', 'search', 'get', 'about',
+            'looking for', 'looking in', 'intrested in', 'interested in'
         }
 
         # Validation checks
@@ -1005,12 +1212,13 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
             return False
 
         # Check if it looks like a query (contains common query words)
-        query_keywords = ['import', 'export', 'overview', 'data', 'about', 'tell', 'show', 'find', 'search', 'get', 'for', 'in', 'the', 'used', 'phones', 'general']
+        query_keywords = ['import', 'export', 'overview', 'data', 'about', 'tell', 'show', 'find', 'search', 'get', 'for', 'in', 'the', 'used', 'phones', 'general', 'looking', 'intrested', 'interested']
         word_count = len(name.split())
         query_word_count = sum(1 for word in name.lower().split() if word in query_keywords)
 
         # If more than 30% of words are query keywords, it's likely a query, not a name
-        if word_count > 2 and (query_word_count / word_count) > 0.3:
+        # Changed from > 2 to >= 2 to catch 2-word invalid names like "Looking For"
+        if word_count >= 2 and (query_word_count / word_count) > 0.3:
             return False
 
         return True
@@ -1138,7 +1346,7 @@ Return ONLY the name in Title Case, or "none" if not found.
 
 Your response:"""
 
-            response = self._ollama_client.chat(
+            response = await self._call_llm_with_timeout(
                 model='qwen3.5:cloud',  # Cloud model (same as main)
                 messages=[{'role': 'user', 'content': prompt}],
                 options={
@@ -1146,19 +1354,33 @@ Your response:"""
                     'num_predict': 30,  # Names are very short, reduced for speed
                     'thinking': False,  # Disable thinking output
                     'num_ctx': 1024  # Reduced context for faster processing
-                }
+                },
+                timeout=10.0  # 10 second timeout
             )
+
+            if not response:
+                print(f"[LLM_COLLECTOR] Name extraction timed out or failed")
+                # Fallback to regex for explicit patterns like "my name is X"
+                return self._extract_name_regex_explicit(user_message)
 
             # Handle models that put output in 'thinking' field
             raw_response = response['message'].get('content', '').strip()
             if not raw_response and 'thinking' in response['message']:
                 raw_response = response['message']['thinking'].strip()
 
+            # DEBUG: Log the actual LLM response
+            print(f"[LLM_COLLECTOR] [DEBUG] Raw LLM response: '{raw_response[:200]}'")
+
             # ROBUST: Extract actual answer from thinking text
             name = self._extract_answer_from_thinking(raw_response, expected_type='name')
 
             if not name:
-                print(f"[LLM_COLLECTOR] No name found in LLM response")
+                print(f"[LLM_COLLECTOR] No name found in parsed LLM response, trying regex fallback")
+                # Try explicit regex patterns as safety net
+                name = self._extract_name_regex_explicit(user_message)
+                if name:
+                    print(f"[LLM_COLLECTOR] [OK] Regex fallback extracted: {name}")
+                    return name.title()
                 return None
 
             # Clean up extracted name
@@ -1192,8 +1414,9 @@ Your response:"""
             return name.title()
 
         except Exception as e:
-            print(f"[LLM_COLLECTOR] LLM name extraction failed: {e}, using regex fallback")
-            return self._extract_name_regex_fallback(user_message)
+            print(f"[LLM_COLLECTOR] LLM name extraction failed: {e}")
+            # Don't use regex fallback - it's unreliable
+            return None
 
     def _extract_answer_from_thinking(self, text: str, expected_type: str = 'text') -> Optional[str]:
         """
@@ -1210,6 +1433,7 @@ Your response:"""
 
         # Remove markdown formatting
         text = re.sub(r'\*\*|\`\`\`', '', text)
+        text_lower = text.lower()
 
         # Pattern 1: Look for "Output:", "Answer:", "Result:" followed by content
         answer_patterns = [
@@ -1225,12 +1449,25 @@ Your response:"""
                 if answer and answer.lower() not in ['none', 'n/a', 'not found']:
                     return answer
 
-        # Pattern 2: If no markers, take last line that doesn't look like thinking
+        # Pattern 2: For name extraction, if response is very short and clean, use it directly
+        if expected_type == 'name':
+            text_stripped = text.strip().strip('"\'.,*-#')
+            # If it's a single word or two words (name), and no thinking indicators, use it
+            if (2 <= len(text_stripped) <= 50 and
+                text_stripped.count('\n') == 0 and
+                text_stripped.count(' ') <= 3 and
+                not any(ind in text_lower for ind in ['thinking', 'analyze', 'extract', 'input:', 'output:', 'step', 'rule', 'context', 'task:'])):
+                # Looks like a clean name response
+                if text_stripped.lower() not in ['none', 'n/a', 'not found', 'unclear', 'no name']:
+                    print(f"[LLM_COLLECTOR] [DEBUG] Using direct response as name: '{text_stripped}'")
+                    return text_stripped
+
+        # Pattern 3: If no markers, take last line that doesn't look like thinking
         lines = [l.strip() for l in text.split('\n') if l.strip()]
         thinking_indicators = [
             'thinking', 'analyze', 'request', 'input:', 'step', 'rule',
             'context', 'task:', 'note:', 'explanation:', '1.', '2.', '3.',
-            'conclusion', '**', 'process:'
+            'conclusion', '**', 'process:', 'extract'
         ]
 
         for line in reversed(lines):
@@ -1247,6 +1484,37 @@ Your response:"""
             # Found potential answer
             if line_clean.lower() not in ['none', 'n/a', 'not found', 'unclear']:
                 return line_clean
+
+        return None
+
+    def _extract_name_regex_explicit(self, user_message: str) -> Optional[str]:
+        """
+        SAFE regex extraction for EXPLICIT name patterns only.
+
+        Only matches clear patterns like:
+        - "my name is John"
+        - "I'm Sarah"
+        - "call me Alex"
+
+        Does NOT match ambiguous patterns that cause false positives.
+        """
+        import re
+
+        # Only explicit name introduction patterns
+        explicit_patterns = [
+            r"(?:my name is|my name's)\s+([a-z]+(?:\s+[a-z]+)?)",
+            r"(?:i'm|i am)\s+([a-z]+)\s*(?:\.|!|$)",
+            r"(?:call me|this is)\s+([a-z]+(?:\s+[a-z]+)?)",
+        ]
+
+        for pattern in explicit_patterns:
+            match = re.search(pattern, user_message.lower())
+            if match:
+                name = match.group(1).strip().title()
+                # Validate it's a reasonable name
+                if self._is_valid_name(name) and len(name) >= 2:
+                    print(f"[LLM_COLLECTOR] [OK] Regex explicit pattern matched: {name}")
+                    return name
 
         return None
 
@@ -1325,15 +1593,20 @@ Examples:
 
 Your answer:"""
 
-            response = self._ollama_client.chat(
+            response = await self._call_llm_with_timeout(
                 model='qwen3.5:cloud',  # Cloud model (same as main)
                 messages=[{'role': 'user', 'content': prompt}],
                 options={
                     'temperature': 0.3,  # Moderate for natural responses
                     'num_predict': 50,  # Short answer expected
                     'thinking': False  # Disable thinking output
-                }
+                },
+                timeout=10.0
             )
+
+            if not response:
+                print(f"[LLM_COLLECTOR] Requirements extraction timed out")
+                return None
 
             # Handle models that put output in 'thinking' field
             raw_response = response['message'].get('content', '').strip()
@@ -1524,7 +1797,7 @@ Rules:
 
 Return ONLY the extracted requirement (no JSON, no explanation):"""
 
-            response = self._ollama_client.chat(
+            response = await self._call_llm_with_timeout(
                 model='qwen3.5:cloud',  # Cloud model (same as main)
                 messages=[{'role': 'user', 'content': prompt}],
                 options={
