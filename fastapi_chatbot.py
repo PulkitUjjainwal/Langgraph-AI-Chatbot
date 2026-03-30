@@ -73,6 +73,9 @@ import sys
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
+import aiohttp
+import asyncio
+from contextlib import asynccontextmanager
 
 # Load environment variables (override=True to ensure .env takes precedence)
 load_dotenv(override=True)
@@ -772,6 +775,13 @@ session_dynamic_content: Dict[str, str] = {}
 # Global source URL per session (for including in responses)
 session_source_url: Dict[str, str] = {}
 
+# Global cache for data availability API (cached for 7 days)
+data_availability_cache: Dict[str, Any] = {
+    "data": None,
+    "timestamp": 0,
+    "ttl": 604800  # 7 days cache (7 * 24 * 60 * 60 seconds)
+}
+
 # Global URL validator (initialized on startup)
 url_validator = None
 
@@ -820,14 +830,135 @@ def fetch_dynamic_trade_data(query: str = "") -> str:
     # Get current session's dynamic content
     # Note: This will be set before tool execution
     content = session_dynamic_content.get("current", "")
-    
+
     if content:
         return f"Dynamic Trade Data:\n\n{content}"
     else:
         return "No dynamic trade data available."
 
 
-all_tools = [fetch_dynamic_trade_data]
+async def fetch_data_availability(country: str = "") -> str:
+    """
+    Fetch data availability information for a specific country or all countries.
+    Use this tool when user asks about:
+    - Data coverage/availability for a country
+    - Time periods/date ranges available
+    - Months of data available
+    - What data types are available (Import/Export, Detailed/Mirror)
+
+    Args:
+        country: Country name to filter (optional). Leave empty for all countries.
+
+    Returns:
+        Formatted string with data availability information.
+    """
+    global data_availability_cache
+
+    # Check cache first (avoid redundant API calls)
+    current_time = time.time()
+    if (data_availability_cache["data"] is not None and
+        current_time - data_availability_cache["timestamp"] < data_availability_cache["ttl"]):
+        print(f"  [DATA_AVAIL_TOOL] Using cached data (age: {int(current_time - data_availability_cache['timestamp'])}s)")
+        cached_data = data_availability_cache["data"]
+    else:
+        # Fetch from API
+        print(f"  [DATA_AVAIL_TOOL] Fetching from API (cache expired or empty)")
+        api_url = "https://api-dp.marketinsidedata.com/api/v1/users/data-availability"
+        bearer_token = os.getenv("MARKETINSIDE_API_TOKEN") or os.getenv("MARKETINSIDE_BEARER_TOKEN") or ""
+
+        if not bearer_token:
+            print(f"  [DATA_AVAIL_TOOL] ⚠️ No API token found in environment!")
+            return "Error: API token not configured. Please set MARKETINSIDE_API_TOKEN in environment."
+
+        # Match the headers from the working curl command exactly
+        headers = {
+            'accept': 'application/json, text/plain, */*',
+            'accept-language': 'en-US,en;q=0.9',
+            'authorization': f'Bearer {bearer_token}',
+            'content-type': 'application/json',
+            'origin': 'https://www.marketinsidedata.com',
+            'referer': 'https://www.marketinsidedata.com/',
+            'sec-ch-ua': '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-site',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36'
+        }
+        payload = {
+            "data_type": "",
+            "continent": "",
+            "direction": "",
+            "searchQuery": country.lower() if country else "",
+            "pageNumber": 1,
+            "pageSize": 10000  # Match the curl command - fetch all countries
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)  # Increase timeout to 30 seconds
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as response:
+                    print(f"  [DATA_AVAIL_TOOL] API response status: {response.status}")
+                    if response.status == 200:
+                        result = await response.json()
+                        cached_data = result.get("data", [])
+                        if not cached_data:
+                            print(f"  [DATA_AVAIL_TOOL] ⚠️ API returned 200 but no data in response")
+                            return "Error: API returned empty data"
+                        # Update cache
+                        data_availability_cache["data"] = cached_data
+                        data_availability_cache["timestamp"] = current_time
+                        print(f"  [DATA_AVAIL_TOOL] ✓ Fetched {len(cached_data)} records from API")
+                    else:
+                        error_text = await response.text()
+                        print(f"  [DATA_AVAIL_TOOL] ✗ API error: {response.status} - {error_text[:200]}")
+                        return f"Error: Unable to fetch data availability (HTTP {response.status})"
+        except asyncio.TimeoutError:
+            print(f"  [DATA_AVAIL_TOOL] ✗ Request timed out after 30 seconds")
+            return "Error: API request timed out"
+        except Exception as e:
+            print(f"  [DATA_AVAIL_TOOL] ✗ Exception: {type(e).__name__}: {str(e)}")
+            return f"Error: Unable to fetch data availability ({str(e)})"
+
+    # Filter by country if specified
+    if country:
+        country_lower = country.lower()
+        filtered_data = [
+            record for record in cached_data
+            if country_lower in record.get("country", "").lower()
+        ]
+
+        if not filtered_data:
+            return f"No data availability information found for '{country}'. The country might not be available or the name might be misspelled."
+
+        # Format results for this country
+        result_lines = [f"Data Availability for {filtered_data[0].get('country', country)}:"]
+        result_lines.append("")
+
+        for record in filtered_data:
+            direction = record.get("direction", "Unknown")
+            data_type = record.get("data_type", "Unknown")
+            period = record.get("period", "Unknown")
+            coverage = record.get("data_coverage", "Unknown")
+
+            result_lines.append(f"- {direction} ({data_type}): {period} | Coverage: {coverage}")
+
+        return "\n".join(result_lines)
+    else:
+        # Return summary of all data
+        total_countries = len(set(record.get("country", "") for record in cached_data))
+        continents = set(record.get("continent", "") for record in cached_data if record.get("continent"))
+
+        return f"""Data Availability Summary:
+- Total countries covered: {total_countries}
+- Continents: {', '.join(sorted(continents))}
+- Total records: {len(cached_data)}
+
+To get specific information, ask about a particular country (e.g., "What data is available for Indonesia?")"""
+
+
+all_tools = [fetch_dynamic_trade_data, fetch_data_availability]
 
 
 # ============================================================================
@@ -1508,6 +1639,18 @@ CRITICAL RULES FOR DATA TYPES:
   - DO NOT generalize as just "Customs Data" or "Trade Data"
   - Be specific: "Mirror Data (50-70% coverage, Jan 2012 to May 2023), Transit Data (20-30% coverage, Jul 2020 to Oct 2024), Cargo Data (30-40%...)..."
   - IMPORTANT: If you see Cargo or Transit mentioned in context but not for this specific country, acknowledge that these data types exist for other countries
+
+TOOL USAGE (DATA AVAILABILITY):
+[IMPORTANT] When user asks about data availability, coverage, time periods, or date ranges for a country:
+  - Use the fetch_data_availability tool to get accurate, real-time information
+  - Examples of queries that need this tool:
+    * "What data is available for Indonesia?"
+    * "Tell me about months of data for Kenya"
+    * "What's the date range for Argentina imports?"
+    * "How many years of data do you have for Bangladesh?"
+    * "Show me data coverage for Brazil"
+  - After calling the tool, present the information naturally in your response
+  - Always mention specific periods (e.g., "Jan 2019 to Feb 2026") when available
 
 CONVERSATIONAL RULES:
 [DO] Use conversational language ("you're", "let's", "I'll show you")
@@ -3181,13 +3324,25 @@ INTELLIGENCE PRINCIPLES:
 INTENTS (EIGHT TOTAL):
 
 1. search_trade_data - User wants SPECIFIC trade records for a product/hs_code
-2. search_country_data - User wants HIGH-LEVEL country overview (NO specific product)
+2. search_country_data - User wants to SEE/VIEW trade data for a country (actual statistics, importers, etc.)
+   CRITICAL: Use this ONLY when user wants to VIEW the data, NOT when asking ABOUT data availability
+   Examples: "show me Indonesia imports", "what does India export", "Indonesia trade statistics"
+   NOT: "what data do you have for Indonesia", "which months of data available"
 3. country_to_country - Trade BETWEEN TWO specific countries
 4. hs_code - HS code, chapter, heading queries
-5. general - Platform questions, pricing, features
+5. general - Platform questions, pricing, features, AND data availability questions
+   CRITICAL: Data availability queries belong here (not search_country_data)
+   Examples: "what data is available for Indonesia?", "which months do you have?", "data coverage for Kenya?"
+   The LLM will use tools to answer these, NOT fetch trade data
 6. greeting - Hello, hi, thanks, goodbye
 7. contact_support - User explicitly requests human contact (talk to someone, connect me, schedule demo)
 8. out_of_scope - Non-trade topics OR execution services
+
+CRITICAL DISTINCTION - Data Availability vs Trade Data:
+- "What data do you have for Indonesia?" → general (asking ABOUT availability)
+- "Show me Indonesia data" → search_country_data (wants to SEE trade data)
+- "Which months are available for India?" → general (asking ABOUT coverage)
+- "India imports" → search_country_data (wants to VIEW trade data)
 
 IMPORTANT: Extract all relevant parameters (country, product, hs_code, direction, entity_type, etc.)
 """
@@ -4549,8 +4704,8 @@ OUTPUT JSON FORMAT (intent only, no content):
                 return
 
         # ========================================================================
-        # OPTIMIZATION: Skip KB retrieval for simple intents (greeting, general)
-        # KB context is only needed for data queries and platform/API questions
+        # OPTIMIZATION: Skip KB retrieval for simple intents (greeting, general, contact_support)
+        # Data availability uses tool calling instead of KB (KB data is stale)
         # This saves 1-2 seconds on embeddings + vector search
         # ========================================================================
         simple_intents_no_kb = ["greeting", "general", "contact_support"]  # Simple intents don't need KB context
@@ -4707,6 +4862,20 @@ Example 4 (COMPANY DATA - List actual names from context):
 User: "top buyers?" or "list importers"
 You: List the actual company names from the DYNAMIC CONTENT above. Never say "data is locked" if names are visible in context.
 
+TOOL USAGE (DATA AVAILABILITY):
+[CRITICAL] When user asks about data availability, coverage, time periods, months, or date ranges:
+  - ALWAYS use the fetch_data_availability tool to get accurate, real-time information
+  - Examples that REQUIRE tool usage:
+    * "What data is available for Indonesia?"
+    * "Tell me about months of data for Kenya"
+    * "Which months do you have data for India?"
+    * "What's the date range for Argentina?"
+    * "Show me data coverage for Brazil"
+    * "Latest data available for Indonesia"
+    * "How many years of data for Bangladesh?"
+  - After calling the tool, present the information naturally (e.g., "We have data from Jan 2019 to Feb 2026")
+  - NEVER guess or use outdated information - ALWAYS call the tool
+
 CONVERSATIONAL RULES:
 [DO] Use conversational language ("you're", "let's", "I'll show you")
 [DO] Provide specific, concrete information from context
@@ -4783,6 +4952,9 @@ if query is for platform
 
         llm = ChatOllama(**llm_kwargs)
 
+        # Bind tools for data availability queries
+        llm_with_tools = llm.bind_tools(all_tools)
+
         # Prepare messages - use llm_query (reconstructed for slot answers) instead of raw message
         llm_messages = [
             SystemMessage(content=system_prompt),
@@ -4791,6 +4963,41 @@ if query is for platform
 
         print(f"  [STREAM] Starting LLM streaming with {len(history_messages)} history messages...")
         print(f"  [STREAM] LLM query: '{llm_query[:100]}...'" if len(llm_query) > 100 else f"  [STREAM] LLM query: '{llm_query}'")
+
+        # ========================================================================
+        # TOOL CALLING: Check if LLM wants to call a tool first (non-streaming)
+        # ========================================================================
+        try:
+            print(f"  [STREAM] Checking if LLM wants to call tools...")
+            initial_response = await llm_with_tools.ainvoke(llm_messages)
+
+            # Check if tool was called
+            if hasattr(initial_response, 'tool_calls') and initial_response.tool_calls:
+                tool_call = initial_response.tool_calls[0]
+                tool_name = tool_call.get('name', '')
+                tool_args = tool_call.get('args', {})
+
+                print(f"  [STREAM] 🔧 LLM called tool: {tool_name} with args: {tool_args}")
+
+                # Execute the tool
+                if tool_name == 'fetch_data_availability':
+                    country = tool_args.get('country', '')
+                    print(f"  [STREAM] Executing fetch_data_availability for: '{country}'")
+                    tool_result = await fetch_data_availability(country)
+                    print(f"  [STREAM] ✓ Tool result: {len(tool_result)} chars")
+
+                    # Add tool result to messages
+                    from langchain_core.messages import ToolMessage
+                    llm_messages.append(initial_response)
+                    llm_messages.append(ToolMessage(content=tool_result, tool_call_id=tool_call.get('id', 'tool_call_1')))
+
+                    print(f"  [STREAM] Added tool result to context, now streaming final response...")
+        except Exception as e:
+            print(f"  [STREAM] Tool check failed or not needed: {e}")
+
+        # ========================================================================
+        # STREAMING: Stream the final response
+        # ========================================================================
         chunk_count = 0
         full_response = ""
 
@@ -5342,6 +5549,43 @@ async def lifespan(app: FastAPI):
         sys.stderr.write("[OK] Slot collection enabled\n")
         sys.stderr.flush()
 
+        # Initialize support interaction service
+        try:
+            await support_interaction_service.initialize()
+            sys.stderr.write("[OK] Support interaction service initialized\n")
+            sys.stderr.flush()
+        except Exception as e:
+            sys.stderr.write(f"[WARNING] Support service failed to initialize: {e}\n")
+            sys.stderr.flush()
+
+        # Initialize URL validator with Redis
+        global url_validator
+        try:
+            url_validator = get_url_validator(redis_manager)
+            sys.stderr.write("[OK] URL validator initialized with Redis caching\n")
+            sys.stderr.flush()
+        except Exception as e:
+            sys.stderr.write(f"[WARNING] URL validator failed to initialize: {e}\n")
+            sys.stderr.write("[WARNING] URLs will not be validated (all URLs will be shown)\n")
+            sys.stderr.flush()
+
+        # Warmup data availability cache
+        try:
+            sys.stderr.write("[INFO] Warming up data availability cache...\n")
+            sys.stderr.flush()
+            result = await fetch_data_availability("")
+            if "Error" not in result:
+                sys.stderr.write("[OK] Data availability cache warmed up successfully!\n")
+                sys.stderr.write(f"[INFO] Cache valid for 7 days (expires: {datetime.fromtimestamp(data_availability_cache['timestamp'] + data_availability_cache['ttl']).strftime('%Y-%m-%d %H:%M:%S')})\n")
+                sys.stderr.flush()
+            else:
+                sys.stderr.write(f"[WARNING] Cache warmup failed: {result[:100]}\n")
+                sys.stderr.flush()
+        except Exception as e:
+            sys.stderr.write(f"[WARNING] Cache warmup error: {e}\n")
+            sys.stderr.write("[INFO] Cache will be populated on first query\n")
+            sys.stderr.flush()
+
         # Print Redis stats
         stats = redis_manager.get_stats()
         sys.stderr.write(f"\nRedis Stats:\n")
@@ -5379,9 +5623,8 @@ app = FastAPI(
     title="Export Genius AI Chatbot API",
     description="LangGraph-powered chatbot with RAG and dynamic content fetching",
     version="1.0.0",
-    default_response_class=DecimalJSONResponse
-    # Lifespan temporarily disabled for debugging
-    # lifespan=lifespan
+    default_response_class=DecimalJSONResponse,
+    lifespan=lifespan
 )
 print("[DEBUG] FastAPI app created!")
 
@@ -7968,31 +8211,6 @@ support_interaction_service = SupportInteractionService(
     password=os.getenv("MYSQL_PASSWORD", ""),
     database=os.getenv("MYSQL_DATABASE", "chatbot")
 )
-
-
-@app.on_event("startup")
-async def init_support_interaction_service():
-    """Initialize support interaction service on startup"""
-    await support_interaction_service.initialize()
-
-
-@app.on_event("startup")
-async def init_url_validator():
-    """Initialize URL validator with Redis on startup"""
-    global url_validator
-    try:
-        from chatbot.integrations.redis.client import RedisMemoryManager
-        redis_manager = RedisMemoryManager(
-            host=Config.REDIS_HOST,
-            port=Config.REDIS_PORT,
-            db=Config.REDIS_DB,
-            password=Config.REDIS_PASSWORD if Config.REDIS_PASSWORD else None
-        )
-        url_validator = get_url_validator(redis_manager)
-        print("[URL Validator] OK - Initialized with Redis caching")
-    except Exception as e:
-        print(f"[URL Validator] WARNING - Failed to initialize: {e}")
-        print(f"[URL Validator] URLs will not be validated (all URLs will be shown)")
 
 
 @router.post("/support/track", response_model=SupportInteractionResponse)
