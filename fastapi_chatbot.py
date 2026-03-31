@@ -795,8 +795,7 @@ async def set_source_url_if_valid(url: str, source: str = "unknown") -> bool:
 
     Args:
         url: URL to validate and set
-        source: Source of URL ("slot_generated", "dynamic_url", "unknown")
-                Slot-generated URLs are trusted immediately without validation
+        source: Source of URL (kept for backward compatibility, currently unused)
 
     Returns:
         True if URL was set, False if invalid/404
@@ -806,22 +805,14 @@ async def set_source_url_if_valid(url: str, source: str = "unknown") -> bool:
     if not url:
         return False
 
-    # OPTIMIZATION: Trust slot-generated URLs immediately
-    # These are constructed from valid slots, so no need to validate
-    if source == "slot_generated":
-        session_source_url["current"] = url
-        print(f"  [URL] ✓ Using slot-generated URL (trusted): {url[:60]}...")
-        # Still validate in background to cache for future use
-        if url_validator:
-            await url_validator.validate_in_background(url)
-        return True
+    # Note: Even slot-generated URLs need validation (valid slots != valid page)
+    # For example, germany + turkey slots are valid, but the page might 404
 
     # For other URLs, check validation cache
     if not url_validator:
-        # No validator available - trust the URL
-        session_source_url["current"] = url
-        print(f"  [URL] ✓ Using URL (no validator): {url[:60]}...")
-        return True
+        # No validator available - don't show URL (be conservative)
+        print(f"  [URL] ✗ No validator available, skipping URL: {url[:60]}...")
+        return False
 
     # Check cache first (instant - no delay)
     is_valid = await url_validator.is_valid_cached(url)
@@ -836,20 +827,11 @@ async def set_source_url_if_valid(url: str, source: str = "unknown") -> bool:
         print(f"  [URL] ✗ Skipping cached invalid URL (404): {url[:60]}...")
         return False
     else:
-        # Not cached - for external URLs, validate first
-        # For marketinside URLs, trust them and validate in background
-        if "marketinsidedata.com" in url or "exportgenius.in" in url:
-            session_source_url["current"] = url
-            print(f"  [URL] ✓ Using marketinside URL (trusted): {url[:60]}...")
-            print(f"  [URL] ⏳ Validating in background for cache...")
-            await url_validator.validate_in_background(url)
-            return True
-        else:
-            # External URL - validate in background for next time
-            print(f"  [URL] ? External URL not validated yet, skipping: {url[:60]}...")
-            print(f"  [URL] ⏳ Validating in background for future use...")
-            await url_validator.validate_in_background(url)
-            return False
+        # Not cached - validate in background, don't show URL this time (be conservative)
+        print(f"  [URL] ? URL not validated yet, skipping: {url[:60]}...")
+        print(f"  [URL] ⏳ Validating in background for future use...")
+        await url_validator.validate_in_background(url)
+        return False
 
 
 def fetch_dynamic_trade_data(query: str = "") -> str:
