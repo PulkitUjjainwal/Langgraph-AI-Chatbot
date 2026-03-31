@@ -775,6 +775,9 @@ session_dynamic_content: Dict[str, str] = {}
 # Global source URL per session (for including in responses)
 session_source_url: Dict[str, str] = {}
 
+# Global flag to track if URL has been corrected (avoid redundant corrections)
+session_url_corrected: Dict[str, bool] = {}
+
 # Global cache for data availability API (cached for 7 days)
 data_availability_cache: Dict[str, Any] = {
     "data": None,
@@ -786,20 +789,39 @@ data_availability_cache: Dict[str, Any] = {
 url_validator = None
 
 
-async def set_source_url_if_valid(url: str) -> bool:
+async def set_source_url_if_valid(url: str, source: str = "unknown") -> bool:
     """
     Set source URL only if it's valid (not a 404 page)
 
     Args:
         url: URL to validate and set
+        source: Source of URL ("slot_generated", "dynamic_url", "unknown")
+                Slot-generated URLs are trusted immediately without validation
 
     Returns:
         True if URL was set, False if invalid/404
     """
     global url_validator, session_source_url
 
-    if not url or not url_validator:
+    if not url:
         return False
+
+    # OPTIMIZATION: Trust slot-generated URLs immediately
+    # These are constructed from valid slots, so no need to validate
+    if source == "slot_generated":
+        session_source_url["current"] = url
+        print(f"  [URL] ✓ Using slot-generated URL (trusted): {url[:60]}...")
+        # Still validate in background to cache for future use
+        if url_validator:
+            await url_validator.validate_in_background(url)
+        return True
+
+    # For other URLs, check validation cache
+    if not url_validator:
+        # No validator available - trust the URL
+        session_source_url["current"] = url
+        print(f"  [URL] ✓ Using URL (no validator): {url[:60]}...")
+        return True
 
     # Check cache first (instant - no delay)
     is_valid = await url_validator.is_valid_cached(url)
@@ -814,12 +836,20 @@ async def set_source_url_if_valid(url: str) -> bool:
         print(f"  [URL] ✗ Skipping cached invalid URL (404): {url[:60]}...")
         return False
     else:
-        # Not cached - validate in background for next time
-        # For now, DON'T include URL in response (be conservative)
-        print(f"  [URL] ? URL not validated yet, skipping: {url[:60]}...")
-        print(f"  [URL] ⏳ Validating in background for future use...")
-        await url_validator.validate_in_background(url)
-        return False
+        # Not cached - for external URLs, validate first
+        # For marketinside URLs, trust them and validate in background
+        if "marketinsidedata.com" in url or "exportgenius.in" in url:
+            session_source_url["current"] = url
+            print(f"  [URL] ✓ Using marketinside URL (trusted): {url[:60]}...")
+            print(f"  [URL] ⏳ Validating in background for cache...")
+            await url_validator.validate_in_background(url)
+            return True
+        else:
+            # External URL - validate in background for next time
+            print(f"  [URL] ? External URL not validated yet, skipping: {url[:60]}...")
+            print(f"  [URL] ⏳ Validating in background for future use...")
+            await url_validator.validate_in_background(url)
+            return False
 
 
 def fetch_dynamic_trade_data(query: str = "") -> str:
@@ -1557,12 +1587,9 @@ def create_chatbot_node():
 
         # ========================================================================
         # CRITICAL: FINAL URL FIX BEFORE SHOWING TO USER (chatbot_node)
-        # Extract intent from URL and apply mirror/detailed fix
+        # Extract intent from URL and apply mirror/detailed fix (if not already done)
         # ========================================================================
         if current_source_url and "marketinsidedata.com" in current_source_url:
-            print(f"\n{'🔧'*35}")
-            print(f"[FINAL URL FIX - CHATBOT_NODE] URL before: {current_source_url}")
-
             # Detect intent from URL path
             detected_intent = "unknown"
             if "/search-data/" in current_source_url:
@@ -1575,12 +1602,14 @@ def create_chatbot_node():
                 detected_intent = "hs_code"
 
             if detected_intent != "unknown":
-                # Apply fix - params will be extracted from URL inside the function
+                # Note: This path is for non-streaming flows
+                # Always apply fix here as this is standalone (not using session flag)
+                print(f"\n{'🔧'*35}")
+                print(f"[FINAL URL FIX - CHATBOT_NODE] URL before: {current_source_url}")
                 current_source_url = await self._fix_url_data_type(current_source_url, detected_intent, {})
                 print(f"[FINAL URL FIX - CHATBOT_NODE] URL after: {current_source_url}")
+                print(f"{'🔧'*35}\n")
                 session_source_url["current"] = current_source_url
-
-            print(f"{'🔧'*35}\n")
 
         prompt_config = PromptConfig(
             site_name=Config.SITE_NAME,
@@ -1744,6 +1773,10 @@ Remember: Brevity is key. Every word must add value. Shorter responses are ALWAY
                 cleaned_content = re.sub(r'^#{1,6}\s+', '', cleaned_content, flags=re.MULTILINE)
                 # Remove markdown italics/underscores
                 cleaned_content = cleaned_content.replace('__', '').replace('_', '')
+                # Remove internal reasoning/context text (meta-commentary)
+                cleaned_content = re.sub(r'^\s*[\*\-]\s+\*?\*?(?:Context|Note|Internal|Reasoning|Analysis|Thought)[:|\s].*?$', '', cleaned_content, flags=re.MULTILINE | re.IGNORECASE)
+                # Remove empty list markers
+                cleaned_content = re.sub(r'^\s*[\*\-]\s+$', '', cleaned_content, flags=re.MULTILINE)
                 # Update response with cleaned content
                 response.content = cleaned_content
 
@@ -2233,14 +2266,10 @@ class ChatbotManager:
                     use_mirror = False
                     print(f"  [URL FIX] ✅ '{country}' has detailed_import - will use type=import")
                 elif has_mirror:
-                    # Mirror-only country - will show support options BUT still provide country page
+                    # Mirror-only country - use mirror data
                     use_mirror = True
                     print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_import (no detailed)")
-                    print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will provide limited data + support options")
-
-                    # Return special marker with direction info for country page URL generation
-                    country_name_formatted = country.replace('-', ' ').title()
-                    return f"MIRROR_ONLY:{country_name_formatted}:import"
+                    print(f"  [URL FIX] ✅ Will update URL to use type=mirror_import")
                 else:
                     print(f"  [URL FIX] ❌ '{country}' has no import data, keeping URL as-is")
                     return url
@@ -2255,14 +2284,10 @@ class ChatbotManager:
                     use_mirror = False
                     print(f"  [URL FIX] ✅ '{country}' has detailed_export - will use type=export")
                 elif has_mirror:
-                    # Mirror-only country - will show support options BUT still provide country page
+                    # Mirror-only country - use mirror data
                     use_mirror = True
                     print(f"  [URL FIX] ⚠️  '{country}' ONLY has mirror_export (no detailed)")
-                    print(f"  [URL FIX] 🚨 MIRROR-ONLY COUNTRY - will provide limited data + support options")
-
-                    # Return special marker with direction info for country page URL generation
-                    country_name_formatted = country.replace('-', ' ').title()
-                    return f"MIRROR_ONLY:{country_name_formatted}:export"
+                    print(f"  [URL FIX] ✅ Will update URL to use type=mirror_export")
                 else:
                     print(f"  [URL FIX] ❌ '{country}' has no export data, keeping URL as-is")
                     return url
@@ -3838,6 +3863,9 @@ OUTPUT JSON FORMAT (intent only, no content):
         Yields:
             str: Chunks of the response text (JSON SSE format)
         """
+        # Declare global variables used in this function
+        global session_source_url, session_url_corrected
+
         start_time = time.time()
         print(f"\n{'='*70}")
         print(f"[STREAM] Session: {session_id}")
@@ -4113,18 +4141,29 @@ OUTPUT JSON FORMAT (intent only, no content):
                 except Exception as e:
                     print(f"  [STREAM] Warning: Could not track contact support intent: {e}")
 
+            # Build contact message with phone number
+            contact_message = (
+                f"📞 You can reach us at: {Config.CONTACT_PHONE_NUMBER}\n\n"
+                "Our team is available to assist you with:\n"
+                "• Trade data inquiries\n"
+                "• Custom reports and analysis\n"
+                "• Dashboard demos and onboarding\n"
+                "• Enterprise solutions\n\n"
+                "Feel free to call us, or choose an option below:"
+            )
+
             # Save messages
             if self.redis:
                 self.redis.save_message(session_id, {"role": "user", "content": message})
                 self.redis.save_message(session_id, {
                     "role": "assistant",
-                    "content": "I'd be happy to connect you with our team! Choose the option that works best for you:"
+                    "content": contact_message
                 })
 
-            # Yield support UI
+            # Yield support UI with phone number
             yield json.dumps({
                 "credit_exhausted": True,  # Reuse existing UI component
-                "message": "I'd be happy to connect you with our team! Choose the option that works best for you:",
+                "message": contact_message,
                 "actions": [
                     {"type": "schedule_demo", "label": "Schedule a Demo"},
                     {"type": "chat_with_us", "label": "Talk to Live Agent"},
@@ -4397,6 +4436,9 @@ OUTPUT JSON FORMAT (intent only, no content):
                     explore_url = await self._fix_url_data_type(explore_url, intent, slot_state.slots)
                     print(f"  [STREAM] ⚡ URL AFTER FIX: {explore_url}")
 
+                    # Mark URL as corrected to avoid redundant correction later
+                    session_url_corrected[session_id] = True
+
                 # Check if this is a RESTRICTED COUNTRY (redirect to support)
                 if explore_url and explore_url.startswith("RESTRICTED:"):
                     restricted_country_name = explore_url.replace("RESTRICTED:", "")
@@ -4590,12 +4632,12 @@ OUTPUT JSON FORMAT (intent only, no content):
 
         # Get dynamic content (same logic as chat())
         dynamic_content = ""
-        global session_source_url
 
         # Clear source URL for non-data intents (general, greeting, etc.)
         # This prevents showing old data URLs for platform/API questions
         if intent not in data_intents:
             session_source_url["current"] = ""
+            session_url_corrected[session_id] = False  # Reset correction flag
             print(f"  [STREAM] Cleared source URL for non-data intent: {intent}")
 
         # Determine which URL to use for data fetching
@@ -4635,8 +4677,8 @@ OUTPUT JSON FORMAT (intent only, no content):
 
                 if related and score >= 0.5:
                     dynamic_content = full_content
-                    # Store the cached URL as source (only if valid)
-                    await set_source_url_if_valid(fetch_url)
+                    # Store the cached URL as source (slot-generated, already corrected)
+                    await set_source_url_if_valid(fetch_url, source="slot_generated")
                     print(f"  [STREAM] Using cached content: {len(full_content)} chars")
             if not dynamic_content:
                 try:
@@ -4649,8 +4691,8 @@ OUTPUT JSON FORMAT (intent only, no content):
                     )
                     dynamic_content = api_data or ""
                     # URL is stored by handle_dynamic_api_call (now uses fixed fetch_url)
-                    # Force store the fixed URL regardless of content (only if valid)
-                    await set_source_url_if_valid(fetch_url)
+                    # Force store the fixed URL regardless of content (slot-generated, already corrected)
+                    await set_source_url_if_valid(fetch_url, source="slot_generated")
                 except Exception as e:
                     print(f"  [STREAM] API call failed: {e}")
 
@@ -4801,18 +4843,24 @@ IMPORTANT INSTRUCTIONS FOR YOUR RESPONSE:
 
         # ========================================================================
         # CRITICAL: FINAL URL FIX AND VALIDATION BEFORE SHOWING TO USER
-        # 1. Apply mirror/detailed fix to ensure URL is correct
+        # 1. Apply mirror/detailed fix to ensure URL is correct (skip if already corrected)
         # 2. Validate URL to ensure it's not a 404 page
         # ========================================================================
         validated_url = ""
         if current_source_url and intent in ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]:
-            print(f"\n{'🔧'*35}")
-            print(f"[FINAL URL FIX] URL before final fix: {current_source_url}")
-            current_source_url = await self._fix_url_data_type(current_source_url, intent, params)
-            print(f"[FINAL URL FIX] URL after final fix: {current_source_url}")
-            print(f"{'🔧'*35}\n")
+            # Check if URL was already corrected earlier (avoid redundant API calls)
+            if session_url_corrected.get(session_id, False):
+                print(f"[FINAL URL FIX] ⚡ Skipping redundant correction - URL already fixed")
+                print(f"[FINAL URL FIX] Using corrected URL: {current_source_url}")
+            else:
+                print(f"\n{'🔧'*35}")
+                print(f"[FINAL URL FIX] URL before final fix: {current_source_url}")
+                current_source_url = await self._fix_url_data_type(current_source_url, intent, params)
+                print(f"[FINAL URL FIX] URL after final fix: {current_source_url}")
+                print(f"{'🔧'*35}\n")
+
             # Validate URL (only include if valid, not 404)
-            if await set_source_url_if_valid(current_source_url):
+            if await set_source_url_if_valid(current_source_url, source="slot_generated"):
                 validated_url = current_source_url
             else:
                 print(f"[URL] ⚠️ URL validation failed - excluding from response")
@@ -4835,10 +4883,14 @@ IMPORTANT INSTRUCTIONS FOR YOUR RESPONSE:
 ABSOLUTE FORMAT RULES — NEVER VIOLATE:
 FORBIDDEN: "Let's break down" / "Let me analyze" / "## Step 1:" / "## Step 2:" / any "Step X:" headers / numbered analysis (1. Understand... 2. Analyze...) / section headers.
 FORBIDDEN: <think> tags or reasoning blocks. NEVER wrap content in <think></think> tags.
-REQUIRED: Start with the direct answer. 1-3 sentences. No structured breakdown. No analytical framing. Respond DIRECTLY without thinking tags.
+FORBIDDEN: Internal notes, meta-commentary, or context explanations (e.g., "* Context: ...", "* Note: ...", "* Internal: ..."). Do NOT add any reasoning about the user's intent or your decision-making process.
+FORBIDDEN: Any markdown list items with internal reasoning or analysis.
+REQUIRED: Start with the direct answer. 1-3 sentences. No structured breakdown. No analytical framing. Respond DIRECTLY without thinking tags or internal notes.
 WRONG: "Let's break down systematically. ## Step 1: Understand the Data..."
 WRONG: "<think>analyzing the data...</think> Vietnam imported..."
+WRONG: "Goodbye! 👋 Let me know if you need help later. * Context: User seemed frustrated..."
 RIGHT: "Vietnam imported $1.2B of HS 94 in 2023, mainly from China. Want more details?"
+RIGHT: "Goodbye! 👋 Let me know if you need any trade data help later."
 
 PROGRESSIVE QUESTIONING (SMART FOLLOW-UP):
 - Use conversation history to understand follow-up questions like "list all of them" or "the same"
@@ -5039,6 +5091,14 @@ if query is for platform
                     # Also remove any incomplete opening <think> tag at the end (partial chunk)
                     cleaned = _re.sub(r'<think>[^<]*$', '', cleaned)
 
+                    # CRITICAL FIX: Remove internal reasoning/context text (meta-commentary)
+                    # Strips markdown list items with "Context:", "Note:", "Internal:", etc.
+                    # Pattern: * Context: ... or * **Context:** ... (entire line)
+                    cleaned = _re.sub(r'^\s*[\*\-]\s+\*?\*?(?:Context|Note|Internal|Reasoning|Analysis|Thought)[:|\s].*?$', '', cleaned, flags=_re.MULTILINE | _re.IGNORECASE)
+
+                    # Also remove any trailing list markers with whitespace
+                    cleaned = _re.sub(r'^\s*[\*\-]\s+$', '', cleaned, flags=_re.MULTILINE)
+
                     # MONITORING: Warn if think tags detected (shouldn't happen after fix)
                     if total_chunks_received == 10 and '<think>' in raw_accumulated:
                         print(f"  [STREAM WARNING] Model still generating <think> tags despite system prompt - stripping in real-time")
@@ -5072,6 +5132,9 @@ if query is for platform
                         # If cleaned is empty but we have raw content, strip think blocks and yield
                         import re as _re
                         force_cleaned = _re.sub(r'<think>.*?</think>', '', raw_accumulated, flags=_re.DOTALL)
+                        # Remove internal reasoning/context text
+                        force_cleaned = _re.sub(r'^\s*[\*\-]\s+\*?\*?(?:Context|Note|Internal|Reasoning|Analysis|Thought)[:|\s].*?$', '', force_cleaned, flags=_re.MULTILINE | _re.IGNORECASE)
+                        force_cleaned = _re.sub(r'^\s*[\*\-]\s+$', '', force_cleaned, flags=_re.MULTILINE)
                         clean_chunk = force_cleaned.replace('**', '').replace('__', '')
                         if clean_chunk:
                             chunk_count = 1
@@ -5533,13 +5596,22 @@ async def lifespan(app: FastAPI):
         sys.stderr.write("[OK] Slot collection enabled\n")
         sys.stderr.flush()
 
-        # Initialize user info service and manager
+        # Initialize user info service and NEW LLM-driven collector
         user_info_service = await init_user_info_service()
         if user_info_service and user_info_service.is_available:
+            # NEW: Intelligent LLM-driven collector with smart detection
+            # Use CLOUD Ollama client with fast model (gpt-oss:20b-cloud)
+            ollama_cloud = get_ollama_cloud_client()
+            llm_user_info_collector = LLMUserInfoCollector(redis_manager, user_info_service, ollama_cloud)
+            sys.stderr.write("[OK] LLM User info collector enabled (fast, contextual, using CLOUD Ollama)\n")
+            sys.stderr.flush()
+
+            # Keep old manager as fallback
             user_info_manager = UserInfoManager(redis_manager, user_info_service)
             sys.stderr.write("[OK] User info collection enabled\n")
             sys.stderr.flush()
         else:
+            llm_user_info_collector = None
             user_info_manager = None
             sys.stderr.write("[WARNING] User info collection disabled (MySQL unavailable)\n")
             sys.stderr.flush()
@@ -5697,16 +5769,9 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             )
 
         # ====================================================================
-        # SPECIAL CASE: Contact Information Request
+        # REMOVED: Contact info now handled by LLM intent detection
+        # This allows intelligent, context-aware responses instead of hardcoded patterns
         # ====================================================================
-        if detect_contact_info_request(request.message):
-            print("[SPECIAL] Contact info request detected")
-            return ChatResponse(
-                response=get_contact_info_response(),
-                session_id=request.session_id,
-                processing_time=0.1,
-                sources_used=["Contact Information"]
-            )
 
         # Guardrail node handles hostility detection in workflow
         # OPTIMIZED: Reduced timeout after async checkpoint + LLM optimization
@@ -5945,27 +6010,9 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
         )
 
     # ====================================================================
-    # SPECIAL CASE: Contact Information Request
+    # REMOVED: Contact info now handled by LLM intent detection
+    # This allows intelligent, context-aware responses instead of hardcoded patterns
     # ====================================================================
-    if detect_contact_info_request(request.message):
-        print("[SPECIAL] Contact info request detected")
-        async def contact_info_response():
-            response_data = {
-                "chunk": get_contact_info_response(),
-                "done": True,
-                "processing_time": 0.1
-            }
-            yield f"data: {json.dumps(response_data)}\n\n"
-
-        return StreamingResponse(
-            contact_info_response(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            }
-        )
 
     if not chatbot_manager:
         raise HTTPException(status_code=503, detail="Chatbot not initialized")

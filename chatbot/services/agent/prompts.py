@@ -516,11 +516,18 @@ Specific question - "Which countries available for Africa?":
         """Build contact information instruction"""
         return """
 [CONTACT INFORMATION]:
-- When users ask for contact information, email, or how to reach out, ALWAYS provide: info@marketinsidedata.com
-- When directing users to contact support or the team, use: info@marketinsidedata.com
-- For any queries requiring email contact, use: info@marketinsidedata.com
-- Example: "Contact us at info@marketinsidedata.com for more details"
-- Example: "Reach out to info@marketinsidedata.com and our team will help you"
+- When users ask for contact information, phone number, or how to reach out, provide:
+  📞 Phone: +44 7727 449124
+  📧 Email: info@marketinsidedata.com
+
+- For phone inquiries: "You can reach us at +44 7727 449124"
+- For email inquiries: "Contact us at info@marketinsidedata.com"
+- For general contact: "You can reach us at +44 7727 449124 or info@marketinsidedata.com"
+
+- Examples:
+  * "Contact us at info@marketinsidedata.com for more details"
+  * "You can reach us at +44 7727 449124 or email info@marketinsidedata.com"
+  * "Our team is available at +44 7727 449124 - feel free to call us"
 
 [OFFICE ADDRESS]:
 - When users ask for office address, location, office location, where we are located, our address, or visit us:
