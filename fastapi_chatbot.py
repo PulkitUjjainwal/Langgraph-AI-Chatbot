@@ -5155,12 +5155,20 @@ if query is for platform
             # ========================================================================
             # STEP 5: Finalize and store explore URL
             # ========================================================================
-            # Always show explore URL for data intents (simplified logic)
-            self._last_explore_url = explore_url if intent in data_intents else ""
-            self._show_support_buttons = False
+            # Validate explore URL before showing (prevent 404 pages)
+            if intent in data_intents and explore_url:
+                # Only include URL if it's validated and not a 404
+                is_url_valid = await set_source_url_if_valid(explore_url)
+                if is_url_valid:
+                    self._last_explore_url = explore_url
+                    print(f"  [URL] ✓ Explore URL validated and set: {explore_url[:60]}...")
+                else:
+                    self._last_explore_url = ""
+                    print(f"  [URL] ✗ Explore URL invalid (404), not showing button")
+            else:
+                self._last_explore_url = ""
 
-            if self._last_explore_url:
-                print(f"  [URL] Explore URL: {self._last_explore_url[:60]}...")
+            self._show_support_buttons = False
 
         except Exception as e:
             import traceback
@@ -8755,10 +8763,8 @@ async def stream_voice_message(request: VoiceMessageRequest):
                                                 voice_service.generate_speech(msg)))
                                         break
                                     if parsed.get('done'):
-                                        # Capture explore_url from the done chunk directly
-                                        # (covers cases where _last_explore_url may lag)
-                                        if parsed.get('explore_url'):
-                                            chatbot_manager._last_explore_url = parsed['explore_url']
+                                        # Don't override _last_explore_url here - it's already validated in stream_chat()
+                                        # The validated URL (or empty string for 404s) is already set correctly
                                         break
                                 except json.JSONDecodeError:
                                     pass

@@ -89,22 +89,23 @@ class URLValidator:
         if not url:
             return False
 
-        # OPTIMIZATION: Trust our own generated URLs (skip HEAD request)
-        # Saves ~0.5-1 second per request
-        # Only validate external/user-provided URLs
-        if "marketinsidedata.com" in url.lower():
-            print(f"[URLValidator] ✅ Trusting internal URL (skip HEAD): {url[:80]}...")
+        try:
+            # Use GET to check response body for "404 page not found" text
+            response = await self.http_client.get(url, timeout=5.0)
+
+            # Check status code
+            if response.status_code < 200 or response.status_code >= 400:
+                await self._cache_result(url, False)
+                return False
+
+            # Check for "404 page not found" in response body
+            if "404 page not found" in response.text.lower():
+                await self._cache_result(url, False)
+                return False
+
+            # URL is valid
             await self._cache_result(url, True)
             return True
-
-        try:
-            response = await self.http_client.head(url, timeout=5.0)
-            is_valid = 200 <= response.status_code < 400
-
-            # Cache result
-            await self._cache_result(url, is_valid)
-
-            return is_valid
 
         except Exception as e:
             print(f"[URLValidator] Failed to validate {url}: {e}")
@@ -137,6 +138,57 @@ class URLValidator:
             url: URL to validate
         """
         asyncio.create_task(self.validate_url(url))
+
+    async def clear_cache(self, url: str = None):
+        """
+        Clear cached validation result(s)
+
+        Args:
+            url: Specific URL to clear. If None, clears all URL caches
+        """
+        if url:
+            # Clear specific URL
+            if url in _url_cache:
+                del _url_cache[url]
+                print(f"[URLValidator] Cleared in-memory cache for: {url[:80]}...")
+
+            if self.redis:
+                cache_key = self._get_cache_key(url)
+                await asyncio.to_thread(self.redis.client.delete, cache_key)
+                print(f"[URLValidator] Cleared Redis cache for: {url[:80]}...")
+        else:
+            # Clear all URL caches
+            _url_cache.clear()
+            print(f"[URLValidator] Cleared all in-memory URL caches")
+
+            if self.redis:
+                # Delete all url_valid:* keys
+                pattern = "url_valid:*"
+                cursor = 0
+                deleted = 0
+                while True:
+                    cursor, keys = await asyncio.to_thread(
+                        self.redis.client.scan, cursor, match=pattern, count=100
+                    )
+                    if keys:
+                        await asyncio.to_thread(self.redis.client.delete, *keys)
+                        deleted += len(keys)
+                    if cursor == 0:
+                        break
+                print(f"[URLValidator] Cleared {deleted} Redis URL caches")
+
+    async def force_revalidate(self, url: str) -> bool:
+        """
+        Force revalidation of a URL (ignores cache)
+
+        Args:
+            url: URL to revalidate
+
+        Returns:
+            True if valid, False otherwise
+        """
+        await self.clear_cache(url)
+        return await self.validate_url(url)
 
     async def close(self):
         """Close HTTP client"""
