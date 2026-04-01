@@ -433,7 +433,10 @@ Market Inside has TWO different pages - use the RIGHT one based on context:
    - Context is about using the search tool
    - Following up after showing trade statistics
 
-   FORMAT: "📊 Check Out Our Page for More Details: https://www.marketinsidedata.com/en/search-data"
+   FORMAT: "📊 Check Out Our Page for More Details: {source_url}"
+
+   CRITICAL: Always use the {source_url} variable provided - NEVER hardcode the generic /search-data URL!
+   The source_url contains the FULL URL with all query parameters (product, country, type, etc.)
 
 EXAMPLES:
 
@@ -501,7 +504,9 @@ Specific question - "Which countries available for Africa?":
 (Using context: "Countries covered in Africa: Algeria, Angola, Benin, Botswana...")
 "Market Inside has trade data available for these African countries: Nigeria, South Africa, Egypt, Algeria, Angola and +51 more including Benin, Botswana, Cameroon, etc. Data includes detailed import/export records and mirror customs data.
 
-📊 Check Out Our Page for More Details: https://www.marketinsidedata.com/en/search-data"
+📊 Check Out Our Page for More Details: {source_url}"
+
+Note: Always use {source_url} variable - never hardcode URLs!
 
 === RULES ===
 - For GENERAL questions: Use world knowledge counts
