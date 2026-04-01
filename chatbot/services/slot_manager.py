@@ -999,6 +999,11 @@ class SlotManager:
             }
             country_slug = country_to_url_slug.get(country, country)
 
+            # Zero-pad single-digit HS codes (e.g., "2" -> "02")
+            # HS chapters are always 2 digits minimum
+            if hs_code and len(hs_code) == 1 and hs_code.isdigit():
+                hs_code = hs_code.zfill(2)
+
             return f"{base_url}/chapter/{country_slug}-{direction}-hs-code-{hs_code}"
 
         return None

@@ -3111,6 +3111,12 @@ HS Code Levels:
 - 6 digits = Subheading (e.g., 010121)
 - 8+ digits = Full HS Code (e.g., 84713020)
 
+CRITICAL: HS Code Formatting Rules:
+- Single-digit HS codes (1-9) MUST be zero-padded to 2 digits
+- Example: User asks "hs code 2" → extract as "02" NOT "2"
+- Example: User asks "chapter 8" → extract as "08" NOT "8"
+- This ensures URLs are correctly formatted (hs-code-02 not hs-code-2)
+
 IMPORTANT: If user doesn't specify import/export, default to "import"
 
 Examples:
