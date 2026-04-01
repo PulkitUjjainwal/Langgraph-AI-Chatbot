@@ -978,6 +978,7 @@ all_tools = [fetch_dynamic_trade_data, fetch_data_availability]
 # ============================================================================
 # classify_query_type() and extract_numeric_focus() now imported from chatbot.utils
 
+
 # ============================================================================
 # WORKFLOW NODES
 # ============================================================================
@@ -2145,21 +2146,55 @@ class ChatbotManager:
 
             print(f"  [URL FIX] ✅ Got {len(countries_list)} countries from API")
 
-            # Helper function to get country data types
-            def get_country_types(country_name: str, countries_data: list) -> list:
-                """Get available data types for a country from the API response."""
-                country_normalized = country_name.lower().strip().replace('-', ' ')
+            # Helper functions for country matching
+            def get_country_data(country_name: str, countries_data: list) -> tuple:
+                """
+                Get country data (types and correct slug) from API response.
+                Returns: (data_types: list, correct_slug: str, country_info: dict)
+                """
+                # Common country aliases that need normalization
+                # Map user input variations to API's official country_name (lowercase)
+                # API examples: "USA", "United Kingdom", "Saudi Arabia", "United Arab Emirates"
+                COUNTRY_ALIASES = {
+                    "united states": "usa",  # API returns "USA"
+                    "united states of america": "usa",
+                    "us": "usa",
+                    "america": "usa",
+                    "uk": "united kingdom",  # API returns "United Kingdom"
+                    "u.k.": "united kingdom",
+                    "england": "united kingdom",
+                    "uae": "united arab emirates",  # API returns "United Arab Emirates"
+                    "u.a.e.": "united arab emirates",
+                }
+
+                country_normalized = country_name.lower().strip().replace('-', ' ').replace('+', ' ')
+
+                # Check if it's an alias
+                country_lookup = COUNTRY_ALIASES.get(country_normalized, country_normalized)
+
                 for c in countries_data:
                     if not isinstance(c, dict):
                         continue
                     c_name = (c.get("country_name") or "").strip().lower()
                     c_code = (c.get("country_code") or "").strip().upper()
+                    c_slug = (c.get("country_name") or "").strip().lower().replace(' ', '-')
 
-                    if (c_name == country_normalized or
+                    # Match by: exact name, alias lookup, or country code
+                    if (c_name == country_lookup or
+                        c_name == country_normalized or
                         c_name.replace(" ", "-") == country_name.lower() or
-                        (len(country_name) == 2 and c_code == country_name.upper())):
-                        return c.get("data_type", [])
-                return []
+                        c_name.replace(" ", "+") == country_name.lower() or
+                        (len(country_name) <= 3 and c_code == country_name.upper()) or
+                        c_slug == country_normalized.replace(' ', '-')):
+                        # Return slug with hyphens for proper URL encoding (NOT plus signs)
+                        return (c.get("data_type", []), c_slug, c)
+
+                return ([], country_name, None)
+
+            def get_country_types(country_name: str, countries_data: list) -> list:
+                """Get available data types for a country from the API response."""
+                data_types, _, _ = get_country_data(country_name, countries_data)
+                return data_types
 
             # SPECIAL HANDLING FOR COUNTRY_TO_COUNTRY
             # Check BOTH countries - only show support if BOTH are mirror-only
@@ -2207,28 +2242,20 @@ class ChatbotManager:
                         return url
 
             # REGULAR SINGLE-COUNTRY HANDLING (for other intents)
-            # Find matching country
-            country_lower = country.lower().strip().replace('-', ' ')
-            available_types = []
-
-            for c in countries_list:
-                if not isinstance(c, dict):
-                    continue
-
-                c_name = (c.get("country_name") or "").strip().lower()
-                c_code = (c.get("country_code") or "").strip().upper()
-
-                # Match by name or code
-                if (c_name == country_lower or
-                    c_name.replace(" ", "-") == country.lower() or
-                    (len(country) == 2 and c_code == country.upper())):
-                    available_types = c.get("data_type", [])
-                    print(f"  [URL FIX] Found country '{c_name}' (code: {c_code}) with types: {available_types}")
-                    break
+            # Get country data (types and correct slug)
+            available_types, correct_country_slug, country_info = get_country_data(country, countries_list)
 
             if not available_types:
                 print(f"  [URL FIX] No data types found for '{country}', keeping URL as-is")
                 return url
+
+            # Log the match
+            if country_info:
+                c_name = country_info.get("country_name", "").strip()
+                c_code = country_info.get("country_code", "").strip()
+                print(f"  [URL FIX] Found country '{c_name}' (code: {c_code}) with types: {available_types}")
+                if correct_country_slug != country.replace(' ', '-'):
+                    print(f"  [URL FIX] ⚡ Country slug normalized: '{country}' → '{correct_country_slug}'")
 
             # Determine the correct type parameter
             is_import = current_direction == 'import'
@@ -2293,12 +2320,21 @@ class ChatbotManager:
                     new_type = current_direction
                     print(f"  [URL FIX] Country has DETAILED data, new_type='{new_type}'")
 
-                if old_type != new_type:
-                    print(f"  [URL FIX] ⚡ UPDATING URL TYPE: '{old_type}' → '{new_type}'")
+                # Check if either type or country needs updating
+                needs_update = (old_type != new_type) or (correct_country_slug != country.replace(' ', '-'))
+
+                if needs_update:
+                    print(f"  [URL FIX] ⚡ UPDATING URL PARAMETERS:")
+                    if old_type != new_type:
+                        print(f"  [URL FIX]   - Type: '{old_type}' → '{new_type}'")
+                    if correct_country_slug != country.replace(' ', '-'):
+                        print(f"  [URL FIX]   - Country: '{country}' → '{correct_country_slug}'")
+
                     # Flatten query params for proper encoding
                     flat_params = {k: v[0] if isinstance(v, list) and len(v) == 1 else v
                                    for k, v in query_params.items()}
                     flat_params['type'] = new_type
+                    flat_params['country'] = correct_country_slug
 
                     # Use quote_via=quote to encode spaces as %20 (not +)
                     from urllib.parse import quote
@@ -2315,7 +2351,7 @@ class ChatbotManager:
                     print(f"  [URL FIX] ✅ URL UPDATED SUCCESSFULLY!")
                     print(f"  [URL FIX] NEW URL: {url}")
                 else:
-                    print(f"  [URL FIX] ℹ Type already correct: '{new_type}' (no change needed)")
+                    print(f"  [URL FIX] ℹ URL already correct (no change needed)")
 
             # Note: For country_data, country_to_country, and hs_code intents,
             # the URLs don't have a "type" query parameter in the URL itself.
@@ -2923,17 +2959,17 @@ CRITICAL EXAMPLES - Use search_trade_data when PRODUCT is mentioned:
    CRITICAL: Suppliers = EXPORTERS (they supply/export products)
 
 INTELLIGENT COUNTRY NORMALIZATION (Handle ambiguous country names):
-"imports from america" → params: {country: "united states", direction: "import"}, intent: search_country_data
-   REASON: In trade context, "america" typically means USA. Normalize to "united states"
-   URL: https://www.marketinsidedata.com/en/country/usa/imports  (use "usa" slug for United States)
+"imports from america" → params: {country: "usa", direction: "import"}, intent: search_country_data
+   REASON: In trade context, "america" typically means USA. Use API's official name "USA"
+   URL: https://www.marketinsidedata.com/en/country/usa/imports  (API returns country_name: "USA")
 
-"exports to us" → params: {country: "united states", direction: "export"}
-   REASON: "us" and "usa" normalize to "united states"
-   URL: https://www.marketinsidedata.com/en/country/usa/exports  (use "usa" slug)
+"exports to us" → params: {country: "usa", direction: "export"}
+   REASON: "us" and "usa" normalize to API's official name "USA"
+   URL: https://www.marketinsidedata.com/en/country/usa/exports  (API returns country_name: "USA")
 
 "trade with england" → params: {country: "united kingdom"}
    REASON: "england" commonly refers to UK in trade contexts
-   URL: https://www.marketinsidedata.com/en/country/uk/imports  (use "uk" slug)
+   URL: https://www.marketinsidedata.com/en/country/united-kingdom/imports  (API returns country_name: "United Kingdom")
 
 ENTITY-FIRST QUERY PATTERNS (Entity mentioned BEFORE country):
 "exporters argentina" → params: {country: "argentina", entity_type: "exporter", direction: "export"}
@@ -2943,9 +2979,9 @@ ENTITY-FIRST QUERY PATTERNS (Entity mentioned BEFORE country):
 "importers china" → params: {country: "china", entity_type: "importer", direction: "import"}
 "suppliers germany" → params: {country: "germany", entity_type: "suppliers", direction: "export"}
    CRITICAL: Suppliers = EXPORTERS (direction should be "export")
-"buyers usa" → params: {country: "united states", entity_type: "buyers", direction: "import"}
+"buyers usa" → params: {country: "usa", entity_type: "buyers", direction: "import"}
    CRITICAL: Buyers = IMPORTERS (direction should be "import")
-   REASON: Handle "country after entity" pattern, normalize "usa" → "united states"
+   REASON: Handle "country after entity" pattern, use API's official name "USA"
 
 IMPORTANT: Extract country when mentioned with "from", "in", "to", or "of":
 "I need supplies from Taiwan" → params: {country: "taiwan", entity_type: "suppliers", direction: "export"} (NO product yet - will ask)
@@ -2960,7 +2996,7 @@ IMPORTANT: Extract country when mentioned with "from", "in", "to", or "of":
 Use search_country_data when NO product (general overview):
 "top importers in Indonesia" → intent: search_country_data (no product!)
 "what does India export?" → intent: search_country_data (general overview)
-"america imports" → intent: search_country_data, params: {country: "united states", direction: "import"}
+"america imports" → intent: search_country_data, params: {country: "usa", direction: "import"}
 
 URL formats:
 
@@ -3000,23 +3036,24 @@ Rules:
 IMPORTANT: If user doesn't specify import/export, default to "import"
 
 CRITICAL - URL SLUG MAPPING:
-When generating URLs, use these EXACT slugs for common countries:
-- "united states" → use slug "usa" (NOT "united-states")
-- "united kingdom" → use slug "uk" (NOT "united-kingdom")
-- "south korea" → use slug "south-korea"
-- "united arab emirates" → use slug "uae"
-- All other countries → use lowercase with hyphens (e.g., "saudi-arabia", "south-africa")
+URLs will use the official country_name from the /detailed-mirror-countries-list API.
+The API returns official names which are converted to URL slugs:
+- API returns "USA" → slug: "usa"
+- API returns "United Kingdom" → slug: "united-kingdom" (spaces → hyphens)
+- API returns "Saudi Arabia" → slug: "saudi-arabia"
+- API returns "South Korea" → slug: "south-korea"
+- API returns "United Arab Emirates" → slug: "united-arab-emirates"
+
+The URL validation system will automatically correct country names to match the API.
 
 URL formats:
-https://www.marketinsidedata.com/en/country/usa/imports  (NOT /country/united-states/imports)
-https://www.marketinsidedata.com/en/country/uk/exports  (NOT /country/united-kingdom/exports)
 https://www.marketinsidedata.com/en/country/{country-slug}/imports
 https://www.marketinsidedata.com/en/country/{country-slug}/exports
 
-CORRECT EXAMPLES:
+CORRECT EXAMPLES (using API's official country_name):
 "imports from america" → https://www.marketinsidedata.com/en/country/usa/imports
 "what does USA export" → https://www.marketinsidedata.com/en/country/usa/exports
-"UK imports" → https://www.marketinsidedata.com/en/country/uk/imports
+"UK imports" → https://www.marketinsidedata.com/en/country/united-kingdom/imports
 "India exports" → https://www.marketinsidedata.com/en/country/india/exports
 
 ────────────────────────
