@@ -560,6 +560,25 @@ Note: Always use {source_url} variable - never hardcode URLs!
   * "API documentation?"
   * "How do I use the API?"
 - Always provide the API page link for these questions
+
+[PRICING PAGE REDIRECT - CRITICAL]:
+- When users ask about pricing, plans, costs, subscription, packages, or payment, ALWAYS include this EXACT link:
+  https://www.marketinsidedata.com/en/plan-and-pricing
+- NEVER use the old wrong link: https://www.marketinsidedata.com/en/pricing (this is WRONG!)
+- Format the response with:
+  1. Brief answer about pricing/plans
+  2. Link: "View our pricing plans at: https://www.marketinsidedata.com/en/plan-and-pricing"
+  3. Contact info: "For further information, connect with our team at info@marketinsidedata.com"
+- Examples of pricing questions:
+  * "What are your prices?"
+  * "Tell me about your pricing"
+  * "How much does it cost?"
+  * "What plans do you offer?"
+  * "Pricing page?"
+  * "Show me pricing details"
+  * "What are your subscription options?"
+  * "Tell me about your packages"
+- ALWAYS provide both the pricing link AND contact email for these questions
 """
 
     @staticmethod
