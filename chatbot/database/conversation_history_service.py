@@ -626,27 +626,27 @@ class ConversationHistoryService:
                     params = []
 
                     if search:
-                        where_conditions.append("(session_id LIKE %s OR ip_address LIKE %s)")
-                        params.extend([f"%{search}%", f"%{search}%"])
+                        where_conditions.append("(cs.session_id LIKE %s OR cs.ip_address LIKE %s OR ui.email LIKE %s OR ui.name LIKE %s)")
+                        params.extend([f"%{search}%", f"%{search}%", f"%{search}%", f"%{search}%"])
 
                     if start_date:
-                        where_conditions.append("started_at >= %s")
+                        where_conditions.append("cs.started_at >= %s")
                         params.append(start_date)
 
                     if end_date:
-                        where_conditions.append("started_at <= %s")
+                        where_conditions.append("cs.started_at <= %s")
                         params.append(end_date)
 
                     if has_feedback is not None:
-                        where_conditions.append("has_feedback = %s")
+                        where_conditions.append("cs.has_feedback = %s")
                         params.append(has_feedback)
 
                     if lead_captured is not None:
-                        where_conditions.append("lead_captured = %s")
+                        where_conditions.append("cs.lead_captured = %s")
                         params.append(lead_captured)
 
                     if session_status:
-                        where_conditions.append("session_status = %s")
+                        where_conditions.append("cs.session_status = %s")
                         params.append(session_status)
 
                     where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
@@ -654,7 +654,8 @@ class ConversationHistoryService:
                     # Get total count
                     await cur.execute(f"""
                         SELECT COUNT(*) as total
-                        FROM conversation_sessions
+                        FROM conversation_sessions cs
+                        LEFT JOIN user_info ui ON cs.session_id = ui.session_id
                         WHERE {where_clause}
                     """, params)
 
@@ -667,26 +668,36 @@ class ConversationHistoryService:
 
                     await cur.execute(f"""
                         SELECT
-                            id, session_id, started_at, ended_at, last_activity,
-                            message_count, user_message_count, assistant_message_count,
-                            initial_url, user_agent, ip_address,
-                            device_type, browser_name, browser_version,
-                            os_name, os_version, country, region, city,
-                            timezone, language, has_feedback, lead_captured,
-                            session_status, created_at, updated_at
-                        FROM conversation_sessions
+                            cs.id, cs.session_id, cs.started_at, cs.ended_at, cs.last_activity,
+                            cs.message_count, cs.user_message_count, cs.assistant_message_count,
+                            cs.initial_url, cs.user_agent, cs.ip_address,
+                            cs.device_type, cs.browser_name, cs.browser_version,
+                            cs.os_name, cs.os_version, cs.country, cs.region, cs.city,
+                            cs.timezone, cs.language, cs.has_feedback, cs.lead_captured,
+                            cs.session_status, cs.created_at, cs.updated_at,
+                            ui.name as user_name, ui.email as user_email,
+                            ui.phone as user_phone, ui.requirements as user_requirements
+                        FROM conversation_sessions cs
+                        LEFT JOIN user_info ui ON cs.session_id = ui.session_id
                         WHERE {where_clause}
-                        ORDER BY {sort_column} {order}
+                        ORDER BY cs.{sort_column} {order}
                         LIMIT %s OFFSET %s
                     """, params + [limit, offset])
 
                     sessions = await cur.fetchall()
 
-                    # Convert timestamps to ISO format
+                    # Convert timestamps to ISO format and parse JSON fields
                     for session in sessions:
                         for field in ['started_at', 'ended_at', 'last_activity', 'created_at', 'updated_at']:
                             if session.get(field):
                                 session[field] = session[field].isoformat()
+
+                        # Parse requirements JSON if exists
+                        if session.get('user_requirements'):
+                            try:
+                                session['user_requirements'] = json.loads(session['user_requirements'])
+                            except:
+                                pass
 
                     return {
                         "sessions": sessions,
