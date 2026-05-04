@@ -291,6 +291,21 @@ class DataValidator:
         Returns:
             True if data available, False otherwise
         """
+        # CRITICAL: India data exclusion - Market Inside policy
+        country_lower = country.lower().strip().replace('-', ' ').replace('_', ' ')
+        india_variants = ["india", "in", "ind", "bharat", "hindustan"]
+
+        # Check if country matches India (exact match or ISO code)
+        is_india = (
+            country_lower in india_variants or
+            country.upper().strip() == "IN" or
+            len(country.strip()) == 2 and country.upper() == "IN"
+        )
+
+        if is_india:
+            print(f"  [VALIDATOR] India data blocked by policy (country: '{country}')")
+            return False
+
         try:
             api_url = "https://api-dp.marketinsidedata.com/api/v1/users/detailed-mirror-countries-list"
 
@@ -384,9 +399,9 @@ class DataValidator:
         Returns:
             List of alternative suggestions
         """
-        # Common countries with comprehensive data
+        # Common countries with comprehensive data (India excluded per MI policy)
         high_data_countries = [
-            "usa", "china", "india", "germany", "united-kingdom",
+            "usa", "china", "vietnam", "germany", "united-kingdom",
             "japan", "france", "italy", "south-korea", "canada"
         ]
 
@@ -432,8 +447,8 @@ class DataValidator:
                 "netherlands", "belgium", "poland", "austria", "switzerland"
             ],
             "asia": [
-                "china", "india", "japan", "south-korea", "indonesia",
-                "thailand", "vietnam", "malaysia", "singapore", "taiwan"
+                "china", "japan", "south-korea", "indonesia",
+                "thailand", "vietnam", "malaysia", "singapore", "taiwan", "bangladesh"
             ],
             "north_america": [
                 "usa", "canada", "mexico"
@@ -457,8 +472,8 @@ class DataValidator:
                 # Return other countries in same region
                 return [c for c in countries if c != country_lower]
 
-        # Default to major trading nations
-        return ["usa", "china", "germany", "india", "japan"]
+        # Default to major trading nations (India excluded per MI policy)
+        return ["usa", "china", "germany", "vietnam", "japan"]
 
     def _cache_result(self, key: str, result: ValidationResult):
         """

@@ -3,16 +3,16 @@ import { ChatHeader } from "./ChatHeader";
 import { ChatMessages } from "./ChatMessages";
 import { ChatFooter, type ChatFooterHandle } from "./ChatFooter";
 import genericQA from "../data/genericQA.json";
-import WhatsAppDropdown from "./WhatsAppDropdown";
+// import WhatsAppDropdown from "./WhatsAppDropdown"; // Commented out for now
 import { getDeviceInfoForAPI } from "../utils/deviceDetection";
 // import VoiceChat from "./VoiceChat"; // Commented out - will add back later
-import whatsappQr from  "../../public/whatsapp-qr.avif"
+// import whatsappQr from  "../../public/whatsapp-qr.avif" // Commented out for now
 import {
   // trackSuggestedQuestionClick,
   trackQuestionCardClick,
   trackActionClick,
   trackResetConversation,
-  trackWhatsAppClick,
+  // trackWhatsAppClick, // Commented out for now
   // trackVoiceChat,
   trackDataTypeSelection,
   trackCountryInput,
@@ -46,7 +46,7 @@ export type ChatMessage = {
   role: "assistant" | "user";
   text: string;
   actions?: {
-    type: "schedule_demo" | "whatsapp" | "call" | "hubspot_chat" | "chat_with_us" | "chat" | "refresh" | "continue_chat";
+    type: "schedule_demo" | /* "whatsapp" | */ "call" | "hubspot_chat" | "chat_with_us" | "chat" | "refresh" | "continue_chat";
     label: string;
   }[];
   suggestions?: string[]; // For pill buttons from init
@@ -151,6 +151,24 @@ function generateQuestionDescription(question: string): string {
   }
   return "Get detailed trade intelligence data";
 }
+
+// Helper function to automatically detect API URL based on environment
+const getApiUrl = () => {
+  // If VITE_API_URL is explicitly set, use it
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+
+  // Auto-detect based on current hostname
+  const hostname = window.location.hostname;
+
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return 'http://localhost:8003';
+  }
+
+  // Production URL
+  return 'https://chatbot.exportgenius.in';
+};
 
 export default function ChatWidget() {
   const [open, setOpen] = useState(false);
@@ -339,11 +357,21 @@ export default function ChatWidget() {
           try{
             var result = json && json.result;
             if(!result) return;
+
+            // Debug: Log the full response structure to see what we're working with
+            console.log('[Odoo] Full session response (first 1000 chars):', JSON.stringify(result).substring(0, 1000));
+            console.log('[Odoo] store_data keys:', result.store_data ? Object.keys(result.store_data) : 'no store_data');
+
             var guestToken = extractGuestToken(result);
             var channelId = extractChannelId(result);
             console.log('[Odoo] Session extracted — channelId:', channelId, 'guestToken found:', !!guestToken);
+
             if(!guestToken || typeof channelId !== 'number' || channelId <= 0){
-              console.warn('[Odoo] Invalid session data');
+              console.warn('[Odoo] Invalid session data - missing', !guestToken ? 'guestToken' : 'valid channelId');
+              // Debug: Show what we did find
+              if(result.store_data) {
+                console.log('[Odoo] Available store_data blocks:', Object.keys(result.store_data));
+              }
               return;
             }
             if(window.__odoo_session__ && window.__odoo_session__.guest_token) return;
@@ -481,6 +509,8 @@ export default function ChatWidget() {
           // Try immediately
           if(tryClickOdoo()){
             console.log('[Odoo] ✓ Button clicked successfully');
+            // Dispatch success event
+            window.dispatchEvent(new CustomEvent('odoo:opened'));
             // Reset flag after 2 seconds to allow future opens
             setTimeout(function(){ odooClickInProgress = false; }, 2000);
             return;
@@ -489,12 +519,14 @@ export default function ChatWidget() {
           // If not found, wait a bit for Odoo to render
           console.log('[Odoo] Button not found, waiting for Odoo to render...');
           var attempts = 0;
-          var maxAttempts = 10;
+          var maxAttempts = 20; // Increased from 10 to 20 (6 seconds total)
           var retryInterval = setInterval(function(){
             attempts++;
             if(tryClickOdoo()){
               console.log('[Odoo] ✓ Button clicked after', attempts, 'attempts');
               clearInterval(retryInterval);
+              // Dispatch success event
+              window.dispatchEvent(new CustomEvent('odoo:opened'));
               // Reset flag after 2 seconds
               setTimeout(function(){ odooClickInProgress = false; }, 2000);
               return;
@@ -502,6 +534,8 @@ export default function ChatWidget() {
             if(attempts >= maxAttempts){
               console.warn('[Odoo] Button not found after', maxAttempts, 'attempts');
               clearInterval(retryInterval);
+              // Dispatch failure event
+              window.dispatchEvent(new CustomEvent('odoo:failed'));
               // Reset flag even if button not found
               odooClickInProgress = false;
             }
@@ -515,7 +549,7 @@ export default function ChatWidget() {
 
     // Load Odoo assets_embed.js
     const embedScript = document.createElement('script');
-    embedScript.src = 'https://export-genius-pvt.odoo.com/im_livechat/assets_embed.js';
+    embedScript.src = 'https://crm.marketinsidedata.com/im_livechat/assets_embed.js';
     embedScript.async = true;
     embedScript.onload = () => console.log('[Odoo] assets_embed.js loaded');
     embedScript.onerror = () => console.error('[Odoo] Failed to load assets_embed.js');
@@ -523,7 +557,7 @@ export default function ChatWidget() {
 
     // Load Odoo loader
     const loaderScript = document.createElement('script');
-    loaderScript.src = 'https://export-genius-pvt.odoo.com/im_livechat/loader/1';
+    loaderScript.src = 'https://crm.marketinsidedata.com/im_livechat/loader/1';
     loaderScript.async = true;
     loaderScript.onload = () => console.log('[Odoo] loader/1 loaded');
     loaderScript.onerror = () => console.error('[Odoo] Failed to load loader/1');
@@ -575,6 +609,12 @@ export default function ChatWidget() {
 
     const loadHistory = async () => {
       try {
+        // Clear stale Odoo session data on page load
+        if (window.__odoo_session__) {
+          console.log("[History] Clearing stale Odoo session on page load");
+          delete window.__odoo_session__;
+        }
+
         const apiBaseUrl = getApiBaseUrl();
         const resp = await fetch(`${apiBaseUrl}/api/history/${sessionId}`);
 
@@ -584,12 +624,15 @@ export default function ChatWidget() {
           if (data.messages && data.messages.length > 0) {
             console.log('[History] Loaded', data.messages.length, 'messages');
 
-            const loadedMessages: ChatMessage[] = data.messages.map((m: any, idx: number) => ({
-              id: m.message_id || `history-${idx}`,
-              role: m.role as "user" | "assistant",
-              text: m.content,
-              exploreUrl: m.explore_url || undefined
-            }));
+            const loadedMessages: ChatMessage[] = data.messages
+              // Filter out old Odoo error messages (they shouldn't persist across refreshes)
+              .filter((m: any) => !m.message_id?.startsWith('odoo-error-'))
+              .map((m: any, idx: number) => ({
+                id: m.message_id || `history-${idx}`,
+                role: m.role as "user" | "assistant",
+                text: m.content,
+                exploreUrl: m.explore_url || undefined
+              }));
 
             setMessages(loadedMessages);
 
@@ -810,7 +853,7 @@ export default function ChatWidget() {
         actions: [
           { type: "schedule_demo", label: "Schedule a Demo" },
           { type: "chat_with_us", label: "Talk to Live Agent" },
-          { type: "whatsapp", label: "WhatsApp" },
+          // { type: "whatsapp", label: "WhatsApp" }, // Commented out for now
           { type: "continue_chat", label: "Continue Chat" }
         ],
         isCreditExhausted: true // Reuse the credit exhaustion card UI
@@ -831,11 +874,14 @@ export default function ChatWidget() {
         label: "Schedule a Demo"
       });
     } else if (qaEntry.type === "whatsapp") {
+      // Commented out for now
+      // actions.push(
+      //   {
+      //     type: "whatsapp",
+      //     label: "WhatsApp"
+      //   },
+      // );
       actions.push(
-        {
-          type: "whatsapp",
-          label: "WhatsApp"
-        },
         {
           type: "call",
           label: "Call"
@@ -1022,9 +1068,9 @@ export default function ChatWidget() {
       setTimeout(() => {
         openScheduleDemo();
       }, 75);
-    } else if (actionType === "whatsapp") {
-      // Open the options menu and show the WhatsApp submenu so users can choose QR or link
-      setShowOptionsMenu(true);
+    // } else if (actionType === "whatsapp") {
+    //   // Open the options menu and show the WhatsApp submenu so users can choose QR or link
+    //   setShowOptionsMenu(true);
     } else if (actionType === "call") {
       window.location.href = "tel:+4407727449124";
     } else if (actionType === "hubspot_chat" || actionType === "chat_with_us") {
@@ -1046,10 +1092,17 @@ export default function ChatWidget() {
   const sendContextToOdooAndOpenChat = async () => {
     console.log("[ODOO] Chat with us clicked — session_id:", sessionIdRef.current);
 
+    // Clear any previous Odoo error messages and stale session
+    setMessages(prev => prev.filter(m => !m.id.startsWith('odoo-error-')));
+    if (window.__odoo_session__) {
+      console.log("[ODOO] Clearing stale session data");
+      delete window.__odoo_session__;
+    }
+
     // Track Odoo escalation
     trackOdooEscalation(sessionId);
 
-    const apiOrigin = new URL(import.meta.env.VITE_API_URL || "https://chatbot.exportgenius.in").origin;
+    const apiOrigin = new URL(getApiUrl()).origin;
 
     // ── Step 1: Trigger Odoo chat open event ──────────────────────────────────
     // The session interceptor (loaded with chatbot) handles finding and clicking the button
@@ -1068,13 +1121,44 @@ export default function ChatWidget() {
       return true; // Assume success - event listener will handle it
     };
 
-    // Trigger Odoo to open
-    openOdoo();
+    // Set up event listeners for Odoo open success/failure
+    const handleOdooOpened = () => {
+      console.log("[ODOO] ✓ Odoo opened successfully, hiding AI chatbot");
+      setOpen(false);
+      setIsHiddenForOdoo(true);
+      cleanup();
+    };
 
-    // Hide the AI chatbot
-    console.log("[ODOO] Odoo opening, hiding AI chatbot");
-    setOpen(false);
-    setIsHiddenForOdoo(true);
+    const handleOdooFailed = () => {
+      console.warn("[ODOO] ✗ Odoo failed to open, keeping AI chatbot visible");
+      // Show error message to user (with unique ID to prevent duplicates)
+      const errorMsg: ChatMessage = {
+        id: `odoo-error-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        role: "assistant",
+        text: "I couldn't open the live chat. Please try again or contact us:\n\n📧 Email: support@marketinsidedata.com\n📞 Phone: +44 077 2744 9124",
+      };
+      setMessages((prev) => [...prev, errorMsg]);
+      cleanup();
+    };
+
+    const cleanup = () => {
+      window.removeEventListener('odoo:opened', handleOdooOpened);
+      window.removeEventListener('odoo:failed', handleOdooFailed);
+      clearTimeout(timeoutId);
+    };
+
+    window.addEventListener('odoo:opened', handleOdooOpened);
+    window.addEventListener('odoo:failed', handleOdooFailed);
+
+    // Timeout fallback: if no response after 7 seconds, assume failure
+    const timeoutId = setTimeout(() => {
+      console.warn("[ODOO] Timeout: No response from Odoo after 7 seconds");
+      handleOdooFailed();
+    }, 7000);
+
+    // Trigger Odoo to open
+    console.log("[ODOO] Attempting to open Odoo chat...");
+    openOdoo();
 
     // ── Step 2: Start listening for session BEFORE sending message ───────────
     // We set up the promise NOW so we don't miss the event that fires when
@@ -1157,15 +1241,17 @@ export default function ChatWidget() {
       }
     };
 
-    if (!(window as any).__odoo_session__?.guest_token) {
-      window.fetch = function(input: RequestInfo | URL, init?: RequestInit) {
-        let reqUrl = '';
-        try { reqUrl = typeof input === 'string' ? input : (input as Request).url ?? String(input); } catch(e) { /**/ }
+    // ALWAYS install backup interceptor (overrides the script-tag one if needed)
+    console.log('[ODOO-backup] Installing backup session interceptor');
+    window.fetch = function(input: RequestInfo | URL, init?: RequestInit) {
+      let reqUrl = '';
+      try { reqUrl = typeof input === 'string' ? input : (input as Request).url ?? String(input); } catch(e) { /**/ }
 
-        // ── Extract from message/post REQUEST body (most reliable path) ──────
-        // The guest_token and thread_id are sent plainly in the outgoing payload.
-        if (reqUrl.indexOf('/im_livechat/cors/message/post') !== -1 ||
-            reqUrl.indexOf('/mail/message/post') !== -1) {
+      // ── Extract from message/post REQUEST body (most reliable path) ──────
+      // The guest_token and thread_id are sent plainly in the outgoing payload.
+      if (reqUrl.indexOf('/im_livechat/cors/message/post') !== -1 ||
+          reqUrl.indexOf('/mail/message/post') !== -1) {
+        console.log('[ODOO-backup] Intercepted message/post request');
           try {
             const bodyStr = typeof init?.body === 'string' ? init.body : '';
             if (bodyStr) {
@@ -1221,6 +1307,9 @@ export default function ChatWidget() {
 
                 if (gt && typeof cid === 'number' && cid > 0) {
                   _emitSession(gt, cid, 'get_session response');
+                } else if (!gt) {
+                  console.warn('[ODOO-backup] Could not extract guest_token from get_session. Available store_data blocks:', Object.keys(sd));
+                  console.log('[ODOO-backup] Full result keys:', Object.keys(result));
                 }
               } catch(e) { /**/ }
             }).catch(() => { /**/ });
@@ -1229,12 +1318,11 @@ export default function ChatWidget() {
 
         return promise;
       } as typeof fetch;
-    }
 
     // ── Step 3: Type and send a message via the Odoo chat input ──────────────
     // Odoo calls get_session only when the FIRST message is sent — so we must
     // send a message ourselves to trigger that call and capture the guest_token.
-    const   sendMessageViaOdooInput = async (text: string): Promise<boolean> => {
+    const  sendMessageViaOdooInput = async (text: string): Promise<boolean> => {
       // Find the shadow root that contains Odoo's chat window
       const getShadowRoot = (): ShadowRoot | null => {
         const host = document.querySelector(".o-livechat-root") as (HTMLElement & { shadowRoot?: ShadowRoot }) | null;
@@ -1689,7 +1777,7 @@ export default function ChatWidget() {
                 const supportActions: ChatMessage["actions"] = [
                   { type: "schedule_demo", label: "Schedule a Demo" },
                   { type: "chat_with_us", label: "Talk to Live Agent" },
-                  { type: "whatsapp", label: "WhatsApp" },
+                  // { type: "whatsapp", label: "WhatsApp" }, // Commented out for now
                   { type: "continue_chat", label: "Continue Chat" }
                 ];
 
@@ -2067,18 +2155,18 @@ export default function ChatWidget() {
 
   // Options menu state
   const [showOptionsMenu, setShowOptionsMenu] = useState(false);
-  const [showWhatsAppSubmenu, setShowWhatsAppSubmenu] = useState(false);
-  const [showWhatsAppQR, setShowWhatsAppQR] = useState(false);
-  const [showWhatsAppDropdown, setShowWhatsAppDropdown] = useState(false);
-  const [waDropdownRect, setWaDropdownRect] = useState<DOMRect | null>(null);
+  // const [showWhatsAppSubmenu, setShowWhatsAppSubmenu] = useState(false); // Commented out for now
+  // const [showWhatsAppQR, setShowWhatsAppQR] = useState(false); // Commented out for now
+  // const [showWhatsAppDropdown, setShowWhatsAppDropdown] = useState(false); // Commented out for now
+  // const [waDropdownRect, setWaDropdownRect] = useState<DOMRect | null>(null); // Commented out for now
 
   const handleOpenOptionsMenu = () => {
     console.log('[ChatWidget] Toggling options menu');
     setShowOptionsMenu(!showOptionsMenu);
     // Close WhatsApp submenu when toggling main menu
-    if (showOptionsMenu) {
-      setShowWhatsAppSubmenu(false);
-    }
+    // if (showOptionsMenu) {
+    //   setShowWhatsAppSubmenu(false);
+    // }
   };
 
   const handleChatWithUs = () => {
@@ -2099,41 +2187,42 @@ export default function ChatWidget() {
     setShowOptionsMenu(false);
   };
 
-  const openWhatsAppLink = () => {
-    const wa = "https://wa.me/447727449124";
-    trackWhatsAppClick(sessionId, 'direct_link');
-    try {
-      window.open(wa, "_blank");
-    } catch (err) {
-      window.location.href = wa;
-    }
-    setShowOptionsMenu(false);
-    setShowWhatsAppDropdown(false);
-  };
+  // Commented out for now
+  // const openWhatsAppLink = () => {
+  //   const wa = "https://wa.me/447727449124";
+  //   trackWhatsAppClick(sessionId, 'direct_link');
+  //   try {
+  //     window.open(wa, "_blank");
+  //   } catch (err) {
+  //     window.location.href = wa;
+  //   }
+  //   setShowOptionsMenu(false);
+  //   setShowWhatsAppDropdown(false);
+  // };
 
-  const openWhatsAppQRInChat = () => {
-    trackWhatsAppClick(sessionId, 'qr_code');
-    // Close menus and show QR overlay inside chat
-    setShowWhatsAppQR(true);
-    setShowOptionsMenu(false);
-    setShowWhatsAppDropdown(false);
-  };
+  // const openWhatsAppQRInChat = () => {
+  //   trackWhatsAppClick(sessionId, 'qr_code');
+  //   // Close menus and show QR overlay inside chat
+  //   setShowWhatsAppQR(true);
+  //   setShowOptionsMenu(false);
+  //   setShowWhatsAppDropdown(false);
+  // };
 
-  const openWhatsAppDropdown = (anchorEl: HTMLElement) => {
-    try {
-      const rect = anchorEl.getBoundingClientRect();
-      console.log('[ChatWidget] openWhatsAppDropdown rect:', rect);
-      setWaDropdownRect(rect);
-      setShowWhatsAppDropdown(true);
-    } catch (err) {
-      console.error('[WhatsAppDropdown] failed to open anchored dropdown', err);
-    }
-  };
+  // const openWhatsAppDropdown = (anchorEl: HTMLElement) => {
+  //   try {
+  //     const rect = anchorEl.getBoundingClientRect();
+  //     console.log('[ChatWidget] openWhatsAppDropdown rect:', rect);
+  //     setWaDropdownRect(rect);
+  //     setShowWhatsAppDropdown(true);
+  //   } catch (err) {
+  //     console.error('[WhatsAppDropdown] failed to open anchored dropdown', err);
+  //   }
+  // };
 
-  const closeWhatsAppDropdown = () => {
-    setShowWhatsAppDropdown(false);
-    setWaDropdownRect(null);
-  };
+  // const closeWhatsAppDropdown = () => {
+  //   setShowWhatsAppDropdown(false);
+  //   setWaDropdownRect(null);
+  // };
 
   // Reset conversation - clear messages and create new session
   const handleResetConversation = async () => {
@@ -2539,7 +2628,7 @@ export default function ChatWidget() {
             messages={messages}
             isStreaming={isSending}
             onActionClick={handleActionClick}
-            onOpenWhatsAppDropdown={openWhatsAppDropdown}
+            // onOpenWhatsAppDropdown={openWhatsAppDropdown} // Commented out for now
             onFeedbackSubmit={handleFeedbackSubmit}
             onDelayedFeedbackSubmit={handleDelayedFeedbackSubmit}
             sessionId={sessionId}
@@ -2665,7 +2754,7 @@ export default function ChatWidget() {
               }}
               onClick={() => {
                 setShowOptionsMenu(false);
-                setShowWhatsAppSubmenu(false);
+                // setShowWhatsAppSubmenu(false); // Commented out for now
               }}
             >
               {/* Options Menu Cards - Positioned above input field, aligned left */}
@@ -2710,8 +2799,8 @@ export default function ChatWidget() {
                   </div>
                 </button>
 
-                {/* WhatsApp Us - Green icon with submenu */}
-                <div className="w-full">
+                {/* WhatsApp Us - Green icon with submenu - COMMENTED OUT FOR NOW */}
+                {/* <div className="w-full">
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -2731,7 +2820,6 @@ export default function ChatWidget() {
                       <p className="font-medium text-gray-900 text-sm">WhatsApp Us</p>
                       <p className="text-xs text-gray-500 mt-0.5">Message on Whatsapp</p>
                     </div>
-                    {/* Chevron icon to indicate expandable */}
                     <svg
                       className={`h-5 w-5 text-gray-400 transition-transform duration-200 ${showWhatsAppSubmenu ? 'rotate-180' : ''}`}
                       fill="none"
@@ -2742,10 +2830,8 @@ export default function ChatWidget() {
                     </svg>
                   </button>
 
-                  {/* WhatsApp Submenu */}
                   {showWhatsAppSubmenu && (
                     <div className="mt-2 ml-4 space-y-2" style={{ animation: 'slideInFromBottom 0.2s ease-out' }}>
-                      {/* Show QR Code */}
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -2765,7 +2851,6 @@ export default function ChatWidget() {
                         </div>
                       </button>
 
-                      {/* Open WhatsApp */}
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -2786,7 +2871,7 @@ export default function ChatWidget() {
                       </button>
                     </div>
                   )}
-                </div>
+                </div> */}
 
                 {/* Reset Conversation - Orange icon */}
                 <button
@@ -2811,7 +2896,7 @@ export default function ChatWidget() {
             </div>
           )}
 
-           <ChatFooter ref={footerRef} onSend={handleSend} isSending={isSending} position="bottom" onOpenOptionsMenu={handleOpenOptionsMenu} onCloseOptionsMenu={() => { setShowOptionsMenu(false); setShowWhatsAppSubmenu(false); }} />
+           <ChatFooter ref={footerRef} onSend={handleSend} isSending={isSending} position="bottom" onOpenOptionsMenu={handleOpenOptionsMenu} onCloseOptionsMenu={() => { setShowOptionsMenu(false); /* setShowWhatsAppSubmenu(false); */ }} />
 
           {/* Disclaimer at bottom - AWS Style */}
           <div className="px-4 py-2 bg-white">
@@ -2826,16 +2911,17 @@ export default function ChatWidget() {
           </div>
           {/* End Conditional Rendering */}
 
-          {showWhatsAppDropdown && waDropdownRect && (
+          {/* COMMENTED OUT FOR NOW - WhatsApp Dropdown */}
+          {/* {showWhatsAppDropdown && waDropdownRect && (
             <WhatsAppDropdown
               rect={waDropdownRect}
               onClose={closeWhatsAppDropdown}
               onShowQR={() => { openWhatsAppQRInChat(); closeWhatsAppDropdown(); }}
               onOpenLink={() => { openWhatsAppLink(); closeWhatsAppDropdown(); }}
             />
-          )}
-          {/* WhatsApp QR Overlay (in-chat) */}
-          {showWhatsAppQR && (
+          )} */}
+          {/* WhatsApp QR Overlay (in-chat) - COMMENTED OUT FOR NOW */}
+          {/* {showWhatsAppQR && (
             <div className="fixed inset-0 z-[2147483649] flex items-center justify-center">
               <div className="absolute inset-0 bg-black/40" onClick={() => setShowWhatsAppQR(false)} />
               <div className="relative bg-white rounded-3xl p-6 w-[90vw] max-w-md shadow-2xl z-50">
@@ -2861,7 +2947,7 @@ export default function ChatWidget() {
                 </div>
               </div>
             </div>
-          )}
+          )} */}
         </div>
       )}
     </>

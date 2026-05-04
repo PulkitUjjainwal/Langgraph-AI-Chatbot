@@ -54,9 +54,9 @@ class SlotConfig:
 
     # Restricted countries - don't show data, redirect to support/demo
     # These countries require users to schedule a demo or contact support
-    RESTRICTED_COUNTRIES = {
-        "india"
-    }
+    # NOTE: India handling moved to system prompt (Layer 1) + data validator (Layer 2)
+    #       for consistent, LLM-powered responses with helpful alternatives
+    RESTRICTED_COUNTRIES = set()  # Empty - all restrictions now handled via prompt/validator
 
     # Complex query patterns - queries needing multiple API calls
     # These should redirect to support/dashboard instead of partial answers

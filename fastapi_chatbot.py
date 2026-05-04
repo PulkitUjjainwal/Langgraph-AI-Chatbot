@@ -101,6 +101,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 # Import modular components for prompt building
 from chatbot.services.agent.prompts import PromptBuilder, PromptConfig
 from chatbot.utils.url_validator import get_url_validator
+from chatbot.utils.context_url_validator import get_context_url_validator
 
 # Import modular API models
 from chatbot.models.api_models import (
@@ -743,6 +744,15 @@ class HybridRetriever:
         kb_context = self.kb_retriever.format_context(kb_results)
         print(f"     • KB: {len(kb_results)} chunks retrieved")
 
+        # Validate and filter out 404 URLs from context
+        context_validator = get_context_url_validator(self.redis)
+        kb_context, removed_urls = await context_validator.remove_404_urls_from_context(
+            kb_context,
+            validate=False  # Only check cache to avoid latency, validate in background
+        )
+        if removed_urls:
+            print(f"     • Removed {len(removed_urls)} 404 URLs from KB context")
+
         # 2. Dynamic Retrieval (if URL provided)
         dynamic_context = ""
         if dynamic_url:
@@ -755,10 +765,24 @@ class HybridRetriever:
                     chunk_text = result['chunk_text']
                     if len(chunk_text) > Config.MAX_CHUNK_CHARS:
                         chunk_text = chunk_text[:Config.MAX_CHUNK_CHARS] + "..."
-                    dynamic_parts.append(f"[Dynamic Source {i}]\n{chunk_text}\n")
+
+                    # Include URL if available
+                    page_url = result.get('page_url', '')
+                    if page_url:
+                        dynamic_parts.append(f"[Dynamic Source {i}]\nURL: {page_url}\n{chunk_text}\n")
+                    else:
+                        dynamic_parts.append(f"[Dynamic Source {i}]\n{chunk_text}\n")
 
                 dynamic_context = "\n".join(dynamic_parts)
                 print(f"     • Dynamic: {len(dynamic_results)} chunks retrieved")
+
+                # Validate and filter out 404 URLs from dynamic context
+                dynamic_context, dynamic_removed_urls = await context_validator.remove_404_urls_from_context(
+                    dynamic_context,
+                    validate=False
+                )
+                if dynamic_removed_urls:
+                    print(f"     • Removed {len(dynamic_removed_urls)} 404 URLs from dynamic context")
             else:
                 print(f"     • Dynamic: No embeddings available")
 
@@ -849,7 +873,7 @@ def fetch_dynamic_trade_data(query: str = "") -> str:
         return "No dynamic trade data available."
 
 
-async def fetch_data_availability(country: str = "") -> str:
+def fetch_data_availability(country: str = "") -> str:
     """
     Fetch data availability information for a specific country or all countries.
     Use this tool when user asks about:
@@ -864,6 +888,7 @@ async def fetch_data_availability(country: str = "") -> str:
     Returns:
         Formatted string with data availability information.
     """
+    import requests
     global data_availability_cache
 
     # Check cache first (avoid redundant API calls)
@@ -873,7 +898,7 @@ async def fetch_data_availability(country: str = "") -> str:
         print(f"  [DATA_AVAIL_TOOL] Using cached data (age: {int(current_time - data_availability_cache['timestamp'])}s)")
         cached_data = data_availability_cache["data"]
     else:
-        # Fetch from API
+        # Fetch from API using synchronous requests
         print(f"  [DATA_AVAIL_TOOL] Fetching from API (cache expired or empty)")
         api_url = "https://api-dp.marketinsidedata.com/api/v1/users/data-availability"
         bearer_token = os.getenv("MARKETINSIDE_API_TOKEN") or os.getenv("MARKETINSIDE_BEARER_TOKEN") or ""
@@ -908,30 +933,29 @@ async def fetch_data_availability(country: str = "") -> str:
         }
 
         try:
-            timeout = aiohttp.ClientTimeout(total=30)  # Increase timeout to 30 seconds
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as response:
-                    print(f"  [DATA_AVAIL_TOOL] API response status: {response.status}")
-                    if response.status == 200:
-                        result = await response.json()
-                        cached_data = result.get("data", [])
-                        if not cached_data:
-                            print(f"  [DATA_AVAIL_TOOL] ⚠️ API returned 200 but no data in response")
-                            return "Error: API returned empty data"
-                        # Update cache
-                        data_availability_cache["data"] = cached_data
-                        data_availability_cache["timestamp"] = current_time
-                        print(f"  [DATA_AVAIL_TOOL] ✓ Fetched {len(cached_data)} records from API")
-                    else:
-                        error_text = await response.text()
-                        print(f"  [DATA_AVAIL_TOOL] ✗ API error: {response.status} - {error_text[:200]}")
-                        return f"Error: Unable to fetch data availability (HTTP {response.status})"
-        except asyncio.TimeoutError:
+            response = requests.post(api_url, json=payload, headers=headers, timeout=30)
+            print(f"  [DATA_AVAIL_TOOL] API response status: {response.status_code}")
+            if response.status_code == 200:
+                result = response.json()
+                cached_data = result.get("data", [])
+                if not cached_data:
+                    print(f"  [DATA_AVAIL_TOOL] ⚠️ API returned 200 but no data in response")
+                    return "Error: API returned empty data"
+                # Update cache
+                data_availability_cache["data"] = cached_data
+                data_availability_cache["timestamp"] = current_time
+                print(f"  [DATA_AVAIL_TOOL] ✓ Fetched {len(cached_data)} records from API")
+            else:
+                error_text = response.text
+                print(f"  [DATA_AVAIL_TOOL] ✗ API error: {response.status_code} - {error_text[:200]}")
+                # Return graceful message for LLM to handle
+                return f"API_UNAVAILABLE: The data availability service is temporarily unavailable. Provide general information about {country if country else 'global'} data coverage based on your knowledge, and mention that specific availability details can be confirmed by contacting our team at info@marketinsidedata.com"
+        except requests.exceptions.Timeout:
             print(f"  [DATA_AVAIL_TOOL] ✗ Request timed out after 30 seconds")
-            return "Error: API request timed out"
+            return "API_TIMEOUT: The data availability service timed out. Provide general information and suggest contacting our team at info@marketinsidedata.com for specific availability details."
         except Exception as e:
             print(f"  [DATA_AVAIL_TOOL] ✗ Exception: {type(e).__name__}: {str(e)}")
-            return f"Error: Unable to fetch data availability ({str(e)})"
+            return f"API_ERROR: Unable to fetch data availability information. Provide general information about {country if country else 'global'} data coverage and suggest contacting our team at info@marketinsidedata.com for specific details."
 
     # Filter by country if specified
     if country:
@@ -970,7 +994,61 @@ async def fetch_data_availability(country: str = "") -> str:
 To get specific information, ask about a particular country (e.g., "What data is available for Indonesia?")"""
 
 
-all_tools = [fetch_dynamic_trade_data, fetch_data_availability]
+def require_dashboard_access(
+    query_type: str = "complex_analysis",
+    reason: str = "This query requires advanced filtering and aggregation",
+    user_query: str = ""
+) -> str:
+    """
+    **CRITICAL: Use this tool when query CANNOT be answered with simple API calls**
+
+    Use this tool for queries that require:
+    1. Global rankings WITHOUT specifying importing/exporting country
+       - "Top iron ore exporting countries" (needs country-level aggregation)
+       - "Biggest steel importers worldwide" (multi-country pivot)
+       - "Most supplying countries for product X" (global ranking)
+
+    2. Complex aggregations or pivot tables
+       - Year-over-year comparisons across multiple countries
+       - Market share analysis
+       - Regional trend analysis
+
+    3. Queries asking FOR country lists/names as the answer
+       - User is asking WHAT countries, not providing a country
+       - "Which countries export X?" vs "Show me X exports from [country]"
+
+    DO NOT use for:
+    - Queries with specific country mentioned ("USA iron ore imports")
+    - Product-country pairs ("steel from China to India")
+    - Specific buyer/supplier lookups
+
+    Args:
+        query_type: Type of complex query (default: "complex_analysis")
+        reason: Brief explanation of why dashboard is needed
+        user_query: The user's original query for context
+
+    Returns:
+        Response directing user to dashboard with support options
+    """
+
+    # Build concise response mentioning what they asked for (plain text, no markdown/emojis!)
+    if user_query:
+        response = f"""For "{user_query}" - you'll need our dashboard which provides multi-country rankings and global comparisons.
+
+Our team can give you access and show you how to run this analysis.
+
+Contact: info@marketinsidedata.com | +44 7727 449124"""
+    else:
+        response = f"""This query requires our dashboard which provides multi-country rankings and detailed comparisons.
+
+Our team can give you access and show you how to run this analysis.
+
+Contact: info@marketinsidedata.com | +44 7727 449124"""
+
+    return response
+
+
+all_tools = [fetch_dynamic_trade_data, fetch_data_availability, require_dashboard_access]
 
 
 # ============================================================================
@@ -1071,10 +1149,10 @@ def create_guardrail_node(hostility_detector):
     return guardrail_node
 
 
-def create_retrieval_node(kb_retriever: KnowledgeBaseRetriever):
+def create_retrieval_node(kb_retriever: KnowledgeBaseRetriever, redis_manager):
     """Create retrieval node"""
 
-    def retrieval_node(state: AgentState) -> AgentState:
+    async def retrieval_node(state: AgentState) -> AgentState:
         """Retrieve relevant chunks from knowledge base"""
         messages = state["messages"]
         query = messages[-1].content if messages else ""
@@ -1087,8 +1165,17 @@ def create_retrieval_node(kb_retriever: KnowledgeBaseRetriever):
 
         top_k = Config.TOP_K_RESULTS * 2 if is_data_type_query else Config.TOP_K_RESULTS
 
-        results = kb_retriever.retrieve(query, top_k=top_k)
+        results = await asyncio.to_thread(kb_retriever.retrieve, query, top_k=top_k)
         context = kb_retriever.format_context(results)
+
+        # CRITICAL: Validate and remove 404 URLs from context BEFORE passing to LLM
+        context_validator = get_context_url_validator(redis_manager)
+        context, removed_urls = await context_validator.remove_404_urls_from_context(
+            context,
+            validate=False  # Cache-only check (no latency), validate in background
+        )
+        if removed_urls:
+            print(f"  [REMOVED] {len(removed_urls)} invalid/404 URLs from context")
 
         if is_data_type_query:
             print(f"  [OK] Retrieved {len(results)} chunks (expanded for data type query)")
@@ -2374,7 +2461,7 @@ class ChatbotManager:
 
     def _create_workflow(self):
         """Create LangGraph workflow with guardrail node"""
-        retrieval_node = create_retrieval_node(self.kb_retriever)
+        retrieval_node = create_retrieval_node(self.kb_retriever, self.redis)
         chatbot_node = create_chatbot_node()
         tools_node = ToolNode(tools=all_tools)
 
@@ -2751,17 +2838,39 @@ INTELLIGENCE PRINCIPLES:
 4. Normalization: Convert variations to standard forms ("us", "usa", "america" → "united states")
 
 ────────────────────────
-INTENTS (EIGHT TOTAL)
+INTENTS (NINE TOTAL)
 ────────────────────────
 
-CRITICAL PRIORITY: Check for service_mismatch FIRST!
-Before classifying as search_trade_data, check if user is asking for EXECUTION services:
+CRITICAL PRIORITY: Check these in order!
+
+FIRST: Check if query asks FOR country lists/names (global rankings):
+- User is asking WHICH/WHAT countries, not providing a country name
+- Phrases: "which countries", "top countries", "most supplying countries", "list of countries", etc.
+- If detected → Use dashboard_required intent
+
+SECOND: Check for service_mismatch:
 - Personal action indicators: "I want to", "I need to", "help me", "how do I"
 - If present → Use out_of_scope (service_mismatch), NOT search_trade_data
 
 Choose exactly ONE intent:
 
-1. search_trade_data
+1. dashboard_required
+   → User asks for GLOBAL RANKINGS or COUNTRY LISTS (no specific country provided)
+   → They want country NAMES as the answer, not data about a specific country
+   → CRITICAL INDICATORS:
+     - "which countries export/import [product]?"
+     - "top countries for [product]"
+     - "most supplying countries for [product]"
+     - "biggest importing countries"
+     - "[product] exporting countries names"
+     - "list of countries that export/import [product]"
+     - "countries name for [product]"
+   → DO NOT USE if specific country mentioned: "USA steel" → search_trade_data
+   → DO NOT USE if country-to-country: "China to India" → country_to_country
+   → Output url = "" (will be handled by agent with tools)
+   → Set params with product if mentioned for context
+
+2. search_trade_data
    → User wants SPECIFIC trade records for a product, hs_code, or named entity:
      - "top importers of [PRODUCT]" (e.g., "top importers of coal", "oil importers")
      - "top exporters of [PRODUCT]" (e.g., "steel exporters", "rice exporters")
@@ -3720,31 +3829,26 @@ OUTPUT JSON FORMAT (intent only, no content):
             "message_count": self.redis.get_session_meta(session_id).get("message_count", 0) + 1
         })
 
-        # Invoke workflow - CRITICAL FIX: Direct invoke (no thread pool overhead)
+        # Invoke workflow - CRITICAL FIX: Use ainvoke for async nodes
         print(f"\n[WORKFLOW] Invoking LangGraph workflow...")
         workflow_start = time.time()
 
         try:
-            # CRITICAL FIX: Call invoke() in thread pool with timeout
-            # Use run_in_executor for better cancellation than asyncio.to_thread\
-            # this will invoke the workflow to get the data from the kb
+            # CRITICAL FIX: Use ainvoke() for async nodes instead of invoke()
             result = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    None,  # Use default thread pool executor
-                    lambda: self.app.invoke(
-                        {
-                            "messages": [HumanMessage(content=message)],
-                            "next_agent": "",
-                            "retrieved_context": "",
-                            "original_query": message,
-                            "use_cache": False,
-                            "retrieved_chunks": [],
-                            "start_time": start_time,
-                            "session_id": session_id,
-                            "dynamic_url": dynamic_url or ""
-                        },
-                        config
-                    )
+                self.app.ainvoke(
+                    {
+                        "messages": [HumanMessage(content=message)],
+                        "next_agent": "",
+                        "retrieved_context": "",
+                        "original_query": message,
+                        "use_cache": False,
+                        "retrieved_chunks": [],
+                        "start_time": start_time,
+                        "session_id": session_id,
+                        "dynamic_url": dynamic_url or ""
+                    },
+                    config
                 ),
                 timeout=35.0  # OPTIMIZED: 35s timeout (reduced from 60s after async checkpoint fix)
             )
@@ -4294,6 +4398,24 @@ OUTPUT JSON FORMAT (intent only, no content):
             # The LLM will handle it based on the enhanced scope restriction prompt
 
         # ========================================================================
+        # STEP 2.6: Handle dashboard_required intent - Let agent LLM call tools
+        # ========================================================================
+        if intent == "dashboard_required":
+            print(f"  [STREAM] Dashboard required intent detected - passing to agent LLM for tool calling")
+
+            # Skip slot filling and let the agent LLM handle this with require_dashboard_access tool
+            # The agent has the full prompt instructions and will call the appropriate tool
+
+            # Save user message
+            if self.redis:
+                self.redis.save_message(session_id, {"role": "user", "content": message})
+
+            # Set intent to general so it goes through normal agent flow with tools
+            # The prompt instructions will guide the LLM to call require_dashboard_access
+            intent = "general"
+            # Continue to agent processing below (don't return here)
+
+        # ========================================================================
         # STEP 3: Update slots and check for missing params
         # ========================================================================
         # Only check slots for data-specific intents
@@ -4771,12 +4893,19 @@ OUTPUT JSON FORMAT (intent only, no content):
                 return
 
         # ========================================================================
-        # OPTIMIZATION: Skip KB retrieval for simple intents (greeting, general, contact_support)
+        # OPTIMIZATION: Skip KB retrieval for simple intents (greeting, contact_support)
+        # EXCEPTION: If user is asking for page/URL/link, always retrieve KB (industry pages)
         # Data availability uses tool calling instead of KB (KB data is stale)
         # This saves 1-2 seconds on embeddings + vector search
         # ========================================================================
-        simple_intents_no_kb = ["greeting", "general", "contact_support"]  # Simple intents don't need KB context
-        skip_kb = intent in simple_intents_no_kb
+        # Check if query is asking for page/URL/link (industry pages need KB)
+        query_lower = message.lower()
+        is_page_request = any(keyword in query_lower for keyword in [
+            "page", "url", "link", "website", "site"
+        ])
+
+        simple_intents_no_kb = ["greeting", "contact_support"]  # Don't include "general" - it may need KB
+        skip_kb = intent in simple_intents_no_kb or (intent == "general" and not is_page_request)
 
         # Get KB context using correct method and field name
         # OPTIMIZATION: Reduce KB chunks for faster processing (2 instead of 3)
@@ -5057,10 +5186,42 @@ if query is for platform
                 print(f"  [STREAM] 🔧 LLM called tool: {tool_name} with args: {tool_args}")
 
                 # Execute the tool
-                if tool_name == 'fetch_data_availability':
+                if tool_name == 'require_dashboard_access':
+                    # Dashboard required - return support UI immediately
+                    print(f"  [STREAM] Executing require_dashboard_access tool")
+                    tool_result = await require_dashboard_access(
+                        query_type=tool_args.get('query_type', 'global_ranking'),
+                        reason=tool_args.get('reason', 'This query requires dashboard features'),
+                        user_query=message  # Pass original user query for context
+                    )
+                    print(f"  [STREAM] ✓ Dashboard access required, showing support UI")
+
+                    # Save messages
+                    if self.redis:
+                        self.redis.save_message(session_id, {
+                            "role": "assistant",
+                            "content": tool_result
+                        })
+
+                    # Yield support UI with the tool result message
+                    yield json.dumps({
+                        "credit_exhausted": True,  # Reuse UI component
+                        "message": tool_result,
+                        "actions": [
+                            {"type": "schedule_demo", "label": "Schedule a Demo"},
+                            {"type": "chat_with_us", "label": "Talk to Live Agent"},
+                            {"type": "whatsapp", "label": "WhatsApp"},
+                            {"type": "continue_chat", "label": "Continue Chat"}
+                        ],
+                        "done": True
+                    })
+                    return
+
+                elif tool_name == 'fetch_data_availability':
                     country = tool_args.get('country', '')
                     print(f"  [STREAM] Executing fetch_data_availability for: '{country}'")
-                    tool_result = await fetch_data_availability(country)
+                    # FIXED: fetch_data_availability is now synchronous, run in thread to avoid blocking
+                    tool_result = await asyncio.to_thread(fetch_data_availability, country)
                     print(f"  [STREAM] ✓ Tool result: {len(tool_result)} chars")
 
                     # Add tool result to messages
@@ -5678,7 +5839,8 @@ async def lifespan(app: FastAPI):
         try:
             sys.stderr.write("[INFO] Warming up data availability cache...\n")
             sys.stderr.flush()
-            result = await fetch_data_availability("")
+            # FIXED: fetch_data_availability is now synchronous, run in thread
+            result = await asyncio.to_thread(fetch_data_availability, "")
             if "Error" not in result:
                 sys.stderr.write("[OK] Data availability cache warmed up successfully!\n")
                 sys.stderr.write(f"[INFO] Cache valid for 7 days (expires: {datetime.fromtimestamp(data_availability_cache['timestamp'] + data_availability_cache['ttl']).strftime('%Y-%m-%d %H:%M:%S')})\n")
@@ -6705,6 +6867,67 @@ async def continue_chat(session_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to activate continue chat: {str(e)}")
 
 
+@router.post("/odoo/test-direct")
+async def test_odoo_direct(request: OdooContextRequest):
+    """Test endpoint to send directly to Odoo with exact curl payload"""
+    import requests
+    import json
+
+    print(f"[ODOO-TEST] Testing direct Odoo call")
+    print(f"[ODOO-TEST] Received: guest_token={'***' if request.guest_token else 'None'}, channel_id={request.channel_id}")
+
+    url = "https://crm.marketinsidedata.com/im_livechat/cors/message/post"
+
+    # Use exact payload structure from working curl
+    payload = {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "call",
+        "params": {
+            "post_data": {
+                "body": f"🤖 TEST: Transferring to live agent\n\nSession: {request.session_id}",
+                "email_add_signature": True,
+                "message_type": "comment",
+                "subtype_xmlid": "mail.mt_comment"
+            },
+            "thread_id": request.channel_id,
+            "thread_model": "discuss.channel",
+            "context": {
+                "temporary_id": 0.5
+            },
+            "guest_token": request.guest_token
+        }
+    }
+
+    headers = {
+        'accept': '*/*',
+        'accept-language': 'en-US,en;q=0.9',
+        'content-type': 'application/json',
+        'origin': 'http://localhost:3000',
+        'referer': 'http://localhost:3000/',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
+    }
+
+    try:
+        print(f"[ODOO-TEST] Sending to {url}")
+        print(f"[ODOO-TEST] Payload: {json.dumps(payload, indent=2)}")
+
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+
+        print(f"[ODOO-TEST] Status: {response.status_code}")
+        print(f"[ODOO-TEST] Response: {response.text[:500]}")
+
+        return {
+            "success": response.status_code == 200,
+            "status_code": response.status_code,
+            "response": response.text[:500],
+            "test_payload": payload
+        }
+    except Exception as e:
+        print(f"[ODOO-TEST] Error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 @router.post("/odoo/send-context", response_model=OdooContextResponse)
 async def send_context_to_odoo(request: OdooContextRequest):
     """
@@ -6892,7 +7115,9 @@ async def _send_to_odoo_api(context_message: str, guest_token: Optional[str] = N
     import json
 
     # Get Odoo config from environment
-    odoo_base_url = os.getenv("ODOO_BASE_URL", "https://export-genius-pvt.odoo.com")
+    odoo_base_url = os.getenv("ODOO_BASE_URL"
+                            #   , "https://export-genius-pvt.odoo.com" 
+                              , "https://crm.marketinsidedata.com" )
     # Use channel_id from frontend (get_session response) or fall back to env
     channel_id = channel_id_override if channel_id_override else int(os.getenv("ODOO_LIVECHAT_CHANNEL_ID", "1"))
     # Use guest_token from frontend (get_session response) or fall back to env
@@ -6900,9 +7125,17 @@ async def _send_to_odoo_api(context_message: str, guest_token: Optional[str] = N
 
     print(f"[ODOO] _send_to_odoo_api — channel_id={channel_id}, guest_token={'set' if resolved_guest_token else 'NOT SET'}")
 
-    url = f"https://export-genius-pvt.odoo.com/im_livechat/cors/message/post"
+    # CRITICAL DEBUG: Show exact values
+    print(f"[ODOO] EXACT VALUES:")
+    print(f"  - guest_token: {resolved_guest_token}")
+    print(f"  - channel_id: {channel_id}")
+    print(f"  - message length: {len(context_message)}")
+
+    # url = f"https://export-genius-pvt.odoo.com/im_livechat/cors/message/post"
+    url = f"https://crm.marketinsidedata.com/im_livechat/cors/message/post"
 
     # Prepare payload using guest_token from get_session
+    # IMPORTANT: Parameter order matches working Odoo requests exactly
     payload = {
         "id": 1,
         "jsonrpc": "2.0",
@@ -6916,31 +7149,45 @@ async def _send_to_odoo_api(context_message: str, guest_token: Optional[str] = N
             },
             "thread_id":    channel_id,
             "thread_model": "discuss.channel",
-            "guest_token":  resolved_guest_token,
             "context": {
                 "temporary_id": 0.5
-            }
+            },
+            "guest_token":  resolved_guest_token
         }
     }
     
     headers = {
         'accept': '*/*',
+        'accept-language': 'en-US,en;q=0.9',
         'content-type': 'application/json',
         'origin': 'http://localhost:3000',
-        'user-agent': 'Mozilla/5.0'
-        # ,
-        # 'Cookie': session_cookie
+        'referer': 'http://localhost:3000/',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'cross-site'
+        # Add cookie header if Odoo requires authentication:
+        # 'Cookie': 'session_id=...; frontend_lang=en_US'
     }
     
     try:
+        import time
+        start_time = time.time()
+
         print(f"[ODOO] Sending POST to {url}")
+        print(f"[ODOO] Payload: {json.dumps(payload, indent=2)[:800]}")  # Debug: show what we're sending
+        print(f"[ODOO] Headers: {headers}")  # Debug: show headers
+
         response = requests.post(
             url,
             headers=headers,
-            data=json.dumps(payload),
+            json=payload,  # Use json= instead of data=json.dumps() - this sets Content-Type automatically
             timeout=10
         )
-        
+
+        elapsed = time.time() - start_time
+        print(f"[ODOO] Request completed in {elapsed:.2f}s")
+
         print(f"[ODOO] Response status: {response.status_code}")
         print(f"[ODOO] Response: {response.text[:500]}")
         

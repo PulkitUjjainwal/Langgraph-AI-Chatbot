@@ -112,6 +112,7 @@ class HybridRetriever:
                 chunk['score'] = float(scores[0][i])
                 chunk['source'] = 'dynamic'
                 chunk['page_title'] = 'Company Data'
+                chunk['page_url'] = dynamic_url  # Store the dynamic URL
                 results.append(chunk)
 
         logger.debug(
@@ -178,7 +179,13 @@ class HybridRetriever:
                     chunk_text = result['chunk_text']
                     if len(chunk_text) > self.settings.max_chunk_chars:
                         chunk_text = chunk_text[:self.settings.max_chunk_chars] + "..."
-                    dynamic_parts.append(f"[Dynamic Source {i}]\n{chunk_text}\n")
+
+                    # Include URL if available
+                    page_url = result.get('page_url', '')
+                    if page_url:
+                        dynamic_parts.append(f"[Dynamic Source {i}]\nURL: {page_url}\n{chunk_text}\n")
+                    else:
+                        dynamic_parts.append(f"[Dynamic Source {i}]\n{chunk_text}\n")
 
                 dynamic_context = "\n".join(dynamic_parts)
                 logger.debug(f"Dynamic retrieval: {len(dynamic_results)} chunks")

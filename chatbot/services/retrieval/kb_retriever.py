@@ -212,9 +212,17 @@ class KnowledgeBaseRetriever:
                 chunk_text = chunk_text[:self.settings.max_chunk_chars] + "..."
 
             page_title = result.get('page_title', 'Unknown Source')
-            context_parts.append(
-                f"[Source {i}: {page_title}]\n{chunk_text}\n"
-            )
+            page_url = result.get('page_url', '')
+
+            # Include URL if available
+            if page_url:
+                context_parts.append(
+                    f"[Source {i}: {page_title}]\nURL: {page_url}\n{chunk_text}\n"
+                )
+            else:
+                context_parts.append(
+                    f"[Source {i}: {page_title}]\n{chunk_text}\n"
+                )
 
         return "\n".join(context_parts)
 
