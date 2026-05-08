@@ -46,7 +46,7 @@ export type ChatMessage = {
   role: "assistant" | "user";
   text: string;
   actions?: {
-    type: "schedule_demo" | /* "whatsapp" | */ "call" | "hubspot_chat" | "chat_with_us" | "chat" | "refresh" | "continue_chat";
+    type: "schedule_demo" | /* "whatsapp" | */ /* "call" | */ "hubspot_chat" | "chat_with_us" | "chat" | "refresh" | "continue_chat";
     label: string;
   }[];
   suggestions?: string[]; // For pill buttons from init
@@ -882,10 +882,11 @@ export default function ChatWidget() {
       //   },
       // );
       actions.push(
-        {
-          type: "call",
-          label: "Call"
-        },
+        // COMMENTED OUT - Phone call option
+        // {
+        //   type: "call",
+        //   label: "Call"
+        // },
         {
           type: "hubspot_chat",
           label: "Talk to Live Agent"
@@ -1071,8 +1072,8 @@ export default function ChatWidget() {
     // } else if (actionType === "whatsapp") {
     //   // Open the options menu and show the WhatsApp submenu so users can choose QR or link
     //   setShowOptionsMenu(true);
-    } else if (actionType === "call") {
-      window.location.href = "tel:+4407727449124";
+    // } else if (actionType === "call") { // COMMENTED OUT - Phone call option
+    //   window.location.href = "tel:+4407727449124";
     } else if (actionType === "hubspot_chat" || actionType === "chat_with_us") {
       // Try to open Odoo livechat - only hide AI chatbot if successful
       void sendContextToOdooAndOpenChat();
@@ -1135,7 +1136,8 @@ export default function ChatWidget() {
       const errorMsg: ChatMessage = {
         id: `odoo-error-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
         role: "assistant",
-        text: "I couldn't open the live chat. Please try again or contact us:\n\n📧 Email: support@marketinsidedata.com\n📞 Phone: +44 077 2744 9124",
+        text: "I couldn't open the live chat. Please try again or contact us:\n\n📧 Email: support@marketinsidedata.com",
+        // text: "I couldn't open the live chat. Please try again or contact us:\n\n📧 Email: support@marketinsidedata.com\n📞 Phone: +44 077 2744 9124", // COMMENTED OUT - Phone number removed
       };
       setMessages((prev) => [...prev, errorMsg]);
       cleanup();
@@ -2179,13 +2181,14 @@ export default function ChatWidget() {
     void sendContextToOdooAndOpenChat();
   };
 
-  const handleCallUs = () => {
-    console.log('[ChatWidget] Call us clicked');
-    // Track call request
-    trackActionClick(sessionId, 'call', { source: 'options_menu', phone: '+4407727449124' });
-    window.location.href = "tel:+4407727449124";
-    setShowOptionsMenu(false);
-  };
+  // COMMENTED OUT - Phone call option
+  // const handleCallUs = () => {
+  //   console.log('[ChatWidget] Call us clicked');
+  //   // Track call request
+  //   trackActionClick(sessionId, 'call', { source: 'options_menu', phone: '+4407727449124' });
+  //   window.location.href = "tel:+4407727449124";
+  //   setShowOptionsMenu(false);
+  // };
 
   // Commented out for now
   // const openWhatsAppLink = () => {
@@ -2780,8 +2783,8 @@ export default function ChatWidget() {
                   </div>
                 </button>
 
-                {/* Call Us - Orange icon */}
-                <button
+                {/* COMMENTED OUT - Call Us - Orange icon */}
+                {/* <button
                   onClick={(e) => { e.stopPropagation(); setShowOptionsMenu(false); handleCallUs(); }}
                   className="w-full flex items-center gap-3 px-4 py-3 bg-white rounded-[20px] hover:shadow-2xl active:scale-[0.98] transition-all duration-200 cursor-pointer"
                   style={{
@@ -2797,7 +2800,7 @@ export default function ChatWidget() {
                     <p className="font-medium text-gray-900 text-sm">Call Us</p>
                     <p className="text-xs text-gray-500 mt-0.5">+44 12345 67894</p>
                   </div>
-                </button>
+                </button> */}
 
                 {/* WhatsApp Us - Green icon with submenu - COMMENTED OUT FOR NOW */}
                 {/* <div className="w-full">
