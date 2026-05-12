@@ -80,7 +80,7 @@ class MarketinsideAPIClient:
         "argentina": "AR",
         "vietnam": "VN",
         "china": "CN",
-        "india": "IN",
+        "united-kingdom": "GB",
         "usa": "US",
         "united-states": "US",
         "brazil": "BR",

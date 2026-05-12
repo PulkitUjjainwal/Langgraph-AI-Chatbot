@@ -1019,7 +1019,7 @@ def require_dashboard_access(
 
     DO NOT use for:
     - Queries with specific country mentioned ("USA iron ore imports")
-    - Product-country pairs ("steel from China to India")
+    - Product-country pairs ("steel from China to USA")
     - Specific buyer/supplier lookups
 
     Args:
@@ -1359,7 +1359,7 @@ def detect_query_type_simple(query: str) -> str:
         'hs code', 'hs ', 'hscode', 'import', 'export', 'buyer', 'supplier',
         'shipment', 'trade', 'turnover', 'country', 'company', 'market',
         # Common country names
-        'argentina', 'brazil', 'india', 'china', 'usa', 'mexico', 'germany',
+        'argentina', 'brazil', 'united kingdom', 'china', 'usa', 'mexico', 'germany',
         'japan', 'korea', 'indonesia', 'vietnam', 'thailand', 'philippines',
         'uk', 'france', 'italy', 'spain', 'canada', 'australia', 'russia',
     ]
@@ -1449,7 +1449,7 @@ def create_chatbot_node():
         data_indicators = [
             'hs code', 'hs ', 'hscode', 'import', 'export', 'buyer', 'supplier',
             'shipment', 'trade', 'turnover', 'country', 'company', 'market',
-            'argentina', 'brazil', 'india', 'china', 'usa', 'mexico', 'germany',
+            'argentina', 'brazil', 'united kingdom', 'china', 'usa', 'mexico', 'germany',
             'japan', 'korea', 'indonesia', 'vietnam', 'thailand', 'philippines',
             'uk', 'france', 'italy', 'spain', 'canada', 'australia', 'russia',
         ]
@@ -1531,7 +1531,7 @@ def create_chatbot_node():
 
         # Extract key information mentioned
         countries = []
-        for country in ['mexico', 'indonesia', 'china', 'india', 'usa', 'brazil']:
+        for country in ['mexico', 'indonesia', 'china', 'united kingdom', 'usa', 'brazil']:
             if country in query_lower:
                 countries.append(country.title())
 
@@ -2677,7 +2677,7 @@ class ChatbotManager:
                     'bahrain', 'bangladesh', 'belgium', 'bolivia', 'brazil', 'bulgaria',
                     'cambodia', 'canada', 'chile', 'china', 'colombia', 'croatia', 'cuba', 'cyprus',
                     'denmark', 'egypt', 'estonia', 'ethiopia', 'finland', 'france',
-                    'germany', 'ghana', 'greece', 'hungary', 'iceland', 'india', 'indonesia',
+                    'germany', 'ghana', 'greece', 'hungary', 'iceland', 'united kingdom', 'indonesia',
                     'iran', 'iraq', 'ireland', 'israel', 'italy', 'japan', 'jordan', 'kazakhstan',
                     'kenya', 'kuwait', 'latvia', 'lebanon', 'libya', 'lithuania', 'luxembourg',
                     'malaysia', 'mexico', 'morocco', 'myanmar', 'nepal', 'netherlands', 'nigeria',
@@ -2866,7 +2866,7 @@ Choose exactly ONE intent:
      - "list of countries that export/import [product]"
      - "countries name for [product]"
    → DO NOT USE if specific country mentioned: "USA steel" → search_trade_data
-   → DO NOT USE if country-to-country: "China to India" → country_to_country
+   → DO NOT USE if country-to-country: "China to USA" → country_to_country
    → Output url = "" (will be handled by agent with tools)
    → Set params with product if mentioned for context
 
@@ -2894,7 +2894,7 @@ Choose exactly ONE intent:
    → Key phrases: "exports TO", "imports FROM", "trade between X and Y"
    → Examples:
      - "Belgium's exports to France"
-     - "India's imports from China"
+     - "China's imports from USA"
      - "Trade between USA and Mexico"
    → Output a /cntry/... URL
 
@@ -2902,7 +2902,7 @@ Choose exactly ONE intent:
    → User asks about HS code, chapter, heading, or subheading
    → Key phrases: "HS code", "chapter", "heading"
    → Examples:
-     - "India's chapter 01 imports"
+     - "China's chapter 01 imports"
      - "Show HS code 8471 data for USA"
      - "Belgium's heading 2710 exports"
    → Output a /chapter/... URL
@@ -3037,7 +3037,7 @@ Examples:
 - "scrap metal suppliers" → entity_type: "exporters", direction: "export" (companies that EXPORT scrap metal)
 - "buyers in USA" → entity_type: "importers", direction: "import" (shows companies that IMPORT into USA)
 - "steel buyers" → entity_type: "importers", direction: "import" (companies that IMPORT steel)
-- "india exporters" → entity_type: "exporters", direction: "export"
+- "china exporters" → entity_type: "exporters", direction: "export"
 - "china importers" → entity_type: "importers", direction: "import"
 
 Entity → entity_type param mapping (USE THIS EXACTLY):
@@ -3062,7 +3062,7 @@ URL rules:
 CRITICAL EXAMPLES - Use search_trade_data when PRODUCT is mentioned:
 
 "top importers of coal" → params: {product: "coal", entity_type: "importer", direction: "import"}
-"top coal importers in India" → params: {country: "india", product: "coal", entity_type: "importer", direction: "import"}
+"top coal importers in China" → params: {country: "china", product: "coal", entity_type: "importer", direction: "import"}
 "steel exporters" → params: {product: "steel", entity_type: "exporter", direction: "export"}
 "oil suppliers in China" → params: {country: "china", product: "oil", entity_type: "suppliers", direction: "export"}
    CRITICAL: Suppliers = EXPORTERS (they supply/export products)
@@ -3095,7 +3095,7 @@ ENTITY-FIRST QUERY PATTERNS (Entity mentioned BEFORE country):
 IMPORTANT: Extract country when mentioned with "from", "in", "to", or "of":
 "I need supplies from Taiwan" → params: {country: "taiwan", entity_type: "suppliers", direction: "export"} (NO product yet - will ask)
    CRITICAL: Suppliers FROM a country = EXPORTERS from that country
-"suppliers from India" → params: {country: "india", entity_type: "suppliers", direction: "export"} (NO product yet - will ask)
+"suppliers from China" → params: {country: "china", entity_type: "suppliers", direction: "export"} (NO product yet - will ask)
    CRITICAL: Suppliers = EXPORTERS (they export/supply products)
 "exporters in China" → params: {country: "china", entity_type: "exporter", direction: "export"} (NO product yet - will ask)
 "importers of steel" → params: {product: "steel", entity_type: "importer", direction: "import"} (NO country yet - will ask)
@@ -3104,7 +3104,7 @@ IMPORTANT: Extract country when mentioned with "from", "in", "to", or "of":
 
 Use search_country_data when NO product (general overview):
 "top importers in Indonesia" → intent: search_country_data (no product!)
-"what does India export?" → intent: search_country_data (general overview)
+"what does China export?" → intent: search_country_data (general overview)
 "america imports" → intent: search_country_data, params: {country: "usa", direction: "import"}
 
 URL formats:
@@ -3163,7 +3163,7 @@ CORRECT EXAMPLES (using API's official country_name):
 "imports from america" → https://www.marketinsidedata.com/en/country/usa/imports
 "what does USA export" → https://www.marketinsidedata.com/en/country/usa/exports
 "UK imports" → https://www.marketinsidedata.com/en/country/united-kingdom/imports
-"India exports" → https://www.marketinsidedata.com/en/country/india/exports
+"China exports" → https://www.marketinsidedata.com/en/country/china/exports
 
 ────────────────────────
 INTENT: country_to_country
@@ -3194,7 +3194,7 @@ Direction Logic:
 
 Examples:
 https://www.marketinsidedata.com/en/cntry/Belgium-export-France
-https://www.marketinsidedata.com/en/cntry/India-import-United%20States
+https://www.marketinsidedata.com/en/cntry/China-import-United%20States
 https://www.marketinsidedata.com/en/cntry/United%20States-export-Mexico
 
 ────────────────────────
@@ -3229,7 +3229,7 @@ CRITICAL: HS Code Formatting Rules:
 IMPORTANT: If user doesn't specify import/export, default to "import"
 
 Examples:
-https://www.marketinsidedata.com/en/chapter/india-import-hs-code-01
+https://www.marketinsidedata.com/en/chapter/china-import-hs-code-01
 https://www.marketinsidedata.com/en/chapter/usa-export-hs-code-8471
 https://www.marketinsidedata.com/en/chapter/belgium-import-hs-code-271012
 https://www.marketinsidedata.com/en/chapter/afghanistan-import-hs-code-83
@@ -3485,7 +3485,7 @@ INTENTS (EIGHT TOTAL):
 1. search_trade_data - User wants SPECIFIC trade records for a product/hs_code
 2. search_country_data - User wants to SEE/VIEW trade data for a country (actual statistics, importers, etc.)
    CRITICAL: Use this ONLY when user wants to VIEW the data, NOT when asking ABOUT data availability
-   Examples: "show me Indonesia imports", "what does India export", "Indonesia trade statistics"
+   Examples: "show me Indonesia imports", "what does China export", "Indonesia trade statistics"
    NOT: "what data do you have for Indonesia", "which months of data available"
 3. country_to_country - Trade BETWEEN TWO specific countries
 4. hs_code - HS code, chapter, heading queries
@@ -3500,8 +3500,8 @@ INTENTS (EIGHT TOTAL):
 CRITICAL DISTINCTION - Data Availability vs Trade Data:
 - "What data do you have for Indonesia?" → general (asking ABOUT availability)
 - "Show me Indonesia data" → search_country_data (wants to SEE trade data)
-- "Which months are available for India?" → general (asking ABOUT coverage)
-- "India imports" → search_country_data (wants to VIEW trade data)
+- "Which months are available for China?" → general (asking ABOUT coverage)
+- "China imports" → search_country_data (wants to VIEW trade data)
 
 IMPORTANT: Extract all relevant parameters (country, product, hs_code, direction, entity_type, etc.)
 """
@@ -3531,7 +3531,7 @@ OUTPUT JSON FORMAT (with content validation):
 {
   "intent": "search_trade_data",
   "confidence": 0.95,
-  "params": {"country": "india", "product": "coal", ...},
+  "params": {"country": "china", "product": "coal", ...},
   "missing_params": [],
   "clarifying_question": "",
   "url": "https://...",
@@ -3539,7 +3539,7 @@ OUTPUT JSON FORMAT (with content validation):
   "service_type": "",
   "content_related": true,
   "content_score": 0.85,
-  "country": "India"
+  "country": "China"
 }
 """
         else:
@@ -3549,7 +3549,7 @@ OUTPUT JSON FORMAT (intent only, no content):
 {
   "intent": "search_trade_data",
   "confidence": 0.95,
-  "params": {"country": "india", "product": "coal", ...},
+  "params": {"country": "china", "product": "coal", ...},
   "missing_params": [],
   "clarifying_question": "",
   "url": "https://...",
@@ -4470,7 +4470,7 @@ OUTPUT JSON FORMAT (intent only, no content):
             # Continents should use KB data, not trigger slot questions
             country_param = params.get("country", "")
 
-            # Check for RESTRICTED COUNTRIES (e.g., India)
+            # Check for RESTRICTED COUNTRIES (if any configured)
             if country_param and slot_mgr.is_restricted_country(country_param):
                 is_restricted_country = True
                 restricted_country_name = slot_mgr.get_restricted_country_name(country_param)
@@ -5074,7 +5074,7 @@ TOOL USAGE (DATA AVAILABILITY):
   - Examples that REQUIRE tool usage:
     * "What data is available for Indonesia?"
     * "Tell me about months of data for Kenya"
-    * "Which months do you have data for India?"
+    * "Which months do you have data for China?"
     * "What's the date range for Argentina?"
     * "Show me data coverage for Brazil"
     * "Latest data available for Indonesia"

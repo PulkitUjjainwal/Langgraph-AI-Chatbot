@@ -380,7 +380,7 @@ class LLMUserInfoCollector:
                     affirmative_responses = ['yes', 'no', 'ok', 'sure', 'nope', 'yeah', 'yep', 'nah',
                                             'okay', 'fine', 'alright', 'thanks', 'thank you',
                                             'great', 'good', 'perfect', 'nice']
-                    common_countries = ['usa', 'india', 'china', 'uk', 'brazil', 'germany', 'russia',
+                    common_countries = ['usa', 'united kingdom', 'china', 'uk', 'brazil', 'germany', 'russia',
                                        'japan', 'france', 'canada', 'mexico', 'italy', 'spain']
                     greetings = ['hi', 'hello', 'hey', 'greetings', 'sup', 'howdy']
 
@@ -451,7 +451,7 @@ INTELLIGENT DETECTION RULES:
 
    ❌ NOT affirmations: "yes", "no", "ok", "sure", "thanks", "great", "fine", "alright", "yeah", "yep"
    ❌ NOT acknowledgments to OTHER questions: If user says "yes" after "Was this helpful?", that's NOT their name!
-   ❌ NOT countries/products: "USA", "India", "Indonesia", "oil", "electronics"
+   ❌ NOT countries/products: "USA", "United Kingdom", "Indonesia", "oil", "electronics"
    ❌ NOT polite rejections: "not now", "maybe later", "skip", "no thanks"
 
    CONTEXT MATTERS: Look at what the bot asked MOST RECENTLY. If bot asked "Was this helpful?" and user says "yes", that's an affirmation, NOT a name!
@@ -1563,7 +1563,7 @@ Generate ONLY the prompt text (no quotes, no explanation):"""
             'help', 'info', 'information', 'data', 'pricing', 'price',
 
             # Common country names (prevent "indonesia" mistake)
-            'india', 'indonesia', 'china', 'japan', 'korea', 'brazil', 'mexico',
+            'united kingdom', 'indonesia', 'china', 'japan', 'korea', 'brazil', 'mexico',
             'germany', 'france', 'italy', 'spain', 'russia', 'canada', 'australia',
             'singapore', 'thailand', 'vietnam', 'malaysia', 'philippines',
             'usa', 'uk', 'uae', 'pakistan', 'bangladesh', 'turkey', 'egypt',
@@ -2104,7 +2104,7 @@ Your answer:"""
 
         # Country keywords
         country_patterns = [
-            r'\b(usa|united states|america|china|india|indonesia|brazil|germany|japan|uk|france|canada|mexico|australia|korea|vietnam|thailand|singapore|malaysia|philippines|taiwan|hong kong|russia|iran|iraq|turkey|egypt|saudi arabia|uae|south africa|nigeria|kenya|argentina|chile|peru|colombia)\b'
+            r'\b(usa|united states|america|china|united kingdom|indonesia|brazil|germany|japan|uk|france|canada|mexico|australia|korea|vietnam|thailand|singapore|malaysia|philippines|taiwan|hong kong|russia|iran|iraq|turkey|egypt|saudi arabia|uae|south africa|nigeria|kenya|argentina|chile|peru|colombia)\b'
         ]
 
         for pattern in country_patterns:

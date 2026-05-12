@@ -907,7 +907,7 @@ Questions like: "Tell me about Africa", "Asia data coverage?", "What about Europ
 
 WORLD KNOWLEDGE (use these for general questions):
 - Africa: 54 countries (Top GDP: Nigeria, South Africa, Egypt, Algeria, Kenya)
-- Asia: 48 countries (Top GDP: China, Japan, India, South Korea, Indonesia)
+- Asia: 48 countries (Top GDP: China, Japan, South Korea, Indonesia, Thailand)
 - Europe: 44 countries (Top GDP: Germany, France, UK, Italy, Spain)
 - North America: 23 countries (Top GDP: USA, Canada, Mexico)
 - South America: 12 countries (Top GDP: Brazil, Argentina, Colombia, Chile)

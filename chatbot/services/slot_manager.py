@@ -208,7 +208,7 @@ class SlotConfig:
             name="country",
             display_name="Country",
             question="Which country are you interested in?",
-            suggestions=["India", "USA", "China", "Germany", "Indonesia"],
+            suggestions=["United Kingdom", "USA", "China", "Germany", "Indonesia"],
         ),
         "direction": SlotDefinition(
             name="direction",
@@ -232,13 +232,13 @@ class SlotConfig:
             name="origin_country",
             display_name="Origin Country",
             question="Which country is the origin (exporting country)?",
-            suggestions=["India", "USA", "China", "Germany"],
+            suggestions=["United Kingdom", "USA", "China", "Germany"],
         ),
         "destination_country": SlotDefinition(
             name="destination_country",
             display_name="Destination Country",
             question="Which country is the destination (importing country)?",
-            suggestions=["India", "USA", "China", "Germany"],
+            suggestions=["United Kingdom", "USA", "China", "Germany"],
         ),
     }
 

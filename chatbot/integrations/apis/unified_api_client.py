@@ -277,7 +277,7 @@ class UnifiedAPIClient:
 
     # Country name to ISO code mapping (fallback - will be enriched from API)
     COUNTRY_NAME_TO_ISO = {
-        "argentina": "AR", "vietnam": "VN", "china": "CN", "india": "IN",
+        "argentina": "AR", "vietnam": "VN", "china": "CN", "united-kingdom": "GB",
         "usa": "US", "united-states": "US", "brazil": "BR", "mexico": "MX",
         "germany": "DE", "france": "FR", "italy": "IT", "spain": "ES",
         "united-kingdom": "GB", "uk": "GB", "japan": "JP", "south-korea": "KR",
@@ -1304,7 +1304,7 @@ class UnifiedAPIClient:
         URL Pattern: /[language]/cntry/[origin]-[direction]-[destination]
         Examples:
             - /en/cntry/Belgium-export-France
-            - /en/cntry/United%20States-import-India
+            - /en/cntry/United%20States-import-China
 
         Args:
             url: Country-to-country URL
@@ -1330,7 +1330,7 @@ class UnifiedAPIClient:
         if len(parts) < 3:
             return {"error": f"Invalid URL format: expected [origin]-[direction]-[destination], got {last_segment}"}
 
-        # Handle cases where country names have hyphens (e.g., "united-states-import-india")
+        # Handle cases where country names have hyphens (e.g., "united-states-import-china")
         # Find the direction keyword (import or export)
         direction_index = -1
         direction = None

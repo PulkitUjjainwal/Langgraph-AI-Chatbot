@@ -226,7 +226,7 @@ class ConversationHistoryManager:
 
         # Common countries in trade
         countries = [
-            'china', 'india', 'usa', 'mexico', 'brazil', 'germany',
+            'china', 'uk', 'usa', 'mexico', 'brazil', 'germany',
             'japan', 'korea', 'indonesia', 'vietnam', 'thailand',
             'argentina', 'turkey', 'italy', 'france', 'spain'
         ]

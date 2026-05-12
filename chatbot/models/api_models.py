@@ -635,7 +635,7 @@ class SupportAnalyticsResponse(BaseModel):
                 },
                 "interactions_by_country": [
                     {"country": "United States", "count": 1890, "conversions": 145},
-                    {"country": "India", "count": 1230, "conversions": 89},
+                    {"country": "China", "count": 1230, "conversions": 89},
                     {"country": "United Kingdom", "count": 670, "conversions": 45}
                 ],
                 "total_conversions": 679,
