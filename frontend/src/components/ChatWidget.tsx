@@ -278,63 +278,53 @@ export default function ChatWidget() {
   // ══════════════════════════════════════════════════════════════════════════════
   // ODOO LIVE CHAT - Clean Industry-Standard Loader
   // ══════════════════════════════════════════════════════════════════════════════
+  // ODOO LIVECHAT INITIALIZATION (Simplified - matches working layout.tsx approach)
+  // ══════════════════════════════════════════════════════════════════════════════
   useEffect(() => {
-    console.log('[Odoo] Initializing Odoo live chat');
+    // console.log('[Odoo] Initializing Odoo live chat');
 
     if (typeof window === 'undefined') return;
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // STEP 1: If widget exists, trust it and mark as ready (fastest path)
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Check if already initialized
     const existingWidget = document.querySelector('.o-livechat-root');
+    const existingScripts = document.querySelector('script[src*="crm.marketinsidedata.com/im_livechat"]');
+
     if (existingWidget) {
-      console.log('[Odoo] ✓ Widget found - marking as ready');
+      // console.log('[Odoo] ✓ Widget already exists');
       setIsOdooReady(true);
-      // Re-register interceptor flag for future checks
-      (window as any).__odoo_interceptor_loaded = true;
       return;
     }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // STEP 2: If scripts already loading, wait for widget instead of interrupting
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    const existingScripts = document.querySelector('script[src*="crm.marketinsidedata.com/im_livechat"]');
     if (existingScripts) {
-      console.log('[Odoo] Scripts already in DOM - waiting for widget to appear...');
-
-      // Wait up to 15 seconds for widget to appear
-      let attempts = 0;
-      const checkWidget = setInterval(() => {
+      // console.log('[Odoo] ✓ Scripts already loading, waiting for widget...');
+      // Wait for widget to appear
+      const waitInterval = setInterval(() => {
         const widget = document.querySelector('.o-livechat-root');
         if (widget) {
-          console.log('[Odoo] ✓ Widget appeared after waiting');
-          clearInterval(checkWidget);
+          // console.log('[Odoo] ✓ Widget appeared');
           setIsOdooReady(true);
-          (window as any).__odoo_interceptor_loaded = true;
-        } else if (attempts++ > 60) {
-          console.error('[Odoo] ✗ Widget never appeared - will reload on next mount');
-          clearInterval(checkWidget);
-          setIsOdooReady(true); // Enable button so user can try
-          // Clean up for next attempt
-          document.querySelectorAll('script[src*="crm.marketinsidedata.com/im_livechat"]').forEach(s => s.remove());
-          document.getElementById('odoo-session-interceptor')?.remove();
+          clearInterval(waitInterval);
         }
-      }, 250);
+      }, 500);
+
+      // Timeout after 15 seconds
+      setTimeout(() => {
+        clearInterval(waitInterval);
+        setIsOdooReady(true);
+      }, 15000);
       return;
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // STEP 3: No widget, no scripts - fresh load needed
+    // SIMPLE APPROACH: Just load the scripts like layout.tsx does
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    console.log('[Odoo] No widget or scripts found - loading fresh...');
+    // console.log('[Odoo] Loading scripts...');
     delete (window as any).__odoo_session__; // Clear session only
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // STEP 3: Load scripts in sequence (industry-standard async/await pattern)
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Load scripts in sequence
     const loadScripts = async () => {
       try {
-        console.log('[Odoo] Loading session interceptor...');
+        // console.log('[Odoo] Loading session interceptor...');
 
         // Load interceptor (inline script - must execute first)
         const interceptor = document.createElement('script');
@@ -439,52 +429,78 @@ export default function ChatWidget() {
               }, 1000);
             });
 
-            console.log('[Odoo] ✓ Interceptor installed');
+            // console.log('[Odoo] ✓ Interceptor installed');
           })();
         `;
         document.head.appendChild(interceptor);
 
-        // Load assets_embed.js
-        console.log('[Odoo] Loading assets_embed.js...');
-        await new Promise<void>((resolve, reject) => {
-          const embed = document.createElement('script');
-          embed.src = 'https://crm.marketinsidedata.com/im_livechat/assets_embed.js';
-          embed.async = true;
-          embed.onload = () => {
-            console.log('[Odoo] ✓ assets_embed loaded');
-            resolve();
-          };
-          embed.onerror = () => reject(new Error('Failed to load assets_embed'));
-          document.head.appendChild(embed);
-        });
-
-        // Load loader/1
-        console.log('[Odoo] Loading loader...');
+        // Load loader/1 FIRST (matches layout.tsx order)
+        // console.log('[Odoo] Loading loader...');
         await new Promise<void>((resolve, reject) => {
           const loader = document.createElement('script');
           loader.src = 'https://crm.marketinsidedata.com/im_livechat/loader/1';
-          loader.async = true;
+          loader.async = false; // Load synchronously to ensure proper order
           loader.onload = () => {
-            console.log('[Odoo] ✓ loader loaded');
+            // console.log('[Odoo] ✓ loader loaded');
             resolve();
           };
           loader.onerror = () => reject(new Error('Failed to load loader'));
           document.head.appendChild(loader);
         });
 
+        // Load assets_embed.js SECOND (after loader)
+        // console.log('[Odoo] Loading assets_embed.js...');
+        await new Promise<void>((resolve, reject) => {
+          const embed = document.createElement('script');
+          embed.src = 'https://crm.marketinsidedata.com/im_livechat/assets_embed.js';
+          embed.async = false; // Load synchronously
+          embed.onload = () => {
+            // console.log('[Odoo] ✓ assets_embed loaded');
+            resolve();
+          };
+          embed.onerror = () => reject(new Error('Failed to load assets_embed'));
+          document.head.appendChild(embed);
+        });
+
+        // Trigger Odoo livechat initialization
+        // console.log('[Odoo] Triggering widget initialization...');
+        await new Promise(r => setTimeout(r, 1000)); // Wait for odoo.__session_info__ to be set
+
+        // Manually start the livechat module
+        try {
+          const odoo = (window as any).odoo;
+          if (odoo?.loader) {
+            // console.log('[Odoo] Attempting to start livechat module...');
+
+            // Try to start the boot module
+            try {
+              await odoo.loader.startModule('@im_livechat/embed/boot');
+              // console.log('[Odoo] ✓ Boot module started');
+            } catch (e) {
+              // console.log('[Odoo] Boot module not found, trying alternatives...');
+
+              // Alternative: dispatch a DOM ready event
+              window.dispatchEvent(new Event('DOMContentLoaded'));
+              await new Promise(r => setTimeout(r, 500));
+            }
+          }
+        } catch (e) {
+          console.warn('[Odoo] Manual start failed:', e);
+        }
+
         // Wait for widget to appear (max 10 seconds)
-        console.log('[Odoo] Waiting for widget...');
+        // console.log('[Odoo] Waiting for widget...');
         const waitForWidget = () => new Promise<boolean>((resolve) => {
           let attempts = 0;
           const check = () => {
             const widget = document.querySelector('.o-livechat-root');
             if (widget) {
-              console.log('[Odoo] ✓ Widget created');
+              // console.log('[Odoo] ✓ Widget created');
               resolve(true);
             } else if (attempts++ < 40) {
               setTimeout(check, 250);
             } else {
-              console.error('[Odoo] ✗ Widget not found after 10s');
+              // console.error('[Odoo] ✗ Widget not found after 10s');
               resolve(false);
             }
           };
@@ -492,15 +508,21 @@ export default function ChatWidget() {
         });
 
         const widgetReady = await waitForWidget();
-        setIsOdooReady(true); // Enable button regardless (shows error if widget failed)
 
-        if (!widgetReady) {
-          console.error('[Odoo] Widget initialization failed - button will show error on click');
-          delete (window as any).__odoo_interceptor_loaded; // Allow retry on next page load
+        setIsOdooReady(true); // Enable button regardless
+
+        if (widgetReady) {
+          // console.log('[Odoo] ✅ Widget initialized successfully!');
+        } else {
+          // console.error('[Odoo] ✗ Widget initialization failed');
+          // Clean up for next attempt
+          delete (window as any).__odoo_interceptor_loaded;
         }
 
+        // console.log('[Odoo] Script loading complete');
+
       } catch (error) {
-        console.error('[Odoo] Script loading failed:', error);
+        // console.error('[Odoo] Script loading failed:', error);
         delete (window as any).__odoo_interceptor_loaded; // Allow retry
         setIsOdooReady(true); // Enable button so user can see error
       }
@@ -554,7 +576,7 @@ export default function ChatWidget() {
       try {
         // Clear stale Odoo session data on page load
         if (window.__odoo_session__) {
-          console.log("[History] Clearing stale Odoo session on page load");
+          // console.log("[History] Clearing stale Odoo session on page load");
           delete window.__odoo_session__;
         }
 
@@ -565,7 +587,7 @@ export default function ChatWidget() {
           const data = await resp.json();
 
           if (data.messages && data.messages.length > 0) {
-            console.log('[History] Loaded', data.messages.length, 'messages');
+            // console.log('[History] Loaded', data.messages.length, 'messages');
 
             const loadedMessages: ChatMessage[] = data.messages
               // Filter out old Odoo error messages (they shouldn't persist across refreshes)
@@ -588,7 +610,7 @@ export default function ChatWidget() {
           setHistoryLoaded(true);
         }
       } catch (error) {
-        console.error('[History] Failed to load:', error);
+        // console.error('[History] Failed to load:', error);
         setHistoryLoaded(true);
       }
     };
@@ -770,7 +792,7 @@ export default function ChatWidget() {
     );
 
     if (hasConnectKeyword) {
-      console.log('[ChatWidget] Connect/help intent detected:', normalizedQuery);
+      // console.log('[ChatWidget] Connect/help intent detected:', normalizedQuery);
       return true;
     }
 
@@ -890,7 +912,7 @@ export default function ChatWidget() {
 
       if (resp.ok) {
         const data = await resp.json();
-        console.log("Init response:", data);
+        // console.log("Init response:", data);
 
         setSuggestedQuestions(data.suggested_questions);
 
@@ -905,10 +927,10 @@ export default function ChatWidget() {
           
           // If we have an assistantMsgId, update existing message; otherwise add new one
           if (assistantMsgId) {
-            console.log('[callInitAndShowQuestions] Updating existing message with id:', assistantMsgId);
+            // console.log('[callInitAndShowQuestions] Updating existing message with id:', assistantMsgId);
             setMessages((prev) => prev.map(m => m.id === assistantMsgId ? assistantMsg : m));
           } else {
-            console.log('[callInitAndShowQuestions] Adding new message');
+            // console.log('[callInitAndShowQuestions] Adding new message');
             setMessages((prev) => [...prev, assistantMsg]);
           }
         }
@@ -924,7 +946,7 @@ export default function ChatWidget() {
         ]);
       }
     } catch (error) {
-      console.error("Init call failed:", error);
+      // console.error("Init call failed:", error);
       setMessages((prev) => [
         ...prev,
         {
@@ -1034,12 +1056,12 @@ export default function ChatWidget() {
 
   // Send conversation context to Odoo and open Odoo chat
   const sendContextToOdooAndOpenChat = async () => {
-    console.log("[ODOO] Chat with us clicked — session_id:", sessionIdRef.current);
+    // console.log("[ODOO] Chat with us clicked — session_id:", sessionIdRef.current);
 
     // Clear any previous Odoo error messages and stale session
     setMessages(prev => prev.filter(m => !m.id.startsWith('odoo-error-')));
     if (window.__odoo_session__) {
-      console.log("[ODOO] Clearing stale session data");
+      // console.log("[ODOO] Clearing stale session data");
       delete window.__odoo_session__;
     }
 
@@ -1056,22 +1078,22 @@ export default function ChatWidget() {
       const odooWidget = document.querySelector('.o-livechat-root');
       const odooLoaderScript = document.querySelector('script[src*="im_livechat/loader"]');
 
-      console.log("[ODOO] Dispatching openOdooChat event...", {
-        interceptorLoaded: !!interceptorLoaded,
-        hasInterceptorScript: !!document.getElementById('odoo-session-interceptor'),
-        hasOdooWidget: !!odooWidget,
-        hasLoaderScript: !!odooLoaderScript,
-        timestamp: new Date().toISOString()
-      });
+      // console.log("[ODOO] Dispatching openOdooChat event...", {
+      //   interceptorLoaded: !!interceptorLoaded,
+      //   hasInterceptorScript: !!document.getElementById('odoo-session-interceptor'),
+      //   hasOdooWidget: !!odooWidget,
+      //   hasLoaderScript: !!odooLoaderScript,
+      //   timestamp: new Date().toISOString()
+      // });
 
       if (!interceptorLoaded) {
-        console.error("[ODOO] ⚠️ WARNING: Interceptor not loaded! Event may not be handled.");
-        console.error("[ODOO] This indicates a script loading issue. Attempting to dispatch anyway...");
+        // console.error("[ODOO] ⚠️ WARNING: Interceptor not loaded! Event may not be handled.");
+        // console.error("[ODOO] This indicates a script loading issue. Attempting to dispatch anyway...");
       }
 
       if (!odooWidget && !odooLoaderScript) {
         console.error("[ODOO] ⚠️ CRITICAL: Neither Odoo widget nor loader script found!");
-        console.error("[ODOO] Odoo may not have initialized properly. Scripts failed to load.");
+        // console.error("[ODOO] Odoo may not have initialized properly. Scripts failed to load.");
 
         // Clear stuck flags
         delete (window as any).__odoo_loading_in_progress__;
@@ -1104,14 +1126,14 @@ export default function ChatWidget() {
 
     // Set up event listeners for Odoo open success/failure
     const handleOdooOpened = () => {
-      console.log("[ODOO] ✓ Odoo opened successfully, hiding AI chatbot");
+      // console.log("[ODOO] ✓ Odoo opened successfully, hiding AI chatbot");
       setOpen(false);
       setIsHiddenForOdoo(true);
       cleanup();
     };
 
     const handleOdooFailed = () => {
-      console.warn("[ODOO] ✗ Odoo failed to open, keeping AI chatbot visible");
+      // console.warn("[ODOO] ✗ Odoo failed to open, keeping AI chatbot visible");
       // Show error message to user (with unique ID to prevent duplicates)
       const errorMsg: ChatMessage = {
         id: `odoo-error-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -1136,12 +1158,12 @@ export default function ChatWidget() {
     // Extended from 7s to 12s to accommodate page refresh scenarios where
     // Odoo scripts need more time to fully initialize
     const timeoutId = setTimeout(() => {
-      console.warn("[ODOO] Timeout: No response from Odoo after 12 seconds");
+      // console.warn("[ODOO] Timeout: No response from Odoo after 12 seconds");
       handleOdooFailed();
     }, 12000);
 
     // Trigger Odoo to open
-    console.log("[ODOO] Attempting to open Odoo chat...");
+    // console.log("[ODOO] Attempting to open Odoo chat...");
     openOdoo();
 
     // ── Step 2: Start listening for session BEFORE sending message ───────────
@@ -1152,7 +1174,7 @@ export default function ChatWidget() {
         // Already captured from a previous open? Reuse it.
         const cached = (window as any).__odoo_session__ as { guest_token?: string; channel_id?: number } | undefined;
         if (cached?.guest_token && cached?.channel_id && cached.channel_id > 0) {
-          console.log("[ODOO] Reusing cached session — channel_id:", cached.channel_id);
+          // console.log("[ODOO] Reusing cached session — channel_id:", cached.channel_id);
           resolve(cached as { guest_token: string; channel_id: number });
           return;
         }
@@ -1171,7 +1193,7 @@ export default function ChatWidget() {
         const onReady = (e: Event) => {
           const d = (e as CustomEvent<{ guest_token: string; channel_id: number }>).detail;
           if (d?.guest_token && d?.channel_id > 0) {
-            console.log("[ODOO] odoo:session-ready event received — channel_id:", d.channel_id);
+            // console.log("[ODOO] odoo:session-ready event received — channel_id:", d.channel_id);
             doResolve(d);
           }
         };
@@ -1183,7 +1205,7 @@ export default function ChatWidget() {
         const pollTimer = setInterval(() => {
           const s = (window as any).__odoo_session__ as { guest_token?: string; channel_id?: number } | undefined;
           if (s?.guest_token && s?.channel_id && s.channel_id > 0) {
-            console.log("[ODOO] Polled session — channel_id:", s.channel_id);
+            // console.log("[ODOO] Polled session — channel_id:", s.channel_id);
             doResolve(s as { guest_token: string; channel_id: number });
           }
         }, 300);
@@ -1226,7 +1248,7 @@ export default function ChatWidget() {
     };
 
     // ALWAYS install backup interceptor (overrides the script-tag one if needed)
-    console.log('[ODOO-backup] Installing backup session interceptor');
+    // console.log('[ODOO-backup] Installing backup session interceptor');
     window.fetch = function(input: RequestInfo | URL, init?: RequestInit) {
       let reqUrl = '';
       try { reqUrl = typeof input === 'string' ? input : (input as Request).url ?? String(input); } catch(e) { /**/ }
@@ -1235,7 +1257,7 @@ export default function ChatWidget() {
       // The guest_token and thread_id are sent plainly in the outgoing payload.
       if (reqUrl.indexOf('/im_livechat/cors/message/post') !== -1 ||
           reqUrl.indexOf('/mail/message/post') !== -1) {
-        console.log('[ODOO-backup] Intercepted message/post request');
+        // console.log('[ODOO-backup] Intercepted message/post request');
           try {
             const bodyStr = typeof init?.body === 'string' ? init.body : '';
             if (bodyStr) {
@@ -1260,7 +1282,7 @@ export default function ChatWidget() {
               try {
                 const result = json?.result;
                 if (!result) return;
-                console.log('[ODOO-backup] get_session raw (first 800 chars):', JSON.stringify(result).substring(0, 800));
+                // console.log('[ODOO-backup] get_session raw (first 800 chars):', JSON.stringify(result).substring(0, 800));
 
                 // Try every known guest_token location
                 let gt: string | null = null;
@@ -1278,7 +1300,7 @@ export default function ChatWidget() {
                     for (const item of items) {
                       if (item && (item.guest_token || item.access_token)) {
                         gt = item.guest_token || item.access_token;
-                        console.log('[ODOO-backup] guest_token found in store_data.' + key);
+                        // console.log('[ODOO-backup] guest_token found in store_data.' + key);
                         break;
                       }
                     }
@@ -1287,13 +1309,13 @@ export default function ChatWidget() {
                 }
 
                 const cid: number = result.channel_id;
-                console.log('[ODOO-backup] channelId:', cid, 'guestToken found:', !!gt);
+                // console.log('[ODOO-backup] channelId:', cid, 'guestToken found:', !!gt);
 
                 if (gt && typeof cid === 'number' && cid > 0) {
                   _emitSession(gt, cid, 'get_session response');
                 } else if (!gt) {
-                  console.warn('[ODOO-backup] Could not extract guest_token from get_session. Available store_data blocks:', Object.keys(sd));
-                  console.log('[ODOO-backup] Full result keys:', Object.keys(result));
+                  // console.warn('[ODOO-backup] Could not extract guest_token from get_session. Available store_data blocks:', Object.keys(sd));
+                  // console.log('[ODOO-backup] Full result keys:', Object.keys(result));
                 }
               } catch(e) { /**/ }
             }).catch(() => { /**/ });
@@ -1339,11 +1361,11 @@ export default function ChatWidget() {
       }
 
       if (!input) {
-        console.warn("[ODOO] Composer input not found after 8 s");
+        // console.warn("[ODOO] Composer input not found after 8 s");
         return false;
       }
 
-      console.log("[ODOO] Composer input found:", input.tagName, input.className);
+      // console.log("[ODOO] Composer input found:", input.tagName, input.className);
       input.focus();
       await new Promise(r => setTimeout(r, 80));
 
@@ -1381,12 +1403,12 @@ export default function ChatWidget() {
           ".o-mail-Composer-send, button[aria-label='Send'], .o-mail-Composer button[type='submit'], button.o-mail-Composer-send"
         ) as HTMLElement | null;
         if (sendBtn) {
-          console.log("[ODOO] Also clicking send button:", sendBtn.className);
+          // console.log("[ODOO] Also clicking send button:", sendBtn.className);
           sendBtn.click();
         }
       }
 
-      console.log("[ODOO] Transfer message sent via input");
+      // console.log("[ODOO] Transfer message sent via input");
       return true;
     };
 
@@ -1399,7 +1421,7 @@ export default function ChatWidget() {
       const { guest_token, channel_id } = await sessionPromise;
       clearTimeout(_backupTimer);
       _restoreBackup();   // restore original fetch
-      console.log("[ODOO] Session ready — channel_id:", channel_id, "| guest_token: ***set***");
+      // console.log("[ODOO] Session ready — channel_id:", channel_id, "| guest_token: ***set***");
 
       // ── Step 5: Send AI conversation history via backend ─────────────────
       // Always use the original (unpatched) fetch so we never intercept ourselves
@@ -1410,18 +1432,18 @@ export default function ChatWidget() {
           body: JSON.stringify({ session_id: sessionIdRef.current, guest_token, channel_id })
         });
         const histData = await histRes.json();
-        console.log("[ODOO] /odoo/send-context response:", histData);
+        // console.log("[ODOO] /odoo/send-context response:", histData);
         if (histData.history_sent) {
-          console.log(`[ODOO] History sent — ${histData.message_count} msgs to channel ${histData.odoo_channel_id}`);
+          // console.log(`[ODOO] History sent — ${histData.message_count} msgs to channel ${histData.odoo_channel_id}`);
         }
       } catch (histErr) {
-        console.warn("[ODOO] /odoo/send-context error:", histErr);
+        // console.warn("[ODOO] /odoo/send-context error:", histErr);
       }
 
     } catch (err) {
       clearTimeout(_backupTimer);
       _restoreBackup();   // always restore fetch
-      console.warn("[ODOO] Session wait failed:", (err as Error).message);
+      // console.warn("[ODOO] Session wait failed:", (err as Error).message);
       // Chatbox is still open — user can chat with the agent manually
     }
   };
@@ -1713,8 +1735,8 @@ export default function ChatWidget() {
                   label: a.label
                 }));
 
-                console.log('[Stream] Built actions:', actions);
-                console.log('[Stream] Message text:', data.message);
+                // console.log('[Stream] Built actions:', actions);
+                // console.log('[Stream] Message text:', data.message);
 
                 setMessages((prev) => {
                   const updated = prev.map((m) =>
@@ -1725,7 +1747,7 @@ export default function ChatWidget() {
                       isCreditExhausted: true
                     } : m
                   );
-                  console.log('[Stream] Updated messages:', updated.filter(m => m.id === assistantMsgId));
+                  // console.log('[Stream] Updated messages:', updated.filter(m => m.id === assistantMsgId));
                   return updated;
                 });
 
@@ -1736,7 +1758,7 @@ export default function ChatWidget() {
 
               // Handle clarifying question
               if (data.clarifying_question) {
-                console.log('[Stream] Clarifying question:', data.question);
+                // console.log('[Stream] Clarifying question:', data.question);
 
                 setMessages((prev) =>
                   prev.map((m) =>
@@ -1755,7 +1777,7 @@ export default function ChatWidget() {
 
               // Handle show support buttons (vague/incomplete queries)
               if (data.show_support_buttons) {
-                console.log('[Stream] Show support buttons - vague query detected');
+                // console.log('[Stream] Show support buttons - vague query detected');
 
                 // Build support actions
                 const supportActions: ChatMessage["actions"] = [
@@ -1798,18 +1820,18 @@ export default function ChatWidget() {
               }
 
               if (data.done) {
-                console.log(`Streaming complete in ${data.processing_time?.toFixed(2)}s`);
+                // console.log(`Streaming complete in ${data.processing_time?.toFixed(2)}s`);
 
                 // Handle explore URL if present (but NOT if support buttons are shown)
                 if (data.explore_url && !data.show_support_buttons) {
-                  console.log('[Stream] Explore URL:', data.explore_url);
+                  // console.log('[Stream] Explore URL:', data.explore_url);
                   setMessages((prev) =>
                     prev.map((m) =>
                       m.id === assistantMsgId ? { ...m, exploreUrl: data.explore_url } : m
                     )
                   );
                 } else if (data.show_support_buttons) {
-                  console.log('[Stream] Support buttons mode - NOT showing explore URL');
+                  // console.log('[Stream] Support buttons mode - NOT showing explore URL');
 
                   // Add support buttons to the message
                   const supportActions: ChatMessage["actions"] = (data.actions || []).map((a: any) => ({
@@ -1844,7 +1866,7 @@ export default function ChatWidget() {
         throw fetchError;
       }
     } catch (error: any) {
-      console.error("Streaming error:", error);
+      // console.error("Streaming error:", error);
 
       // Show user-friendly error message
       if (error.message && error.message.includes('timed out')) {
@@ -1890,7 +1912,7 @@ export default function ChatWidget() {
 
       // Handle special init call case
       if (genericResponse === 'INIT_CALL') {
-        console.log('[handleSend] INIT_CALL case - showing loader and closing suggestions');
+        // console.log('[handleSend] INIT_CALL case - showing loader and closing suggestions');
         setSuggestedQuestions([]);
         setMessages((prev) => [
           ...prev,
@@ -1922,7 +1944,7 @@ export default function ChatWidget() {
     }
 
     // Not a generic question, proceed with streaming API
-    console.log('[ChatWidget] Starting to show loader and close suggestions');
+    // console.log('[ChatWidget] Starting to show loader and close suggestions');
 
     // IMPORTANT: Set state synchronously before adding message to ensure loader shows immediately
     // This ensures React batches these updates together and isSending is true when ChatMessages renders
@@ -1934,15 +1956,15 @@ export default function ChatWidget() {
         ...prev,
         { id: assistantId, role: "assistant" as const, text: "" }, // Empty text triggers thinking dots
       ];
-      console.log('[ChatWidget] ✨ Added empty assistant message for thinking indicator', {
-        assistantId,
-        messageCount: newMessages.length,
-        isSendingRef: isSendingRef.current
-      });
+      // console.log('[ChatWidget] ✨ Added empty assistant message for thinking indicator', {
+      //   assistantId,
+      //   messageCount: newMessages.length,
+      //   isSendingRef: isSendingRef.current
+      // });
       return newMessages;
     });
 
-    console.log('[ChatWidget] ⏳ Thinking indicator should be visible now');
+    // console.log('[ChatWidget] ⏳ Thinking indicator should be visible now');
 
     try {
       await sendStreamingRequest(text, assistantId, slotValues);
@@ -1954,7 +1976,7 @@ export default function ChatWidget() {
       // const genericQuestions = Object.keys(genericQA).slice(0, 3);
       // setSuggestedQuestions(genericQuestions);
     } catch (err) {
-      console.error("Chat error:", err);
+      // console.error("Chat error:", err);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantId
@@ -2111,7 +2133,7 @@ export default function ChatWidget() {
     window.addEventListener('chatWidget:action', onAction);
     window.addEventListener('message', onMessage);
 
-    console.log('chatWidget host API installed (frontend)');
+    // console.log('chatWidget host API installed (frontend)');
 
     return () => {
       window.removeEventListener('chatWidget:action', onAction);
@@ -2153,7 +2175,7 @@ export default function ChatWidget() {
   // Show "Ready!" badge animation when Odoo becomes ready
   useEffect(() => {
     if (isOdooReady) {
-      console.log('[Odoo] Live chat is now ready - showing ready badge');
+      // console.log('[Odoo] Live chat is now ready - showing ready badge');
       setShowReadyBadge(true);
 
       // Hide the badge after 3 seconds
@@ -2166,7 +2188,7 @@ export default function ChatWidget() {
   }, [isOdooReady]);
 
   const handleOpenOptionsMenu = () => {
-    console.log('[ChatWidget] Toggling options menu');
+    // console.log('[ChatWidget] Toggling options menu');
     setShowOptionsMenu(!showOptionsMenu);
     // Close WhatsApp submenu when toggling main menu
     // if (showOptionsMenu) {
@@ -2175,7 +2197,7 @@ export default function ChatWidget() {
   };
 
   const handleChatWithUs = () => {
-    console.log('[ChatWidget] Chat with us clicked — switching to Odoo livechat');
+    // console.log('[ChatWidget] Chat with us clicked — switching to Odoo livechat');
 
     // Pre-flight check: Verify Odoo scripts are actually loaded
     const interceptorLoaded = (window as any).__odoo_interceptor_loaded;
@@ -2190,7 +2212,7 @@ export default function ChatWidget() {
 
     // If critical components are missing, show helpful error
     if (!interceptorLoaded || !loaderScript) {
-      console.error('[ODOO] ✗ Odoo scripts not loaded - cannot open live chat');
+      // console.error('[ODOO] ✗ Odoo scripts not loaded - cannot open live chat');
 
       const errorMsg: ChatMessage = {
         id: `odoo-error-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -2258,7 +2280,7 @@ export default function ChatWidget() {
 
   // Reset conversation - clear messages and create new session
   const handleResetConversation = async () => {
-    console.log('[ChatWidget] Reset conversation clicked');
+    // console.log('[ChatWidget] Reset conversation clicked');
 
     // Track reset conversation
     trackResetConversation(sessionId);
@@ -2276,7 +2298,7 @@ export default function ChatWidget() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session_id: oldSessionId }),
         });
-        console.log('[ChatWidget] Backend session reset successful');
+        // console.log('[ChatWidget] Backend session reset successful');
       } catch (error) {
         console.error('[ChatWidget] Failed to reset backend session:', error);
         // Continue with frontend reset even if backend fails
@@ -2307,7 +2329,7 @@ export default function ChatWidget() {
   const saveConversationHistory = async () => {
     const sessionId = sessionIdRef.current;
     if (!sessionId || messages.length === 0) {
-      console.log('[ChatWidget] No conversation to save');
+      // console.log('[ChatWidget] No conversation to save');
       return;
     }
 
