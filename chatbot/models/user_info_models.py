@@ -65,6 +65,13 @@ class UserInfoState:
     phone_ask_count: int = 0
     requirements_ask_count: int = 0
 
+    # Rejection tracking (when user declines to provide a field)
+    name_rejection_count: int = 0
+    email_rejection_count: int = 0
+    phone_rejection_count: int = 0
+    requirements_rejection_count: int = 0
+    fields_declined: List[str] = field(default_factory=list)  # Fields declined 4+ times
+
     # Resistance handling
     collection_paused: bool = False
     last_field_asked: Optional[str] = None
@@ -95,6 +102,11 @@ class UserInfoState:
             "email_ask_count": self.email_ask_count,
             "phone_ask_count": self.phone_ask_count,
             "requirements_ask_count": self.requirements_ask_count,
+            "name_rejection_count": self.name_rejection_count,
+            "email_rejection_count": self.email_rejection_count,
+            "phone_rejection_count": self.phone_rejection_count,
+            "requirements_rejection_count": self.requirements_rejection_count,
+            "fields_declined": self.fields_declined,
             "collection_paused": self.collection_paused,
             "last_field_asked": self.last_field_asked,
             "last_ask_at": self.last_ask_at.isoformat() if self.last_ask_at else None,

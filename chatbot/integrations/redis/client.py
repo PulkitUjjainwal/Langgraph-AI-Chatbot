@@ -8,6 +8,8 @@ Redis-based Memory Management for Chatbot
 import json
 import pickle
 import hashlib
+import logging
+import os
 from typing import Optional, Dict, Any, List, Iterator, Sequence, Tuple
 from datetime import datetime, timedelta
 import numpy as np
@@ -15,6 +17,36 @@ import redis
 from langgraph.checkpoint.base import BaseCheckpointSaver, Checkpoint, CheckpointTuple, CheckpointMetadata
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langchain_core.runnables.config import RunnableConfig
+from chatbot.utils.monitoring import timed_operation
+
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# PROMETHEUS METRICS FOR CACHE OPERATIONS
+# ============================================================================
+METRICS_ENABLED = os.getenv("ENABLE_METRICS", "true").lower() == "true"
+
+cache_ops_counter = None
+if METRICS_ENABLED:
+    try:
+        from prometheus_client import Counter, REGISTRY
+        # Try to get existing metric first, create if it doesn't exist
+        try:
+            cache_ops_counter = REGISTRY._names_to_collectors.get('cache_operations_total')
+            if cache_ops_counter is None:
+                cache_ops_counter = Counter(
+                    'cache_operations_total',
+                    'Total cache operations',
+                    ['cache_type', 'result']
+                )
+            logger.info("Prometheus cache metrics enabled in Redis client")
+        except ValueError as e:
+            # Metric already exists, try to retrieve it
+            logger.warning(f"Cache metric already exists: {e}")
+            cache_ops_counter = REGISTRY._names_to_collectors.get('cache_operations_total')
+    except ImportError:
+        logger.warning("prometheus_client not installed, cache metrics disabled")
+        METRICS_ENABLED = False
 
 
 class RedisMemoryManager:
@@ -93,6 +125,85 @@ class RedisMemoryManager:
         self.client.delete(key)
 
     # ========================================================================
+    # SESSION MESSAGE HISTORY (For Chat UI persistence)
+    # ========================================================================
+
+    def save_message(self, session_id: str, message: Dict[str, Any]):
+        """
+        Save a single message to session history
+
+        Messages are stored as a Redis list (RPUSH) for chronological order.
+        Each message is a JSON dict with 'role', 'content', and optional metadata
+        like 'explore_url', 'is_clarifying', etc.
+
+        Args:
+            session_id: Session identifier
+            message: Message dict with role, content, and optional metadata
+        """
+        key = f"session:{session_id}:messages"
+        self.client.rpush(key, json.dumps(message))
+        self.client.expire(key, self.ttl_seconds)
+
+    def get_messages(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Get messages from session history
+
+        Returns the last N messages from the session in chronological order.
+        Each message includes full metadata (explore_url, is_clarifying, etc.)
+
+        Args:
+            session_id: Session identifier
+            limit: Maximum number of messages to return (default: 50)
+
+        Returns:
+            List of message dicts with all metadata preserved
+        """
+        key = f"session:{session_id}:messages"
+
+        # Get last N messages from list (negative indices get from end)
+        messages_raw = self.client.lrange(key, -limit, -1)
+
+        messages = []
+        for msg_bytes in messages_raw:
+            try:
+                # Messages are stored as JSON strings
+                msg = json.loads(msg_bytes)
+                messages.append(msg)
+            except json.JSONDecodeError:
+                print(f"[REDIS] Warning: Failed to decode message: {msg_bytes[:100]}")
+                continue
+
+        return messages
+
+    def get_suggested_questions(self, session_id: str) -> List[str]:
+        """
+        Get suggested questions for session
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            List of suggested question strings
+        """
+        key = f"session:{session_id}:suggestions"
+        suggestions = self.client.lrange(key, 0, -1)
+        return [s.decode('utf-8') if isinstance(s, bytes) else s for s in suggestions]
+
+    def save_suggested_questions(self, session_id: str, questions: List[str]):
+        """
+        Save suggested questions for session
+
+        Args:
+            session_id: Session identifier
+            questions: List of suggested question strings
+        """
+        key = f"session:{session_id}:suggestions"
+        self.client.delete(key)  # Clear existing
+        if questions:
+            self.client.rpush(key, *questions)
+            self.client.expire(key, self.ttl_seconds)
+
+    # ========================================================================
     # DYNAMIC EMBEDDINGS CACHE
     # ========================================================================
 
@@ -126,6 +237,7 @@ class RedisMemoryManager:
 
         return deleted_count
 
+    @timed_operation("redis_save_embeddings")
     def save_embeddings(
         self,
         session_id: str,
@@ -221,6 +333,7 @@ class RedisMemoryManager:
         print(f"          Shape: {embeddings.shape}, Chunks: {len(chunks)}")
         print(f"  [SESSION] URLs tracked: {final_count}/{max_urls}")
 
+    @timed_operation("redis_get_embeddings")
     def get_embeddings(
         self,
         session_id: str,
@@ -247,10 +360,46 @@ class RedisMemoryManager:
             chunks = json.loads(chunks_data)
             full_content = content_data.decode('utf-8') if content_data else ""
 
+            # Log cache hit with structured logging
+            logger.info(
+                "Redis embeddings cache hit",
+                extra={
+                    "cache_type": "embeddings",
+                    "cache_status": "hit",
+                    "session_id": session_id,
+                    "url_hash": url_hash
+                }
+            )
+
+            # Export to Prometheus (if enabled)
+            if METRICS_ENABLED and cache_ops_counter:
+                cache_ops_counter.labels(
+                    cache_type="embeddings",
+                    result="hit"
+                ).inc()
+
             print(f"  [CACHE HIT] Embeddings loaded from Redis: {session_id}/{url_hash}")
             if full_content:
                 print(f"  [CACHE HIT] Content loaded: {len(full_content)} chars")
             return embeddings, chunks, full_content
+
+        # Log cache miss
+        logger.info(
+            "Redis embeddings cache miss",
+            extra={
+                "cache_type": "embeddings",
+                "cache_status": "miss",
+                "session_id": session_id,
+                "url_hash": url_hash
+            }
+        )
+
+        # Export to Prometheus (if enabled)
+        if METRICS_ENABLED and cache_ops_counter:
+            cache_ops_counter.labels(
+                cache_type="embeddings",
+                result="miss"
+            ).inc()
 
         return None
 

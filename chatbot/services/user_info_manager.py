@@ -98,6 +98,15 @@ class UserInfoManager:
         # Fallback to MySQL
         db_data = await self.db_service.get_user_info(session_id)
         if db_data:
+            # Parse fields_declined JSON if it's a string
+            fields_declined = db_data.get('fields_declined', [])
+            if isinstance(fields_declined, str):
+                try:
+                    import json
+                    fields_declined = json.loads(fields_declined)
+                except:
+                    fields_declined = []
+
             state = UserInfoState(
                 session_id=session_id,
                 name=db_data.get('name'),
@@ -110,6 +119,11 @@ class UserInfoManager:
                 email_ask_count=db_data.get('email_ask_count', 0),
                 phone_ask_count=db_data.get('phone_ask_count', 0),
                 requirements_ask_count=db_data.get('requirements_ask_count', 0),
+                name_rejection_count=db_data.get('name_rejection_count', 0),
+                email_rejection_count=db_data.get('email_rejection_count', 0),
+                phone_rejection_count=db_data.get('phone_rejection_count', 0),
+                requirements_rejection_count=db_data.get('requirements_rejection_count', 0),
+                fields_declined=fields_declined,
                 collection_paused=db_data.get('collection_paused', False),
                 last_field_asked=db_data.get('last_field_asked'),
                 pause_until_message_count=db_data.get('pause_until_message_count')
@@ -149,6 +163,23 @@ class UserInfoManager:
             value=value,
             state_data=state_data
         )
+
+    async def _save_rejection_to_mysql(self, state: UserInfoState, field: UserInfoField):
+        """Save rejection count to MySQL"""
+        import json
+        rejection_data = {
+            f'{field.value}_rejection_count': getattr(state, f'{field.value}_rejection_count'),
+            'fields_declined': json.dumps(state.fields_declined) if state.fields_declined else None
+        }
+
+        # Use update_user_info to update just the rejection counts
+        await self.db_service.update_user_info(
+            session_id=state.session_id,
+            updates=rejection_data
+        )
+
+        # Also save to Redis
+        self._save_state_to_redis(state)
 
     # ========================================================================
     # COLLECTION DECISION
@@ -245,35 +276,50 @@ class UserInfoManager:
         state: UserInfoState,
         message_count: int
     ) -> Optional[UserInfoField]:
-        """Determine which field to collect next based on state and timing"""
-        # Priority 1: Name (if not collected and timing is right)
+        """
+        Determine which field to collect next based on state and timing.
+        SKIPS fields that have been permanently declined (4+ rejections).
+        """
+        # Priority 1: Name (if not collected, not declined, and timing is right)
         if not state.name and message_count >= self.MESSAGE_COUNT_NAME:
-            return UserInfoField.NAME
+            if not self._is_field_declined(state, UserInfoField.NAME):
+                return UserInfoField.NAME
+            else:
+                print(f"[UserInfoManager] ⏭️ Skipping 'name' - permanently declined")
 
         # Priority 2: Email (after name collected + wait period)
         if state.name and not state.email:
-            name_field_index = state.fields_collected.index('name') if 'name' in state.fields_collected else -1
-            if name_field_index >= 0:
-                messages_since_name = message_count - (name_field_index * 2 + self.MESSAGE_COUNT_NAME)
-                if messages_since_name >= self.MESSAGE_COUNT_EMAIL:
-                    return UserInfoField.EMAIL
+            if not self._is_field_declined(state, UserInfoField.EMAIL):
+                name_field_index = state.fields_collected.index('name') if 'name' in state.fields_collected else -1
+                if name_field_index >= 0:
+                    messages_since_name = message_count - (name_field_index * 2 + self.MESSAGE_COUNT_NAME)
+                    if messages_since_name >= self.MESSAGE_COUNT_EMAIL:
+                        return UserInfoField.EMAIL
+            else:
+                print(f"[UserInfoManager] ⏭️ Skipping 'email' - permanently declined")
 
         # Priority 3: Requirements (after email, optional before phone)
         if state.email and not state.requirements:
-            email_field_index = state.fields_collected.index('email') if 'email' in state.fields_collected else -1
-            if email_field_index >= 0:
-                messages_since_email = message_count - len(state.fields_collected) * 2
-                if messages_since_email >= self.MESSAGE_COUNT_REQUIREMENTS:
-                    return UserInfoField.REQUIREMENTS
+            if not self._is_field_declined(state, UserInfoField.REQUIREMENTS):
+                email_field_index = state.fields_collected.index('email') if 'email' in state.fields_collected else -1
+                if email_field_index >= 0:
+                    messages_since_email = message_count - len(state.fields_collected) * 2
+                    if messages_since_email >= self.MESSAGE_COUNT_REQUIREMENTS:
+                        return UserInfoField.REQUIREMENTS
+            else:
+                print(f"[UserInfoManager] ⏭️ Skipping 'requirements' - permanently declined")
 
         # Priority 4: Phone (optional, only if email exists and context is right)
         if state.email and not state.phone:
-            email_field_index = state.fields_collected.index('email') if 'email' in state.fields_collected else -1
-            if email_field_index >= 0:
-                messages_since_email = message_count - len(state.fields_collected) * 2
-                if messages_since_email >= self.MESSAGE_COUNT_PHONE:
-                    # Only ask for phone in specific contexts (demo, callback mentions)
-                    return UserInfoField.PHONE
+            if not self._is_field_declined(state, UserInfoField.PHONE):
+                email_field_index = state.fields_collected.index('email') if 'email' in state.fields_collected else -1
+                if email_field_index >= 0:
+                    messages_since_email = message_count - len(state.fields_collected) * 2
+                    if messages_since_email >= self.MESSAGE_COUNT_PHONE:
+                        # Only ask for phone in specific contexts (demo, callback mentions)
+                        return UserInfoField.PHONE
+            else:
+                print(f"[UserInfoManager] ⏭️ Skipping 'phone' - permanently declined")
 
         return None
 
@@ -299,6 +345,30 @@ class UserInfoManager:
         """Increment ask count for a field"""
         current = getattr(state, f'{field.value}_ask_count', 0)
         setattr(state, f'{field.value}_ask_count', current + 1)
+
+    def _increment_rejection_count(self, state: UserInfoState, field: UserInfoField):
+        """
+        Increment rejection count when user declines to provide a field.
+        After 4 rejections, mark field as permanently declined.
+        """
+        current = getattr(state, f'{field.value}_rejection_count', 0)
+        new_count = current + 1
+        setattr(state, f'{field.value}_rejection_count', new_count)
+
+        print(f"[UserInfoManager] Field '{field.value}' rejected {new_count} time(s)")
+
+        # After 4 rejections, permanently decline this field
+        if new_count >= 4 and field.value not in state.fields_declined:
+            state.fields_declined.append(field.value)
+            print(f"[UserInfoManager] ❌ Field '{field.value}' permanently declined after 4 rejections")
+
+    def _is_field_declined(self, state: UserInfoState, field: UserInfoField) -> bool:
+        """Check if a field has been permanently declined (4+ rejections)"""
+        return field.value in state.fields_declined
+
+    def _get_rejection_count(self, state: UserInfoState, field: UserInfoField) -> int:
+        """Get rejection count for a specific field"""
+        return getattr(state, f'{field.value}_rejection_count', 0)
 
     # ========================================================================
     # PROMPT GENERATION
@@ -682,16 +752,36 @@ class UserInfoManager:
 
         for pattern in refusal_patterns:
             if re.search(pattern, message_lower):
+                # Track rejection for the field we just asked about
+                state = await self.get_state(session_id)
+                if state.last_field_asked:
+                    try:
+                        field = UserInfoField(state.last_field_asked)
+                        self._increment_rejection_count(state, field)
+                        # Save rejection count to database
+                        await self._save_rejection_to_mysql(state, field)
+                    except ValueError:
+                        pass  # Invalid field name
+
                 await self._pause_collection(session_id)
                 return True
 
         # Short dismissive responses (< 10 chars, no info)
         if len(message) < 10 and not any(char.isdigit() or '@' in message for char in message):
             state = await self.get_state(session_id)
-            # If they've ignored us twice, pause
+            # If they've ignored us twice, pause AND track as rejection
             if state.last_field_asked:
                 ask_count = self._get_ask_count(state, UserInfoField(state.last_field_asked))
                 if ask_count >= 2:
+                    # Track as rejection (ignored multiple times)
+                    try:
+                        field = UserInfoField(state.last_field_asked)
+                        self._increment_rejection_count(state, field)
+                        # Save rejection count to database
+                        await self._save_rejection_to_mysql(state, field)
+                    except ValueError:
+                        pass
+
                     await self._pause_collection(session_id)
                     return True
 

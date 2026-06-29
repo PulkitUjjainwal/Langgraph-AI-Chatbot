@@ -1,13 +1,40 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>
+<!DOCTYPE html>                                                                                                                                               
+  <html>                                                                                                                                                        
+  <head>                                                                                                                                                        
+      <meta charset="UTF-8">                                                                                                                                    
+      <title>Odoo Widget Test</title>                                                                                                                           
+  </head>                                                                                                                                                       
+  <body style="padding: 50px;">                                                                                                                                 
+      <h1>Testing Odoo Livechat Widget</h1>                                                                                                                     
+      <p>The Odoo widget should appear in the bottom right corner.</p>                                                                                          
+                                                                                                                                                                
+      <script>                                                                                                                                                  
+          console.log('Loading Odoo scripts...');                                                                                                               
+      </script>                                                                                                                                                 
+                                                                                                                                                                
+      <!-- Load Odoo scripts -->                                                                                                                                
+      <script src="https://crm.marketinsidedata.com/im_livechat/loader/1"></script>                                                                             
+      <script src="https://crm.marketinsidedata.com/im_livechat/assets_embed.js"></script>                                                                      
+                                                                                                                                                                
+      <script>                                                                                                                                                  
+          // Check after 5 seconds if widget appeared                                                                                                           
+          setTimeout(() => {                                                                                                                                    
+              const widget = document.querySelector('.o-livechat-root');                                                                                        
+              console.log('=== ODOO WIDGET TEST ===');                                                                                                          
+              console.log('Widget element:', widget);                                                                                                           
+                                                                                                                                                                
+              if (widget) {                                                                                                                                     
+                  console.log('✅ SUCCESS: Widget found!');                                                                                                     
+                  console.log('Has shadow root:', !!widget.shadowRoot);                                                                                         
+                  if (widget.shadowRoot) {                                                                                                                      
+                      const button = widget.shadowRoot.querySelector('button');                                                                                 
+                      console.log('Button in shadow DOM:', button);                                                                                             
+                  }                                                                                                                                             
+              } else {                                                                                                                                          
+                  console.log('❌ FAILED: Widget not found');                                                                                                   
+                  console.log('Check your Odoo channel settings');                                                                                              
+              }                                                                                                                                                 
+          }, 5000);                                                                                                                                             
+      </script>                                                                                                                                                 
+  </body>                                                                                                                                                       
+  </html>

@@ -27,17 +27,26 @@ logger = logging.getLogger(__name__)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # API Configuration
+import os
+
 API_URL = "https://api-dp.marketinsidedata.com/api/v1/users/data-availability"
-API_HEADERS = {
-    'accept': 'application/json, text/plain, */*',
-    'accept-language': 'en-US,en;q=0.9',
-    'authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMwNzk0OWNiLWZmODItNGVkOS1hNzZhLWMxOGRmOThiZDZkYyIsImlhdCI6MTcwNDU0OTU4MH0.sMR6ZZ52KNkiXG8V-Y6JxjkscCOOEDY7DPEFc5nMU88',
-    'cache-control': 'no-cache',
-    'content-type': 'application/json',
-    'origin': 'https://www.marketinsidedata.com',
-    'referer': 'https://www.marketinsidedata.com/',
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
-}
+
+def get_api_headers():
+    """Get API headers with token from environment"""
+    bearer_token = os.getenv("MARKETINSIDE_API_TOKEN") or os.getenv("MARKETINSIDE_BEARER_TOKEN") or ""
+    if not bearer_token:
+        raise ValueError("API token not found. Set MARKETINSIDE_API_TOKEN or MARKETINSIDE_BEARER_TOKEN environment variable")
+
+    return {
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'en-US,en;q=0.9',
+        'authorization': f'Bearer {bearer_token}',
+        'cache-control': 'no-cache',
+        'content-type': 'application/json',
+        'origin': 'https://www.marketinsidedata.com',
+        'referer': 'https://www.marketinsidedata.com/',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
+    }
 API_PAYLOAD = {
     "data_type": "",
     "continent": "",
@@ -53,9 +62,10 @@ def fetch_data_availability() -> List[Dict[str, Any]]:
     logger.info("Fetching data availability from API...")
 
     try:
+        api_headers = get_api_headers()
         response = requests.post(
             API_URL,
-            headers=API_HEADERS,
+            headers=api_headers,
             json=API_PAYLOAD,
             timeout=60
         )
@@ -67,6 +77,9 @@ def fetch_data_availability() -> List[Dict[str, Any]]:
         logger.info(f"Fetched {len(records)} records from API")
         return records
 
+    except ValueError as e:
+        logger.error(f"Configuration error: {e}")
+        raise
     except requests.exceptions.RequestException as e:
         logger.error(f"API request failed: {e}")
         raise

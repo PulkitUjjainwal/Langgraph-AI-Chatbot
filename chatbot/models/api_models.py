@@ -18,6 +18,8 @@ class ChatRequest(BaseModel):
     session_id: str = Field(..., description="Unique session identifier for conversation threading")
     dynamic_url: Optional[str] = Field(None, description="Optional dynamic URL to fetch data from")
     ip_address: Optional[str] = Field(None, description="Optional IP address of the client")
+    request_id: Optional[str] = Field(None, description="Optional request ID for tracing (auto-generated if not provided)")
+    extra_data: Optional[Dict[str, Any]] = Field(None, description="Optional extra metadata for the request")
 
     class Config:
         json_schema_extra = {

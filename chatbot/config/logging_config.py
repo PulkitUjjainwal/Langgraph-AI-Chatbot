@@ -22,7 +22,7 @@ class JSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         """Format log record as JSON"""
         log_data: Dict[str, Any] = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -30,6 +30,14 @@ class JSONFormatter(logging.Formatter):
             "function": record.funcName,
             "line": record.lineno,
         }
+
+        # Add request_id if present in extra
+        if hasattr(record, "request_id"):
+            log_data["request_id"] = record.request_id
+
+        # Add session_id if present
+        if hasattr(record, "session_id"):
+            log_data["session_id"] = record.session_id
 
         # Add exception info if present
         if record.exc_info:

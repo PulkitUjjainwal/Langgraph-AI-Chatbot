@@ -104,6 +104,18 @@ class LLMUserInfoCollector:
 
         # Get current state (fast Redis check, ~1-2ms)
         user_info = await self._get_user_info_fast(session_id)
+
+        # CRITICAL FIX: Extract from CURRENT message FIRST before deciding what to ask
+        # This prevents asking for info user just provided
+        quick_extracted = await self._quick_extract_from_current_message(
+            user_message, user_info
+        )
+
+        if quick_extracted:
+            # Update user_info with extracted data
+            user_info.update(quick_extracted)
+            print(f"[COLLECTOR_INTERNAL] Quick extracted from current message: {list(quick_extracted.keys())}")
+
         missing = self._get_missing_fields(user_info)
 
         if not missing:
@@ -566,6 +578,51 @@ Your response:"""
             print(f"[COLLECTOR_INTERNAL] LLM detection failed: {e}, using fallback regex")
             # Fallback to regex on error
             return self._fallback_regex_detection(user_message, missing_fields)
+
+    async def _quick_extract_from_current_message(
+        self,
+        user_message: str,
+        current_user_info: Dict[str, Any]
+    ) -> Dict[str, str]:
+        """
+        FAST extraction from current message to prevent re-asking.
+        Extracts obvious patterns like "my name is X", "email@domain.com", etc.
+
+        Returns dict of extracted fields (e.g., {'name': 'John', 'email': 'john@example.com'})
+        """
+        extracted = {}
+
+        # Extract name (if not already have it)
+        if not current_user_info.get('name'):
+            patterns = [
+                r"(?:my name is|i'm|i am|call me|this is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+                r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)$"
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, user_message, re.IGNORECASE)
+                if match:
+                    name = match.group(1).strip()
+                    if name.lower() not in ['hi', 'hello', 'hey', 'yes', 'no', 'ok', 'sure', 'thanks']:
+                        extracted['name'] = name
+                        break
+
+        # Extract email (if not already have it)
+        if not current_user_info.get('email'):
+            pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            match = re.search(pattern, user_message)
+            if match:
+                extracted['email'] = match.group(0)
+
+        # Extract phone (if not already have it)
+        if not current_user_info.get('phone'):
+            pattern = r'\+?\d[\d\s\-()]{8,}\d'
+            match = re.search(pattern, user_message)
+            if match:
+                phone = re.sub(r'[^\d+]', '', match.group(0))
+                if len(phone) >= 10:
+                    extracted['phone'] = match.group(0)
+
+        return extracted
 
     def _fallback_regex_detection(
         self,
@@ -1994,7 +2051,7 @@ Your answer:"""
 
             # Remove common prefixes/suffixes from response
             clean_response = raw_response
-            for prefix in ['answer:', 'requirement:', 'your answer:', 'response:', 'output:']:
+            for prefix in ['answer:', 'requirement:', 'your answer:', 'response:', 'output:', 'thinking process:']:
                 if clean_response.lower().startswith(prefix):
                     clean_response = clean_response[len(prefix):].strip()
                     break
@@ -2002,14 +2059,45 @@ Your answer:"""
             # Take first line if multi-line
             if '\n' in clean_response:
                 lines = [l.strip() for l in clean_response.split('\n') if l.strip()]
-                # Find first line that doesn't look like instructions
+
+                # AGGRESSIVE meta-text filtering - skip ALL thinking-style lines
+                requirement = None
                 for line in lines:
-                    if (len(line) > 10 and
-                        not line.lower().startswith(('example', 'note:', 'constraint', 'return', 'write'))):
+                    line_lower = line.lower()
+
+                    # Skip numbered lists (1., 2., etc.) - these are usually thinking steps
+                    if re.match(r'^\d+\.', line.strip()):
+                        continue
+
+                    # Skip bullet points (*, -, •)
+                    if line.strip().startswith(('*', '-', '•', '+')):
+                        continue
+
+                    # Skip headers with colons (Analysis:, Task:, etc.)
+                    if ':' in line and len(line.split(':')[0]) < 30:
+                        # Check if first part before colon is a header word
+                        first_part = line.split(':')[0].strip().lower()
+                        meta_headers = ['thinking', 'analysis', 'step', 'task', 'goal', 'output', 'input',
+                                       'conclusion', 'note', 'example', 'constraint', 'rule', 'instruction']
+                        if any(header in first_part for header in meta_headers):
+                            continue
+
+                    # Skip lines that are clearly meta-text
+                    meta_indicators = ['analyze', 'extract', 'determine', 'check if', 'look at', 'examine',
+                                     'conversation', 'message', 'user said', 'bot said', 'context']
+                    if any(indicator in line_lower for indicator in meta_indicators):
+                        continue
+
+                    # If we get here, this line looks like actual content
+                    if len(line) > 10:
                         requirement = line
                         break
+
                 if not requirement and lines:
-                    requirement = lines[0]
+                    # Last resort: take the longest line that's not obviously meta-text
+                    content_lines = [l for l in lines if len(l) > 15 and not l.strip().startswith(('1.', '2.', '*', '-'))]
+                    if content_lines:
+                        requirement = max(content_lines, key=len)
             else:
                 requirement = clean_response
 

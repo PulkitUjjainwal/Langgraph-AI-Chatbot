@@ -20,8 +20,37 @@ from chatbot.config.settings import get_settings
 from chatbot.config.logging_config import get_logger
 from chatbot.utils.exceptions import KnowledgeBaseError, EmbeddingError
 from chatbot.services.llm.ollama_client import get_ollama_client
+from chatbot.utils.monitoring import timed_operation
+import os
 
 logger = get_logger(__name__)
+
+# ============================================================================
+# PROMETHEUS METRICS FOR QUERY EMBEDDING CACHE
+# ============================================================================
+METRICS_ENABLED = os.getenv("ENABLE_METRICS", "true").lower() == "true"
+
+cache_ops_counter = None
+if METRICS_ENABLED:
+    try:
+        from prometheus_client import Counter, REGISTRY
+        # Try to get existing metric first, create if it doesn't exist
+        try:
+            cache_ops_counter = REGISTRY._names_to_collectors.get('cache_operations_total')
+            if cache_ops_counter is None:
+                cache_ops_counter = Counter(
+                    'cache_operations_total',
+                    'Total cache operations',
+                    ['cache_type', 'result']
+                )
+            logger.info("Prometheus cache metrics enabled in KB retriever")
+        except ValueError as e:
+            # Metric already exists, try to retrieve it
+            logger.warning(f"Cache metric already exists: {e}")
+            cache_ops_counter = REGISTRY._names_to_collectors.get('cache_operations_total')
+    except ImportError:
+        logger.warning("prometheus_client not installed, cache metrics disabled")
+        METRICS_ENABLED = False
 
 
 class KnowledgeBaseRetriever:
@@ -82,6 +111,7 @@ class KnowledgeBaseRetriever:
                 f"Failed to load chunks: {str(e)}"
             ) from e
 
+    @timed_operation("faiss_retrieve")
     def retrieve(self, query: str, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Retrieve relevant chunks for a query
@@ -97,7 +127,6 @@ class KnowledgeBaseRetriever:
             EmbeddingError: If embedding generation fails
             KnowledgeBaseError: If retrieval fails
         """
-        start_time = time.time()
         top_k = top_k or self.settings.top_k_results
 
         try:
@@ -114,10 +143,9 @@ class KnowledgeBaseRetriever:
                 chunk['score'] = float(scores[0][i])
                 results.append(chunk)
 
-            elapsed = time.time() - start_time
             logger.debug(
-                f"Retrieved {len(results)} chunks in {elapsed:.3f}s",
-                extra={"query_length": len(query), "top_k": top_k}
+                f"Retrieved {len(results)} chunks",
+                extra={"query_length": len(query), "top_k": top_k, "result_count": len(results)}
             )
 
             return results
@@ -128,6 +156,7 @@ class KnowledgeBaseRetriever:
             logger.error(f"Retrieval failed: {e}", exc_info=True)
             raise KnowledgeBaseError(f"Failed to retrieve chunks: {str(e)}") from e
 
+    @timed_operation("query_embedding")
     def _get_query_embedding(self, query: str) -> np.ndarray:
         """
         Get or generate query embedding with caching
@@ -142,10 +171,39 @@ class KnowledgeBaseRetriever:
 
         # Check cache
         if cache_key in self.embedding_cache:
-            logger.debug("Using cached query embedding")
+            logger.info(
+                "Embedding cache hit",
+                extra={
+                    "cache_type": "query_embedding",
+                    "cache_status": "hit"
+                }
+            )
+
+            # Export to Prometheus (if enabled)
+            if METRICS_ENABLED and cache_ops_counter:
+                cache_ops_counter.labels(
+                    cache_type="query_embedding",
+                    result="hit"
+                ).inc()
+
             return self.embedding_cache[cache_key]
 
-        # Generate new embedding
+        # Cache miss - generate new embedding
+        logger.info(
+            "Embedding cache miss",
+            extra={
+                "cache_type": "query_embedding",
+                "cache_status": "miss"
+            }
+        )
+
+        # Export to Prometheus (if enabled)
+        if METRICS_ENABLED and cache_ops_counter:
+            cache_ops_counter.labels(
+                cache_type="query_embedding",
+                result="miss"
+            ).inc()
+
         try:
             response = self.ollama_client.embeddings(
                 model=self.settings.embedding_model,

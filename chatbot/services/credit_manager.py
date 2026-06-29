@@ -272,11 +272,12 @@ class CreditManager:
                     "label": "Schedule a Demo",
                     "description": "See how we can help your business"
                 },
-                {
-                    "type": "whatsapp",
-                    "label": "WhatsApp Chat",
-                    "description": "Chat with our team instantly"
-                },
+                # WhatsApp option removed - will implement QR code later
+                # {
+                #     "type": "whatsapp",
+                #     "label": "WhatsApp Chat",
+                #     "description": "Chat with our team instantly"
+                # },
                 {
                     "type": "chat_with_us",
                     "label": "Talk to Live Agent",

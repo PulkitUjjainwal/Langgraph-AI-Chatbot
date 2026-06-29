@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import CallbackRequest from './CallbackRequest';
+// COMMENTED OUT - Phone callback functionality
+// import CallbackRequest from './CallbackRequest';
 
 interface VoiceChatProps {
   sessionId: string;
@@ -73,7 +74,8 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
   const [audioLevel,   setAudioLevel]   = useState(0);
   const [waveformTime, setWaveformTime] = useState(0);
   const [elapsed,      setElapsed]      = useState(0); // session timer (seconds)
-  const [showCallback, setShowCallback] = useState(false); // Show callback request UI
+  // COMMENTED OUT - Phone callback functionality
+  // const [showCallback, setShowCallback] = useState(false); // Show callback request UI
 
   // Core refs
   const mediaRecorderRef      = useRef<MediaRecorder | null>(null);
@@ -456,51 +458,52 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
                 );
               }
 
+              // COMMENTED OUT - Phone callback detection
               // Detect if AI response indicates callback should be offered
-              const responseText = streamingText.toLowerCase();
+              // const responseText = streamingText.toLowerCase();
 
               // Primary triggers - Strong indicators of callback offer
-              const primaryKeywords = [
-                'connect you with our team',
-                'connect you with our sales team',
-                'arrange a phone call',
-                'schedule a call',
-                'call from our team',
-                'speak with our team',
-                'talk to our team',
-                'transfer you to',
-                'put you in touch with'
-              ];
+              // const primaryKeywords = [
+              //   'connect you with our team',
+              //   'connect you with our sales team',
+              //   'arrange a phone call',
+              //   'schedule a call',
+              //   'call from our team',
+              //   'speak with our team',
+              //   'talk to our team',
+              //   'transfer you to',
+              //   'put you in touch with'
+              // ];
 
               // Secondary triggers - Weaker indicators, need context
-              const secondaryKeywords = [
-                'phone call',
-                'callback',
-                'sales team',
-                'representative',
-                'human agent',
-                'real person',
-                'team member',
-                'specialist'
-              ];
+              // const secondaryKeywords = [
+              //   'phone call',
+              //   'callback',
+              //   'sales team',
+              //   'representative',
+              //   'human agent',
+              //   'real person',
+              //   'team member',
+              //   'specialist'
+              // ];
 
               // Check for strong triggers first
-              const hasPrimaryTrigger = primaryKeywords.some(keyword =>
-                responseText.includes(keyword)
-              );
+              // const hasPrimaryTrigger = primaryKeywords.some(keyword =>
+              //   responseText.includes(keyword)
+              // );
 
               // Check for secondary triggers (need at least 2)
-              const secondaryMatches = secondaryKeywords.filter(keyword =>
-                responseText.includes(keyword)
-              );
-              const hasSecondaryTrigger = secondaryMatches.length >= 2;
+              // const secondaryMatches = secondaryKeywords.filter(keyword =>
+              //   responseText.includes(keyword)
+              // );
+              // const hasSecondaryTrigger = secondaryMatches.length >= 2;
 
-              const shouldShowCallback = hasPrimaryTrigger || hasSecondaryTrigger;
+              // const shouldShowCallback = hasPrimaryTrigger || hasSecondaryTrigger;
 
-              if (shouldShowCallback && !showCallback) {
-                // Small delay to let the response finish playing
-                setTimeout(() => setShowCallback(true), 1000);
-              }
+              // if (shouldShowCallback && !showCallback) {
+              //   // Small delay to let the response finish playing
+              //   setTimeout(() => setShowCallback(true), 1000);
+              // }
 
               onResponse?.(streamingText);
             } else if (event.type === 'error') {
@@ -675,8 +678,8 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
           <span className="font-bold text-gray-800 text-sm tracking-wide">Voice Chat</span>
         </div>
 
-        {/* Manual "Call Team" button */}
-        <button
+        {/* COMMENTED OUT - Manual "Call Team" button */}
+        {/* <button
           onClick={() => setShowCallback(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg
             bg-orange-500 hover:bg-orange-600 text-white text-xs font-semibold
@@ -688,7 +691,7 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
               d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
           </svg>
           Call Team
-        </button>
+        </button> */}
       </div>
 
       {/* ── Messages ────────────────────────────────────────────────────────── */}
@@ -797,8 +800,8 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
         )}
       </div>
 
-      {/* ── Callback Request Overlay ───────────────────────────────────────────── */}
-      {showCallback && (
+      {/* COMMENTED OUT - Callback Request Overlay */}
+      {/* {showCallback && (
         <div className="absolute inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <CallbackRequest
             sessionId={sessionId}
@@ -806,7 +809,7 @@ const VoiceChatComponent: React.FC<VoiceChatProps> = ({
             onClose={() => setShowCallback(false)}
           />
         </div>
-      )}
+      )} */}
 
       {/* ── Error toast ──────────────────────────────────────────────────────── */}
       {error && (

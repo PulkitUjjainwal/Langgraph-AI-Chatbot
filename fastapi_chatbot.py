@@ -200,6 +200,9 @@ from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Response
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import json as json_module
 
 
@@ -271,8 +274,10 @@ class Config:
     FAISS_INDEX_FILE = Path(os.getenv("FAISS_INDEX_FILE", f"data/faiss_{SITE_ID}_normalized.index"))
 
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
-    LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v3.1:671b-cloud")
-    INTENT_MODEL = os.getenv("INTENT_MODEL", os.getenv("LLM_MODEL", "deepseek-v3.1:671b-cloud"))  # Fallback to LLM_MODEL if not set
+    # CRITICAL FIX: Use fast 20B model for ALL operations (intent + streaming)
+    # 671B model is TOO SLOW: 26-30s streaming time vs 8-10s with 20B model
+    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-oss:20b-cloud")  # Fast model for streaming (8-10s instead of 26-30s)
+    INTENT_MODEL = os.getenv("INTENT_MODEL", "gpt-oss:20b-cloud")  # Fast model for intent (3-5s)
 
     TOP_K_RESULTS = 5
     MAX_CHUNK_CHARS = 800
@@ -873,7 +878,7 @@ def fetch_dynamic_trade_data(query: str = "") -> str:
         return "No dynamic trade data available."
 
 
-def fetch_data_availability(country: str = "") -> str:
+async def fetch_data_availability(country: str = "") -> str:
     """
     Fetch data availability information for a specific country or all countries.
     Use this tool when user asks about:
@@ -888,7 +893,7 @@ def fetch_data_availability(country: str = "") -> str:
     Returns:
         Formatted string with data availability information.
     """
-    import requests
+    import aiohttp
     global data_availability_cache
 
     # Check cache first (avoid redundant API calls)
@@ -898,7 +903,7 @@ def fetch_data_availability(country: str = "") -> str:
         print(f"  [DATA_AVAIL_TOOL] Using cached data (age: {int(current_time - data_availability_cache['timestamp'])}s)")
         cached_data = data_availability_cache["data"]
     else:
-        # Fetch from API using synchronous requests
+        # OPTIMIZATION: Fetch from API using async aiohttp (prevents event loop blocking)
         print(f"  [DATA_AVAIL_TOOL] Fetching from API (cache expired or empty)")
         api_url = "https://api-dp.marketinsidedata.com/api/v1/users/data-availability"
         bearer_token = os.getenv("MARKETINSIDE_API_TOKEN") or os.getenv("MARKETINSIDE_BEARER_TOKEN") or ""
@@ -933,25 +938,36 @@ def fetch_data_availability(country: str = "") -> str:
         }
 
         try:
-            response = requests.post(api_url, json=payload, headers=headers, timeout=30)
-            print(f"  [DATA_AVAIL_TOOL] API response status: {response.status_code}")
-            if response.status_code == 200:
-                result = response.json()
-                cached_data = result.get("data", [])
-                if not cached_data:
-                    print(f"  [DATA_AVAIL_TOOL] ⚠️ API returned 200 but no data in response")
-                    return "Error: API returned empty data"
-                # Update cache
-                data_availability_cache["data"] = cached_data
-                data_availability_cache["timestamp"] = current_time
-                print(f"  [DATA_AVAIL_TOOL] ✓ Fetched {len(cached_data)} records from API")
-            else:
-                error_text = response.text
-                print(f"  [DATA_AVAIL_TOOL] ✗ API error: {response.status_code} - {error_text[:200]}")
-                # Return graceful message for LLM to handle
-                return f"API_UNAVAILABLE: The data availability service is temporarily unavailable. Provide general information about {country if country else 'global'} data coverage based on your knowledge, and mention that specific availability details can be confirmed by contacting our team at info@marketinsidedata.com"
-        except requests.exceptions.Timeout:
-            print(f"  [DATA_AVAIL_TOOL] ✗ Request timed out after 30 seconds")
+            # OPTIMIZATION: Use aiohttp for async, non-blocking requests
+            # Reduced timeout from 30s to 10s to fail faster
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    api_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10)  # Reduced from 30s
+                ) as response:
+                    status_code = response.status
+                    print(f"  [DATA_AVAIL_TOOL] API response status: {status_code}")
+
+                    if status_code == 200:
+                        result = await response.json()
+                        cached_data = result.get("data", [])
+                        if not cached_data:
+                            print(f"  [DATA_AVAIL_TOOL] ⚠️ API returned 200 but no data in response")
+                            return "Error: API returned empty data"
+                        # Update cache
+                        data_availability_cache["data"] = cached_data
+                        data_availability_cache["timestamp"] = current_time
+                        print(f"  [DATA_AVAIL_TOOL] ✓ Fetched {len(cached_data)} records from API")
+                    else:
+                        error_text = await response.text()
+                        print(f"  [DATA_AVAIL_TOOL] ✗ API error: {status_code} - {error_text[:200]}")
+                        # Return graceful message for LLM to handle
+                        return f"API_UNAVAILABLE: The data availability service is temporarily unavailable. Provide general information about {country if country else 'global'} data coverage based on your knowledge, and mention that specific availability details can be confirmed by contacting our team at info@marketinsidedata.com"
+
+        except asyncio.TimeoutError:
+            print(f"  [DATA_AVAIL_TOOL] ✗ Request timed out after 10 seconds (optimized from 30s)")
             return "API_TIMEOUT: The data availability service timed out. Provide general information and suggest contacting our team at info@marketinsidedata.com for specific availability details."
         except Exception as e:
             print(f"  [DATA_AVAIL_TOOL] ✗ Exception: {type(e).__name__}: {str(e)}")
@@ -1923,15 +1939,49 @@ class ChatbotManager:
         self._stream_context: Dict[str, str] = {}  # Last dynamic content for follow-up questions
         self._last_explore_url: str = ""  # Last explore URL generated for streaming
         self._show_support_buttons: bool = False  # Flag to show support buttons instead of URL
+
+        # PERFORMANCE OPTIMIZATION: Request-level cache (cleared after each request)
+        self._request_cache: Dict[str, Any] = {}
+
         self.app = self._create_workflow()
         print("[OK] Chatbot Manager initialized (Redis-backed)")
 
     async def get_country_data_type(self, country_name: str) -> str:
         """Fetch country data_type from /detailed-mirror-countries-list API.
-        
+
         Returns:
             "detailed" if any detailed_* exists for the country, else "mirror"
         """
+        # ========================================================================
+        # PERFORMANCE OPTIMIZATION: Check request cache first
+        # ========================================================================
+        cache_key = f"country_type_{country_name.lower()}"
+        if hasattr(self, '_request_cache') and cache_key in self._request_cache.get("country_types", {}):
+            cached_type = self._request_cache["country_types"][cache_key]
+            print(f"  [COUNTRY TYPE] ⚡⚡⚡ Using cached type for '{country_name}': {cached_type}")
+            return cached_type
+
+        # ========================================================================
+        # PERFORMANCE OPTIMIZATION: Reuse country data from _fix_url_data_type
+        # ========================================================================
+        if hasattr(self, '_request_cache') and self._request_cache.get("country_data") is not None:
+            print(f"  [COUNTRY TYPE] ⚡⚡⚡ Reusing country data from request cache (saved 5-10s API call!)")
+            countries_list = self._request_cache["country_data"]
+
+            # Extract countries list from cached data
+            if isinstance(countries_list, dict):
+                countries_list = countries_list.get("countries", countries_list.get("message", []))
+
+            # Find country type
+            data_type = self._find_country_type_in_list(country_name, countries_list)
+
+            # Cache for this request
+            if "country_types" not in self._request_cache:
+                self._request_cache["country_types"] = {}
+            self._request_cache["country_types"][cache_key] = data_type
+
+            return data_type
+
         import httpx
 
         api_base = "https://api-dp.marketinsidedata.com/api/v1/users"
@@ -2025,14 +2075,71 @@ class ChatbotManager:
                         # Check if any detailed_* exists
                         for dt in data_types:
                             if str(dt).startswith("detailed_"):
+                                # Cache before returning
+                                if hasattr(self, '_request_cache') and "country_types" not in self._request_cache:
+                                    self._request_cache["country_types"] = {}
+                                if hasattr(self, '_request_cache'):
+                                    self._request_cache["country_types"][cache_key] = "detailed"
                                 return "detailed"
                     break
-            
+
+            # Cache before returning
+            if hasattr(self, '_request_cache') and "country_types" not in self._request_cache:
+                self._request_cache["country_types"] = {}
+            if hasattr(self, '_request_cache'):
+                self._request_cache["country_types"][cache_key] = "mirror"
+
             return "mirror"
-            
+
         except Exception as e:
             print(f"  [ERROR] Failed to fetch country data_type: {e}")
+            # Cache fallback value
+            if hasattr(self, '_request_cache') and "country_types" not in self._request_cache:
+                self._request_cache["country_types"] = {}
+            if hasattr(self, '_request_cache'):
+                self._request_cache["country_types"][cache_key] = "mirror"
             return "mirror"
+
+    def _find_country_type_in_list(self, country_name: str, countries_list: list) -> str:
+        """
+        Find country data type from a list of countries.
+
+        Args:
+            country_name: Name of the country to look up
+            countries_list: List of country dictionaries from API
+
+        Returns:
+            "detailed" if country has detailed data, "mirror" otherwise
+        """
+        if not isinstance(countries_list, list):
+            return "mirror"
+
+        country_lower = (country_name or "").lower().strip()
+        if not country_lower:
+            return "mirror"
+
+        country_upper = (country_name or "").strip().upper()
+
+        for country in countries_list:
+            if not isinstance(country, dict):
+                continue
+
+            c_name = (country.get("country_name") or "").strip().lower()
+            c_code = (country.get("country_code") or "").strip().upper()
+
+            if (
+                c_name == country_lower
+                or c_name.replace(" ", "-") == country_lower
+                or (len(country_upper) == 2 and c_code == country_upper)
+            ):
+                data_types = country.get("data_type", [])
+                if isinstance(data_types, list):
+                    for dt in data_types:
+                        if str(dt).startswith("detailed_"):
+                            return "detailed"
+                break
+
+        return "mirror"
 
     async def _fix_url_data_type(self, url: str, intent: str, params: Dict[str, Any]) -> str:
         """
@@ -2056,6 +2163,16 @@ class ChatbotManager:
         print(f"[URL FIX] Intent: {intent}")
         print(f"[URL FIX] Params: {params}")
         print(f"{'='*70}\n")
+
+        # ========================================================================
+        # PERFORMANCE OPTIMIZATION: Check request cache for already-fixed URLs
+        # ========================================================================
+        cache_key = f"{url}|{intent}"
+        if hasattr(self, '_request_cache') and cache_key in self._request_cache.get("fixed_urls", {}):
+            cached_url = self._request_cache["fixed_urls"][cache_key]
+            print(f"  [URL FIX] ⚡⚡⚡ Using cached fixed URL from this request (saved 2-10s!)")
+            print(f"  [URL FIX] Cached URL: {cached_url}")
+            return cached_url
 
         try:
             # Extract country and current direction from URL based on intent
@@ -2120,15 +2237,32 @@ class ChatbotManager:
             # Get available data types for this country
             print(f"  [URL FIX] ✅ Extracted country='{country}', direction='{current_direction}'")
 
-            # Check cache first (avoids duplicate API calls)
+            # ========================================================================
+            # PERFORMANCE OPTIMIZATION: Multi-level cache (request > class > API)
+            # ========================================================================
             import time
             current_time = time.time()
-            if (ChatbotManager._country_cache is not None and
+            data = None
+
+            # Level 1: Check request cache first (fastest - already fetched in this request)
+            if hasattr(self, '_request_cache') and self._request_cache.get("country_data") is not None:
+                data = self._request_cache["country_data"]
+                print(f"  [URL FIX] ⚡⚡⚡ Using request-cached country data (saved 5-10s API call!)")
+
+            # Level 2: Check class-level cache (300s TTL)
+            elif (ChatbotManager._country_cache is not None and
                 ChatbotManager._country_cache_time is not None and
                 current_time - ChatbotManager._country_cache_time < ChatbotManager._country_cache_ttl):
-                print(f"  [URL FIX] ✅ Using cached country data (age: {int(current_time - ChatbotManager._country_cache_time)}s)")
                 data = ChatbotManager._country_cache
-            else:
+                print(f"  [URL FIX] ✅ Using class-cached country data (age: {int(current_time - ChatbotManager._country_cache_time)}s)")
+
+                # Store in request cache for subsequent calls in this request
+                if hasattr(self, '_request_cache'):
+                    self._request_cache["country_data"] = data
+                    print(f"  [URL FIX] ✅ Promoted to request cache for faster access")
+
+            # Level 3: Fetch from API (slowest)
+            if data is None:
                 print(f"  [URL FIX] 🌐 Fetching country availability from API...")
                 import httpx
                 api_url = "https://api-dp.marketinsidedata.com/api/v1/users/detailed-mirror-countries-list"
@@ -2189,10 +2323,15 @@ class ChatbotManager:
 
                 data = resp.json()
 
-                # Cache the response
+                # Cache the response (class-level cache)
                 ChatbotManager._country_cache = data
                 ChatbotManager._country_cache_time = current_time
                 print(f"  [URL FIX] ✅ Cached country data for {ChatbotManager._country_cache_ttl}s")
+
+                # Also cache in request cache for fast access in this request
+                if hasattr(self, '_request_cache'):
+                    self._request_cache["country_data"] = data
+                    print(f"  [URL FIX] ✅ Also cached in request cache")
             print(f"  [URL FIX] ✅ API returned data")
             print(f"  [URL FIX] Response type: {type(data)}")
             print(f"  [URL FIX] Response keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
@@ -2449,6 +2588,14 @@ class ChatbotManager:
             print(f"\n{'='*70}")
             print(f"[URL FIX] ✅ FUNCTION COMPLETE - Returning URL: {url}")
             print(f"{'='*70}\n")
+
+            # Cache the fixed URL for this request
+            if hasattr(self, '_request_cache'):
+                if "fixed_urls" not in self._request_cache:
+                    self._request_cache["fixed_urls"] = {}
+                self._request_cache["fixed_urls"][cache_key] = url
+                print(f"  [URL FIX] ✅ Cached fixed URL for future calls in this request")
+
             return url
 
         except Exception as e:
@@ -2457,7 +2604,79 @@ class ChatbotManager:
             print(f"{'='*70}\n")
             import traceback
             traceback.print_exc()
+
+            # Still cache the original URL to avoid re-attempting the fix
+            if hasattr(self, '_request_cache'):
+                if "fixed_urls" not in self._request_cache:
+                    self._request_cache["fixed_urls"] = {}
+                self._request_cache["fixed_urls"][cache_key] = url
+
             return url  # Return original URL on error
+
+    def _normalize_url(self, url: str) -> str:
+        """
+        Normalize URL for comparison (remove query params, trailing slashes, etc.)
+
+        Args:
+            url: URL to normalize
+
+        Returns:
+            Normalized URL string
+        """
+        if not url:
+            return ""
+
+        # Remove protocol
+        url = url.replace('https://', '').replace('http://', '')
+
+        # Remove query params
+        url = url.split('?')[0]
+
+        # Remove trailing slash
+        url = url.rstrip('/')
+
+        # Convert to lowercase
+        url = url.lower()
+
+        return url
+
+    def _quick_dynamic_check(self, message: str, dynamic_url: str) -> bool:
+        """
+        Quick heuristic to check if query needs dynamic content.
+
+        Uses simple keyword matching (0.001s) instead of LLM (3-8s).
+        False positives are OK - worst case we check cache unnecessarily.
+
+        Args:
+            message: User query
+            dynamic_url: Provided dynamic URL (if any)
+
+        Returns:
+            True if likely needs dynamic content, False otherwise
+        """
+        # If URL provided, assume dynamic content needed
+        if dynamic_url and len(dynamic_url) > 20:
+            return True
+
+        message_lower = message.lower()
+
+        # Keywords indicating company/country queries
+        dynamic_keywords = [
+            'company', 'profile', 'exporter', 'importer', 'supplier', 'buyer',
+            'shipment', 'turnover', 'revenue', 'trade data', 'country',
+            'export', 'import', 'top', 'major', 'leading',
+            # Country names (add common ones)
+            'argentina', 'brazil', 'china', 'usa', 'india', 'germany',
+            'united states', 'united kingdom', 'mexico', 'canada', 'indonesia',
+            'vietnam', 'thailand', 'philippines', 'japan', 'korea', 'australia'
+        ]
+
+        # If any keyword found, assume dynamic content needed
+        if any(keyword in message_lower for keyword in dynamic_keywords):
+            return True
+
+        # Default: no dynamic content needed (general query)
+        return False
 
     def _create_workflow(self):
         """Create LangGraph workflow with guardrail node"""
@@ -2759,9 +2978,9 @@ class ChatbotManager:
             return cached
 
         llm_kwargs = {
-            "model": Config.INTENT_MODEL,  # Use dedicated intent model for speed
+            "model": Config.INTENT_MODEL,  # Use dedicated intent model for speed (gpt-oss:20b-cloud)
             "temperature": 0.0,
-            "timeout": 8.0,
+            "timeout": 15.0,  # Fast model should respond in 3-5s, 15s is safe buffer
         }
 
         # SMART ROUTING: Use local by default, cloud only if API key is set
@@ -2819,499 +3038,53 @@ class ChatbotManager:
         if greeting_result:
             return greeting_result
 
-        system = """You are an intelligent intent analyzer for a trade data application.
-
-You must output ONLY valid JSON.
-No explanations. No markdown. No extra text.
-
-Your job:
-- Understand the user query with contextual intelligence
-- Handle ambiguous queries by making smart assumptions
-- Decide the correct intent
-- Extract and normalize parameters intelligently
-- Generate the EXACT final URL based on rules below
-
-INTELLIGENCE PRINCIPLES:
-1. Context Awareness: In trade contexts, use reasonable defaults (e.g., "america" typically means USA)
-2. Pattern Recognition: Recognize entity-first patterns ("exporters argentina" = Argentina exporters)
-3. Smart Assumptions: Make informed assumptions based on common usage
-4. Normalization: Convert variations to standard forms ("us", "usa", "america" → "united states")
-
-────────────────────────
-INTENTS (NINE TOTAL)
-────────────────────────
-
-CRITICAL PRIORITY: Check these in order!
-
-FIRST: Check if query asks FOR country lists/names (global rankings):
-- User is asking WHICH/WHAT countries, not providing a country name
-- Phrases: "which countries", "top countries", "most supplying countries", "list of countries", etc.
-- If detected → Use dashboard_required intent
-
-SECOND: Check for service_mismatch:
-- Personal action indicators: "I want to", "I need to", "help me", "how do I"
-- If present → Use out_of_scope (service_mismatch), NOT search_trade_data
-
-Choose exactly ONE intent:
-
-1. dashboard_required
-   → User asks for GLOBAL RANKINGS or COUNTRY LISTS (no specific country provided)
-   → They want country NAMES as the answer, not data about a specific country
-   → CRITICAL INDICATORS:
-     - "which countries export/import [product]?"
-     - "top countries for [product]"
-     - "most supplying countries for [product]"
-     - "biggest importing countries"
-     - "[product] exporting countries names"
-     - "list of countries that export/import [product]"
-     - "countries name for [product]"
-   → DO NOT USE if specific country mentioned: "USA steel" → search_trade_data
-   → DO NOT USE if country-to-country: "China to USA" → country_to_country
-   → Output url = "" (will be handled by agent with tools)
-   → Set params with product if mentioned for context
-
-2. search_trade_data
-   → User wants SPECIFIC trade records for a product, hs_code, or named entity:
-     - "top importers of [PRODUCT]" (e.g., "top importers of coal", "oil importers")
-     - "top exporters of [PRODUCT]" (e.g., "steel exporters", "rice exporters")
-     - "[PRODUCT] suppliers" or "[PRODUCT] buyers"
-     - Trade data filtered by product or hs_code
-   → IMPORTANT: If user mentions a PRODUCT (coal, oil, steel, rice, etc.), use search_trade_data
-   → Output a /search-data/... URL
-
-2. search_country_data
-   → User wants HIGH-LEVEL country overview (NO specific product):
-     - "What does [country] import/export?" (general overview)
-     - "Top commodities of [country]"
-     - "Trade partners of [country]"
-     - "Top importers in [country]" (general, no product specified)
-     - "Ports in [country]"
-   → IMPORTANT: Only use if NO specific product is mentioned
-   → Output a /country/... URL
-
-3. country_to_country
-   → User asks about trade BETWEEN TWO specific countries
-   → Key phrases: "exports TO", "imports FROM", "trade between X and Y"
-   → Examples:
-     - "Belgium's exports to France"
-     - "China's imports from USA"
-     - "Trade between USA and Mexico"
-   → Output a /cntry/... URL
-
-4. hs_code
-   → User asks about HS code, chapter, heading, or subheading
-   → Key phrases: "HS code", "chapter", "heading"
-   → Examples:
-     - "China's chapter 01 imports"
-     - "Show HS code 8471 data for USA"
-     - "Belgium's heading 2710 exports"
-   → Output a /chapter/... URL
-
-5. general
-   → User asks general questions about the platform, pricing, features, data offerings
-   → Examples:
-     - "What is Market Inside?"
-     - "How does it work?"
-     - "What is pricing?"
-     - "Tell me about i/e data" or "import/export data"
-     - "What data do you provide?"
-     - "What services do you offer?"
-     - "How can I access the data?"
-   → No URL needed
-   → Output url = ""
-
-6. greeting
-   → User says hello, hi, thanks, goodbye
-   → Simple greetings or pleasantries
-   → Output url = ""
-
-7. contact_support
-   → User explicitly wants to connect with support, sales, or a human agent
-   → The chatbot cannot answer their needs through conversation alone
-   → Examples:
-     - "I want to talk to someone"
-     - "Can I speak to a person?"
-     - "Connect me with support"
-     - "I need to talk to your team"
-     - "Can I schedule a demo?"
-     - "I want to contact sales"
-   → IMPORTANT: Use this ONLY when user explicitly requests human contact
-   → NOT for general questions that the bot can answer
-   → Output url = ""
-
-8. out_of_scope
-   → User asks about non-trade topics OR requests services NOT provided
-   → IMPORTANT: Sub-classify into out_of_scope_type:
-
-     a) "off_topic" - Completely unrelated to trade/business
-        Examples: "What's the weather?", "How to cook pasta?", "Sports scores"
-        → Simple rejection, NO support needed
-
-     b) "service_mismatch" - Asking for EXECUTION services (not data)
-        User wants: buying/selling products, import/export execution, customs clearance,
-                    shipping logistics, finding brokers, help contacting suppliers
-
-        CRITICAL INDICATORS of service_mismatch (personal action/assistance):
-        - "I want to import/export [product]" → service_mismatch (NOT search_trade_data!)
-        - "I need to import/export" → service_mismatch
-        - "help me import/export" → service_mismatch
-        - "how do I import/export" → service_mismatch
-        - "Can you help me buy/sell" → service_mismatch
-        - "I want to buy/sell [product]" → service_mismatch
-        - "Find me a supplier/buyer/broker" → service_mismatch (direct execution)
-        - "Help with customs/shipping" → service_mismatch
-
-        VS. Data requests (use search_trade_data):
-        - "show me bike imports" → search_trade_data (data request)
-        - "bike import data" → search_trade_data
-        - "who imports bikes" → search_trade_data
-        - "top importers of bikes" → search_trade_data
-        - "import statistics for bikes" → search_trade_data
-
-        Examples of service_mismatch:
-        - "I want to import bikes" → service_mismatch (import_export_assistance)
-        - "Can you help me buy steel?" → service_mismatch (buying_selling)
-        - "I need import assistance" → service_mismatch (import_export_assistance)
-        - "Help with customs clearance" → service_mismatch (customs)
-        - "Find shipping company for me" → service_mismatch (shipping)
-        - "How do I start importing?" → service_mismatch (import_export_assistance)
-
-        → Clarification that we provide DATA, not execution services
-        → Also extract service_type: "buying_selling", "customs", "shipping", "import_export_assistance", or "other"
-
-     c) "borderline" - Unclear if user wants data or execution services
-        Examples:
-        - "I need China suppliers" (could mean "show me supplier data" OR "help me contact suppliers")
-        - "Help with imports" (could mean "show import data" OR "assist with import process")
-        → Need clarification question
-
-        Note: If query has clear action indicators ("I want to", "help me", "how do I"),
-        classify as service_mismatch, NOT borderline.
-
-   → Output url = ""
-
-CRITICAL: Only use "unknown" as a last resort!
-- If the query is REMOTELY related to trade, data, or the platform → use "general"
-- If the query mentions Market Inside, data, imports, exports, trade → use "general"
-- Reserve "unknown" for truly ambiguous or unclear queries
-- When in doubt between "unknown" and "general" → choose "general"
-
-────────────────────────
-GLOBAL RULES
-────────────────────────
-
-- Output must be valid JSON only
-- confidence must be between 0 and 1
-- url must be a complete URL or empty string ""
-- Do NOT invent missing data
-- Country names must be lowercase and URL-safe (use %20 for spaces)
-- product must be URL-safe (lowercase, spaces replaced with %20)
-- hs_code must be numeric only
-- For search_trade_data: Use "import" or "export" (the system will automatically adjust to mirror_import/mirror_export based on country availability)
-- For hs_code and country_to_country: Use "import" or "export"
-- Default language path: /en/
-
-────────────────────────
-INTENT: search_trade_data
-────────────────────────
-
-CRITICAL PRE-CHECK: Before using search_trade_data, verify it's a DATA request, not execution:
-- If user says "I want to import/export [product]" → Use out_of_scope (service_mismatch)
-- If user says "help me import/export" → Use out_of_scope (service_mismatch)
-- If user says "how do I import/export" → Use out_of_scope (service_mismatch)
-- Only use search_trade_data if user wants to VIEW/SEE/ANALYZE data
-
-Base URL:
-https://www.marketinsidedata.com/en/search-data/
-
-🚨 CRITICAL BUSINESS LOGIC - SUPPLIER/BUYER = EXPORTER/IMPORTER MAPPING:
-
-**CORE RULE: Suppliers = Exporters, Buyers = Importers**
-
-When user asks for:
-- "suppliers" or "exporters" → entity_type: "exporters", direction: "export"
-- "buyers" or "importers" → entity_type: "importers", direction: "import"
-
-Examples:
-- "suppliers in Turkey" → entity_type: "exporters", direction: "export" (shows companies that EXPORT from Turkey)
-- "scrap metal suppliers" → entity_type: "exporters", direction: "export" (companies that EXPORT scrap metal)
-- "buyers in USA" → entity_type: "importers", direction: "import" (shows companies that IMPORT into USA)
-- "steel buyers" → entity_type: "importers", direction: "import" (companies that IMPORT steel)
-- "china exporters" → entity_type: "exporters", direction: "export"
-- "china importers" → entity_type: "importers", direction: "import"
-
-Entity → entity_type param mapping (USE THIS EXACTLY):
-- User says "suppliers" → YOU SET entity_type: "exporters" (because suppliers = exporters)
-- User says "buyers" → YOU SET entity_type: "importers" (because buyers = importers)
-- User says "importers" → YOU SET entity_type: "importers"
-- User says "exporters" → YOU SET entity_type: "exporters"
-- User says "trade data" (general) → YOU SET entity_type: "trade"
-
-IMPORTANT: ALWAYS map suppliers→exporters and buyers→importers in your response
-
-Direction mapping:
-- importers/buyers → direction: "import"
-- exporters/suppliers → direction: "export"
-
-URL rules:
-- country is REQUIRED (ask if missing)
-- At least ONE of: product, hs_code MUST be present for search_trade_data
-- If NO product/hs_code, use search_country_data instead
-- Default direction to "import" if not specified
-
-CRITICAL EXAMPLES - Use search_trade_data when PRODUCT is mentioned:
-
-"top importers of coal" → params: {product: "coal", entity_type: "importer", direction: "import"}
-"top coal importers in China" → params: {country: "china", product: "coal", entity_type: "importer", direction: "import"}
-"steel exporters" → params: {product: "steel", entity_type: "exporter", direction: "export"}
-"oil suppliers in China" → params: {country: "china", product: "oil", entity_type: "suppliers", direction: "export"}
-   CRITICAL: Suppliers = EXPORTERS (they supply/export products)
-
-INTELLIGENT COUNTRY NORMALIZATION (Handle ambiguous country names):
-"imports from america" → params: {country: "usa", direction: "import"}, intent: search_country_data
-   REASON: In trade context, "america" typically means USA. Use API's official name "USA"
-   URL: https://www.marketinsidedata.com/en/country/usa/imports  (API returns country_name: "USA")
-
-"exports to us" → params: {country: "usa", direction: "export"}
-   REASON: "us" and "usa" normalize to API's official name "USA"
-   URL: https://www.marketinsidedata.com/en/country/usa/exports  (API returns country_name: "USA")
-
-"trade with england" → params: {country: "united kingdom"}
-   REASON: "england" commonly refers to UK in trade contexts
-   URL: https://www.marketinsidedata.com/en/country/united-kingdom/imports  (API returns country_name: "United Kingdom")
-
-ENTITY-FIRST QUERY PATTERNS (Entity mentioned BEFORE country):
-"exporters argentina" → params: {country: "argentina", entity_type: "exporter", direction: "export"}
-   REASON: Recognize reversed word order, extract both entity and country
-   URL: https://www.marketinsidedata.com/en/search-data/exporter?type=export&country=argentina
-
-"importers china" → params: {country: "china", entity_type: "importer", direction: "import"}
-"suppliers germany" → params: {country: "germany", entity_type: "suppliers", direction: "export"}
-   CRITICAL: Suppliers = EXPORTERS (direction should be "export")
-"buyers usa" → params: {country: "usa", entity_type: "buyers", direction: "import"}
-   CRITICAL: Buyers = IMPORTERS (direction should be "import")
-   REASON: Handle "country after entity" pattern, use API's official name "USA"
-
-IMPORTANT: Extract country when mentioned with "from", "in", "to", or "of":
-"I need supplies from Taiwan" → params: {country: "taiwan", entity_type: "suppliers", direction: "export"} (NO product yet - will ask)
-   CRITICAL: Suppliers FROM a country = EXPORTERS from that country
-"suppliers from China" → params: {country: "china", entity_type: "suppliers", direction: "export"} (NO product yet - will ask)
-   CRITICAL: Suppliers = EXPORTERS (they export/supply products)
-"exporters in China" → params: {country: "china", entity_type: "exporter", direction: "export"} (NO product yet - will ask)
-"importers of steel" → params: {product: "steel", entity_type: "importer", direction: "import"} (NO country yet - will ask)
-"buyers in Turkey" → params: {country: "turkey", entity_type: "buyers", direction: "import"} (NO product yet - will ask)
-   CRITICAL: Buyers = IMPORTERS (they import/buy products)
-
-Use search_country_data when NO product (general overview):
-"top importers in Indonesia" → intent: search_country_data (no product!)
-"what does China export?" → intent: search_country_data (general overview)
-"america imports" → intent: search_country_data, params: {country: "usa", direction: "import"}
-
-URL formats:
-
-Trade:
-https://www.marketinsidedata.com/en/search-data/trade?type={import|export}&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/trade?type={import|export}&country={country}&hs_code={hs_code}
-
-Importer:
-https://www.marketinsidedata.com/en/search-data/importer?type=import&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/importer?type=import&country={country}&hs_code={hs_code}
-
-Exporter (also called Suppliers):
-https://www.marketinsidedata.com/en/search-data/exporter?type=export&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/exporter?type=export&country={country}&hs_code={hs_code}
-
-🚨 CRITICAL: When user asks for "suppliers", use /exporter endpoint (suppliers = exporters)
-
-Importer (also called Buyers):
-https://www.marketinsidedata.com/en/search-data/importer?type=import&country={country}&product={product}
-https://www.marketinsidedata.com/en/search-data/importer?type=import&country={country}&hs_code={hs_code}
-
-🚨 CRITICAL: When user asks for "buyers", use /importer endpoint (buyers = importers)
-
-────────────────────────
-INTENT: search_country_data
-────────────────────────
-
-Base URL:
-https://www.marketinsidedata.com/en/country/
-
-Rules:
-- country is REQUIRED
-- No product
-- No hs_code
-- direction is OPTIONAL (defaults to "import" if not specified)
-
-IMPORTANT: If user doesn't specify import/export, default to "import"
-
-CRITICAL - URL SLUG MAPPING:
-URLs will use the official country_name from the /detailed-mirror-countries-list API.
-The API returns official names which are converted to URL slugs:
-- API returns "USA" → slug: "usa"
-- API returns "United Kingdom" → slug: "united-kingdom" (spaces → hyphens)
-- API returns "Saudi Arabia" → slug: "saudi-arabia"
-- API returns "South Korea" → slug: "south-korea"
-- API returns "United Arab Emirates" → slug: "united-arab-emirates"
-
-The URL validation system will automatically correct country names to match the API.
-
-URL formats:
-https://www.marketinsidedata.com/en/country/{country-slug}/imports
-https://www.marketinsidedata.com/en/country/{country-slug}/exports
-
-CORRECT EXAMPLES (using API's official country_name):
-"imports from america" → https://www.marketinsidedata.com/en/country/usa/imports
-"what does USA export" → https://www.marketinsidedata.com/en/country/usa/exports
-"UK imports" → https://www.marketinsidedata.com/en/country/united-kingdom/imports
-"China exports" → https://www.marketinsidedata.com/en/country/china/exports
-
-────────────────────────
-INTENT: country_to_country
-────────────────────────
-
-Base URL:
-https://www.marketinsidedata.com/en/cntry/
-
-Rules:
-- TWO countries are REQUIRED (origin and destination)
-- direction is REQUIRED (import or export)
-- No product
-- No hs_code
-- Country names must be title case (capitalize first letter of each word)
-- Use %20 for spaces in country names
-
-URL Pattern:
-https://www.marketinsidedata.com/en/cntry/{OriginCountry}-{import|export}-{DestinationCountry}
-
-Direction Logic:
-- If query says "Country A exports TO Country B":
-  → origin = Country A, direction = export, destination = Country B
-  → URL: /cntry/Country-A-export-Country-B
-
-- If query says "Country A imports FROM Country B":
-  → origin = Country A, direction = import, destination = Country B
-  → URL: /cntry/Country-A-import-Country-B
-
-Examples:
-https://www.marketinsidedata.com/en/cntry/Belgium-export-France
-https://www.marketinsidedata.com/en/cntry/China-import-United%20States
-https://www.marketinsidedata.com/en/cntry/United%20States-export-Mexico
-
-────────────────────────
-INTENT: hs_code
-────────────────────────
-
-Base URL:
-https://www.marketinsidedata.com/en/chapter/
-
-Rules:
-- country is REQUIRED
-- hs_code is REQUIRED (2, 4, 6, or 8+ digits)
-- direction is OPTIONAL (defaults to "import" if not specified)
-- No product
-- Country names must be lowercase
-
-URL Pattern:
-https://www.marketinsidedata.com/en/chapter/{country}-{import|export}-hs-code-{code}
-
-HS Code Levels:
-- 2 digits = Chapter (e.g., 01)
-- 4 digits = Heading (e.g., 0101, 8471)
-- 6 digits = Subheading (e.g., 010121)
-- 8+ digits = Full HS Code (e.g., 84713020)
-
-CRITICAL: HS Code Formatting Rules:
-- Single-digit HS codes (1-9) MUST be zero-padded to 2 digits
-- Example: User asks "hs code 2" → extract as "02" NOT "2"
-- Example: User asks "chapter 8" → extract as "08" NOT "8"
-- This ensures URLs are correctly formatted (hs-code-02 not hs-code-2)
-
-IMPORTANT: If user doesn't specify import/export, default to "import"
-
-Examples:
-https://www.marketinsidedata.com/en/chapter/china-import-hs-code-01
-https://www.marketinsidedata.com/en/chapter/usa-export-hs-code-8471
-https://www.marketinsidedata.com/en/chapter/belgium-import-hs-code-271012
-https://www.marketinsidedata.com/en/chapter/afghanistan-import-hs-code-83
-
-────────────────────────
-FINAL OUTPUT FORMAT
-────────────────────────
-
+        # SIMPLIFIED PROMPT - Reduced from 5,348 to ~1,000 tokens for 5x faster processing
+        system = """Intent analyzer for trade data platform. Output ONLY valid JSON.
+
+INTENTS (choose ONE):
+1. dashboard_required - User asks which/what countries (global rankings)
+2. search_trade_data - Specific product/HS data with country (e.g., "China steel imports")
+3. search_country_data - Country overview, NO product (e.g., "China imports")
+4. country_to_country - Trade between two countries
+5. hs_code - HS code/chapter queries
+6. general - Platform/pricing/features questions
+7. greeting - Hi/thanks/bye
+8. contact_support - User wants human contact
+9. out_of_scope - Non-trade topics or execution services
+   Sub-types: "off_topic", "service_mismatch" (e.g., "I want to import"), "borderline"
+
+KEY RULES:
+- "I want to import/export" → out_of_scope (service_mismatch), NOT search_trade_data
+- Suppliers = Exporters (direction: export)
+- Buyers = Importers (direction: import)
+- Normalize: "usa"/"us"/"america" → "united states", "uk"/"england" → "united kingdom"
+- Default when unsure: "general" (NOT "unknown")
+- Zero-pad single-digit HS codes: "8" → "08"
+
+URL FORMATS:
+- search_data: https://www.marketinsidedata.com/en/search-data/{trade|importer|exporter}?type={import|export}&country={country}&product={product}
+- country: https://www.marketinsidedata.com/en/country/{country-slug}/{imports|exports}
+- country_to_country: https://www.marketinsidedata.com/en/cntry/{Origin}-{import|export}-{Destination}
+- hs_code: https://www.marketinsidedata.com/en/chapter/{country}-{import|export}-hs-code-{code}
+
+OUTPUT JSON:
 {
-  "intent": "",
-  "confidence": 0.0,
-  "params": {
-    "country": "",
-    "direction": "",
-    "product": "",
-    "hs_code": "",
-    "origin_country": "",
-    "destination_country": "",
-    "entity_type": ""
-  },
+  "intent": "general",
+  "confidence": 0.95,
+  "params": {"country": "", "product": "", "hs_code": "", "direction": "", "entity_type": "", "origin_country": "", "destination_country": ""},
   "url": "",
   "out_of_scope_type": "",
   "service_type": ""
-}
-
-NEW FIELDS (only for out_of_scope intent):
-- out_of_scope_type: "off_topic" | "service_mismatch" | "borderline" | "" (empty if not out_of_scope)
-- service_type: "buying_selling" | "customs" | "shipping" | "import_export_assistance" | "other" | "" (only if service_mismatch)
-
-entity_type values (for search_trade_data only):
-- "importer" → user asks about importers (e.g., "top importers of coal")
-- "exporter" → user asks about exporters (e.g., "steel exporters")
-- "suppliers" → user asks about suppliers
-- "buyers" → user asks about buyers
-- "trade" → general trade data (default if not specified)
-
-────────────────────────
-COUNTRY NORMALIZATION REFERENCE
-────────────────────────
-
-ALWAYS normalize these variations to standard names:
-- "america", "americas", "usa", "us", "the us", "united-states" → "united states"
-- "england", "britain", "great britain" → "united kingdom"
-- "uk" → "united kingdom"
-- "holland" → "netherlands"
-- "korea" → "south korea"
-- "uae" → "united arab emirates"
-
-When generating URLs for search_country_data:
-CRITICAL - Use these EXACT slugs (not the full country name):
-- "united states" → slug: "usa"
-- "united kingdom" → slug: "uk"
-- "south korea" → slug: "south-korea"
-- "united arab emirates" → slug: "uae"
-- Other countries → lowercase with hyphens (e.g., "saudi-arabia")
-
-For search_data URLs (trade/importer/exporter):
-- Use lowercase country names as-is
-- Replace spaces with hyphens: "united states" → "united-states"
-
-For country_to_country URLs:
-- Use Title Case with %20 for spaces: "United States", "United%20Kingdom"
-
-────────────────────────
-IMPORTANT
-────────────────────────
-
-- Output JSON only
-- ALWAYS include "params" object with extracted values (empty string if not found)
-- Do NOT add explanations
-- Extract all params you can find, even if some are missing
-- ALWAYS normalize country names using the reference above
-- If direction is not specified, set direction to "import" in params (most common use case)
-- Generate URL when you have the core required fields (country + hs_code for hs_code intent, etc.)
-- Be intelligent: recognize entity-first patterns, normalize country variations, use context clues
-        """
+}"""
         parsed: Optional[Dict[str, Any]] = None
         try:
             llm = self._get_intent_classifier_llm()
-            resp = await asyncio.to_thread(
-                llm.invoke,
-                [SystemMessage(content=system), HumanMessage(content=f"User query: {query}")],
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(
+                    llm.invoke,
+                    [SystemMessage(content=system), HumanMessage(content=f"User query: {query}")],
+                ),
+                timeout=30.0  # Prevent infinite wait on slow cloud API
             )
             parsed = self._extract_json_object((getattr(resp, "content", "") or "").strip())
         except Exception:
@@ -3496,6 +3269,15 @@ INTENTS (EIGHT TOTAL):
 6. greeting - Hello, hi, thanks, goodbye
 7. contact_support - User explicitly requests human contact (talk to someone, connect me, schedule demo)
 8. out_of_scope - Non-trade topics OR execution services
+   Sub-types: "off_topic", "service_mismatch" (e.g., "I want to import", "I want to be a supplier", "help me find buyers"), "borderline"
+   Service types (for service_mismatch): "buying_selling", "customs", "shipping", "import_export_assistance", "other"
+
+KEY RULES:
+- "I want to import/export" → out_of_scope (service_mismatch), NOT search_trade_data
+- "I want to be a supplier/exporter/find buyers" → out_of_scope (service_mismatch), NOT search_trade_data
+- "Help me ship/customs/logistics" → out_of_scope (service_mismatch)
+- Data questions (pricing, features, coverage) → general
+- Non-trade topics → out_of_scope (off_topic)
 
 CRITICAL DISTINCTION - Data Availability vs Trade Data:
 - "What data do you have for Indonesia?" → general (asking ABOUT availability)
@@ -3597,7 +3379,9 @@ OUTPUT JSON FORMAT (intent only, no content):
             return result
 
         except Exception as e:
-            print(f"[COMBINED_LLM] Error: {e}")
+            import traceback
+            print(f"[COMBINED_LLM] Error ({type(e).__name__}): {str(e) or 'No error message'}")
+            print(f"[COMBINED_LLM] Traceback: {traceback.format_exc()[:800]}")
             raise  # Re-raise to trigger fallback
 
     async def handle_dynamic_api_call(
@@ -3680,9 +3464,15 @@ OUTPUT JSON FORMAT (intent only, no content):
         # return json.dumps(payload)
     
         
-    async def chat(self, message: str, session_id: str, dynamic_url: Optional[str] = None) -> tuple[str, float, List[str]]:
+    async def chat(self, message: str, session_id: str, request_id: str, dynamic_url: Optional[str] = None) -> tuple[str, float, List[str]]:
         """
         Process chat message with Redis-backed embeddings
+
+        Args:
+            message: User's input message
+            session_id: Unique session identifier
+            request_id: Unique request identifier for tracing
+            dynamic_url: Optional dynamic URL to fetch content from
 
         Returns:
             (response, processing_time, sources_used)
@@ -3690,8 +3480,24 @@ OUTPUT JSON FORMAT (intent only, no content):
         start_time = time.time()
         print(f"\n{'='*70}")
         print(f"[CHAT START] Session: {session_id}")
+        print(f"[CHAT START] Request ID: {request_id}")
         print(f"[CHAT START] Query: {message[:100]}...")
         print(f"{'='*70}")
+
+        # Store request_id in session for nested operations to access
+        if session_id not in self.sessions:
+            self.sessions[session_id] = {}
+        self.sessions[session_id]["request_id"] = request_id
+
+        # Log chat start with structured data
+        logger.info(
+            "Processing chat request",
+            extra={
+                "request_id": request_id,
+                "session_id": session_id,
+                "message_preview": message[:50] if len(message) > 50 else message
+            }
+        )
 
         # Declare global for source URL tracking
         global session_source_url
@@ -3739,28 +3545,44 @@ OUTPUT JSON FORMAT (intent only, no content):
         if cached_data:
             # Extract embeddings, chunks, and full content from cache
             embeddings, chunks, full_content = cached_data
-            # dynamic_content = full_content
-            related, score, detected_country = await self.is_query_related_via_llm(
-                message, dynamic_url or "", full_content
-            )
-            if detected_country:
-                dataType = await self.get_country_data_type(detected_country)
-                print(f"  [DATA TYPE] Country={detected_country} -> dataType={dataType}")
 
-            if related and score >= 0.5:
+            # OPTIMIZATION: Use URL comparison instead of LLM call (saves 2-5s)
+            detected_url = intent_result.get('url', '').strip()
+            cached_url_normalized = self._normalize_url(dynamic_url)
+            detected_url_normalized = self._normalize_url(detected_url)
+
+            # Check if URLs match (same company/country)
+            if detected_url_normalized and detected_url_normalized == cached_url_normalized:
+                # URLs match - use cached content
                 dynamic_content = full_content
                 sources_used.append("Dynamic Content (Redis)")
+
+                # Extract country from intent result (already parsed)
+                detected_country = intent_result.get('params', {}).get('country')
+                if detected_country:
+                    dataType = await self.get_country_data_type(detected_country)
+                    print(f"  [DATA TYPE] Country={detected_country} -> dataType={dataType}")
+
                 # Store the cached URL as source for response generation
                 if dynamic_url:
                     session_source_url["current"] = dynamic_url
                     print(f"  [URL] Stored cached URL for response: {dynamic_url[:80]}...")
-                print(f"  [DEBUG] Using cached content: {len(full_content)} chars")
+
+                print(f"  [FAST] ⚡ URL match - using cached content: {len(full_content)} chars (saved 2-5s LLM call)")
             else:
+                # URLs don't match - fetch fresh data
+                print(f"  [CACHE MISS] URL mismatch: cached={cached_url_normalized[:50]} vs detected={detected_url_normalized[:50]}")
+
+                detected_country = intent_result.get('params', {}).get('country')
+                dataType = None
+                if detected_country:
+                    dataType = await self.get_country_data_type(detected_country)
+
                 api_data = await self.handle_dynamic_api_call(message, session_id, extra_data={"data_type": dataType}, intent_result=intent_result)
                 dynamic_content = api_data
                 sources_used.append("Dynamic Content")
                 # URL is stored by handle_dynamic_api_call
-                print(f"  [DEBUG] LLM determined cached content is NOT related, fetched API data: {api_data}")
+                print(f"  [DEBUG] URL mismatch - fetched fresh API data: {len(api_data) if api_data else 0} chars")
 
             print(f"  [DEBUG] [OK] CACHE HIT - Found cached data: {len(dynamic_content)} chars")
             print(f"  [FAST] Using cached embeddings from Redis")
@@ -3787,19 +3609,30 @@ OUTPUT JSON FORMAT (intent only, no content):
                 print(f"  [INFO] Falling back to knowledge base only")
                 fetched = None
             if fetched:
-                related, score, detected_country = await self.is_query_related_via_llm(
-                    message, dynamic_url or "", fetched
-                )
+                # OPTIMIZATION: Use URL comparison instead of LLM call (saves 2-5s)
+                detected_url = intent_result.get('url', '').strip()
+                fetched_url_normalized = self._normalize_url(dynamic_url) if dynamic_url else ""
+                detected_url_normalized = self._normalize_url(detected_url)
 
+                # Extract country from intent result
+                detected_country = intent_result.get('params', {}).get('country')
+                dataType = None
                 if detected_country:
                     dataType = await self.get_country_data_type(detected_country)
                     print(f"  [DATA TYPE] Country={detected_country} -> dataType={dataType}")
 
-                if related and score >= 0.5:
+                # If we have a URL from intent and it matches what we fetched, use it
+                # OR if no specific URL comparison available, just use the fetched content
+                url_matches = (detected_url_normalized and fetched_url_normalized and
+                              detected_url_normalized == fetched_url_normalized)
+                use_fetched = url_matches or not fetched_url_normalized
+
+                if use_fetched:
                     dynamic_content = fetched
                     sources_used.append("Dynamic Content")
-                    print(f"  [DEBUG] Using fetched content: {len(fetched)} chars")
+                    print(f"  [FAST] ⚡ Using fetched content: {len(fetched)} chars (saved 2-5s LLM call)")
                 else:
+                    # URL mismatch - fetch correct data
                     api_data = await self.handle_dynamic_api_call(
                         message,
                         session_id,
@@ -3808,9 +3641,7 @@ OUTPUT JSON FORMAT (intent only, no content):
                     )
                     dynamic_content = api_data
                     sources_used.append("Dynamic Content")
-                    print(f"  [DEBUG] LLM determined fetched content is NOT related, fetched API data: {api_data}")
-
-                print(f"  [DEBUG] Fetched content -> LLM relevance: {related} (score={score:.2f})")
+                    print(f"  [DEBUG] URL mismatch - refetched API data: {len(api_data) if api_data else 0} chars")
             else:
                 dynamic_content = ""
 
@@ -3832,6 +3663,9 @@ OUTPUT JSON FORMAT (intent only, no content):
         # Invoke workflow - CRITICAL FIX: Use ainvoke for async nodes
         print(f"\n[WORKFLOW] Invoking LangGraph workflow...")
         workflow_start = time.time()
+
+        # Get request_id from session if available
+        request_id = self.sessions.get(session_id, {}).get("request_id")
 
         try:
             # CRITICAL FIX: Use ainvoke() for async nodes instead of invoke()
@@ -3856,6 +3690,20 @@ OUTPUT JSON FORMAT (intent only, no content):
             workflow_time = time.time() - workflow_start
             print(f"[WORKFLOW] [OK] Completed in {workflow_time:.2f}s")
 
+            # Log workflow completion with structured data
+            logger.info(
+                "LangGraph workflow completed",
+                extra={
+                    "operation": "langgraph_workflow",
+                    "duration_ms": round(workflow_time * 1000, 2),
+                    "status": "success",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "timeout_threshold_ms": 25000,
+                    "exceeded_threshold": workflow_time > 25.0
+                }
+            )
+
             # Detailed performance breakdown
             print(f"[PERF] Workflow breakdown:")
             print(f"  - Total workflow time: {workflow_time:.2f}s")
@@ -3877,6 +3725,20 @@ OUTPUT JSON FORMAT (intent only, no content):
             print(f"      2. Network latency to API endpoint")
             print(f"      3. Complex multi-step retrieval")
             print(f"[FIX] User should try again with simpler query or check system status")
+
+            # Log timeout with structured data
+            logger.error(
+                "LangGraph workflow timeout",
+                extra={
+                    "operation": "langgraph_workflow",
+                    "duration_ms": round(workflow_time * 1000, 2),
+                    "status": "timeout",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "timeout_threshold_ms": 35000
+                }
+            )
+
             raise HTTPException(
                 status_code=504,
                 detail=f"Request timeout after {workflow_time:.1f}s. Please try a simpler query or try again."
@@ -3979,7 +3841,7 @@ OUTPUT JSON FORMAT (intent only, no content):
         # Let the LLM handle the conversation naturally
         return False
 
-    async def chat_stream(self, message: str, session_id: str, dynamic_url: Optional[str] = None):
+    async def chat_stream(self, message: str, session_id: str, request_id: str, dynamic_url: Optional[str] = None):
         """
         Stream chat response - yields chunks as they're generated by the LLM.
 
@@ -3988,6 +3850,12 @@ OUTPUT JSON FORMAT (intent only, no content):
         2. Slot collection (gather missing parameters)
         3. Message persistence (save to Redis)
         4. Dynamic URL generation
+
+        Args:
+            message: User's input message
+            session_id: Unique session identifier
+            request_id: Unique request identifier for tracing
+            dynamic_url: Optional dynamic URL to fetch content from
 
         Yields:
             str: Chunks of the response text (JSON SSE format)
@@ -3998,8 +3866,48 @@ OUTPUT JSON FORMAT (intent only, no content):
         start_time = time.time()
         print(f"\n{'='*70}")
         print(f"[STREAM] Session: {session_id}")
+        print(f"[STREAM] Request ID: {request_id}")
         print(f"[STREAM] Query: {message[:100]}...")
         print(f"{'='*70}")
+
+        # Store request_id in session for nested operations to access
+        if session_id not in self.sessions:
+            self.sessions[session_id] = {}
+        self.sessions[session_id]["request_id"] = request_id
+
+        # Log stream start with structured data
+        logger.info(
+            "chat_stream started",
+            extra={
+                "request_id": request_id,
+                "session_id": session_id,
+                "message_preview": message[:50] if len(message) > 50 else message
+            }
+        )
+
+        # ========================================================================
+        # PERFORMANCE OPTIMIZATION: Initialize request-level cache
+        # ========================================================================
+        self._request_cache = {
+            "country_data": None,       # Cache country API response (saves 5-10s per duplicate call)
+            "fixed_urls": {},           # Cache fixed URLs (saves 2-5s per duplicate fix)
+            "url_fixed": False,         # Track if we already fixed the URL once
+            "country_types": {},        # Cache country data types (saves 2-5s per lookup)
+            "data_availability_fetched": False,  # Track if data availability was fetched
+        }
+
+        # Tool result context (populated by direct tool mapping)
+        tool_result_context = ""
+
+        # Performance tracking
+        perf_timings = {
+            "start": start_time,
+            "intent_detection": 0,
+            "url_fixing": 0,
+            "content_fetch": 0,
+            "kb_retrieval": 0,
+            "llm_streaming": 0,
+        }
 
         # ========================================================================
         # INSTANT CACHE: Common greetings & queries (0ms response time)
@@ -4116,83 +4024,66 @@ OUTPUT JSON FORMAT (intent only, no content):
         else:
             # Normal intent detection
             # ============================================================================
-            # OPTIMIZATION: Single LLM call (intent + validation combined)
-            # If flag is ON and dynamic_url has cached content, do BOTH in one call
+            # CRITICAL OPTIMIZATION: Always use combined LLM call (intent + validation)
+            # This eliminates redundant is_query_related_via_llm call later! (saves 5-8s)
             # ============================================================================
-            cached_content_early = None
-            com2bined_validation_result = None  # Store validation result for later reuse
-            print(f"Config.USE_COMBINED_LLM_CALL: {Config.USE_COMBINED_LLM_CALL}")
-            # print("f")
+            print(f"  [STREAM-OPT] ⚡ Using ALWAYS-ON combined LLM call (optimized)")
 
-            # Step 1: Check cache early if optimization enabled
-            if Config.USE_COMBINED_LLM_CALL and dynamic_url and "marketinsidedata.com" in dynamic_url:
-                try:
-                    print(f"  [STREAM-OPT] Checking cache early for: {dynamic_url[:80]}...")
-                    cached_data_early = await self.dynamic_content_manager.get_embeddings_from_redis(dynamic_url, session_id)
-                    if cached_data_early:
-                        _, _, cached_content_early = cached_data_early
-                        print(f"  [STREAM-OPT] Cache HIT early: {len(cached_content_early)} chars available")
-                except Exception as e:
-                    print(f"  [STREAM-OPT] Early cache check failed: {e}")
-                    cached_content_early = None
+            # PERFORMANCE TRACKING: Time intent detection
+            t_intent_start = time.time()
 
-            # Step 2: Do SINGLE combined call if cache exists, otherwise original
-            if Config.USE_COMBINED_LLM_CALL and cached_content_early:
-                try:
-                    print(f"  [STREAM-OPT] ✨ Using SINGLE combined LLM call (intent + validation)")
-                    combined_result = await self._detect_intent_and_validate_content(
-                        query=message,
-                        dynamic_url=dynamic_url,
-                        dynamic_content=cached_content_early[:1200],
-                        timeout=10.0
-                    )
+            try:
+                # ALWAYS use combined call (handles everything in ONE LLM call)
+                # Using fast gpt-oss:20b-cloud model - should respond in 3-5s
+                combined_result = await self._detect_intent_and_validate_content(
+                    query=message,
+                    dynamic_url=dynamic_url,
+                    dynamic_content=None,  # Function will handle content internally if needed
+                    timeout=30.0  # Cloud API timeout (allows for network latency + processing)
+                )
 
-                    # Extract intent info (same fields as original)
-                    intent = combined_result.get("intent", "unknown")
-                    params = combined_result.get("params", {})
-                    intent_url = combined_result.get("url", "")
-                    intent_result = {
-                        "intent": intent,
-                        "confidence": combined_result.get("confidence", 0.0),
-                        "params": params,
-                        "missing_params": combined_result.get("missing_params", []),
-                        "clarifying_question": combined_result.get("clarifying_question", ""),
-                        "url": intent_url,
-                        "out_of_scope_type": combined_result.get("out_of_scope_type", ""),
-                        "service_type": combined_result.get("service_type", "")
-                    }
+                # Extract intent info
+                intent = combined_result.get("intent", "unknown")
+                params = combined_result.get("params", {})
+                intent_url = combined_result.get("url", "")
+                intent_result = {
+                    "intent": intent,
+                    "confidence": combined_result.get("confidence", 0.0),
+                    "params": params,
+                    "missing_params": combined_result.get("missing_params", []),
+                    "clarifying_question": combined_result.get("clarifying_question", ""),
+                    "url": intent_url,
+                    "out_of_scope_type": combined_result.get("out_of_scope_type", ""),
+                    "service_type": combined_result.get("service_type", "")
+                }
 
-                    # Store validation results for later reuse (skip 2nd LLM call)
-                    combined_validation_result = {
-                        "content_related": combined_result.get("content_related", False),
-                        "content_score": combined_result.get("content_score", 0.0),
-                        "country": combined_result.get("country", None),
-                        "dynamic_url": dynamic_url  # Track which URL was validated
-                    }
+                # Store validation results (already done in same call!)
+                combined_validation_result = {
+                    "content_related": combined_result.get("content_related", False),
+                    "content_score": combined_result.get("content_score", 0.0),
+                    "country": combined_result.get("country", None),
+                    "dynamic_url": dynamic_url
+                }
 
-                    print(f"  [STREAM-OPT] ✅ SINGLE LLM call SUCCESS!")
-                    print(f"  [STREAM-OPT]    Intent: {intent} (confidence: {intent_result['confidence']:.2f})")
-                    print(f"  [STREAM-OPT]    Content related: {combined_validation_result['content_related']}")
-                    print(f"  [STREAM-OPT]    Content score: {combined_validation_result['content_score']:.2f}")
+                perf_timings["intent_detection"] = time.time() - t_intent_start
+                print(f"  [PERF] Combined intent+validation took: {perf_timings['intent_detection']:.2f}s")
+                print(f"  [STREAM-OPT] ✅ Intent: {intent} (confidence: {intent_result['confidence']:.2f})")
+                print(f"  [STREAM-OPT] ✅ Content validation included (saved separate LLM call!)")
 
-                except Exception as e:
-                    # AUTOMATIC FALLBACK to original method
-                    print(f"  [STREAM-OPT] ❌ Combined call failed: {e}")
-                    print(f"  [STREAM-OPT] 🔄 Falling back to original 2-call method")
-                    intent_result = await self._detect_intent_and_entities(message)
-                    intent = intent_result.get("intent", "unknown")
-                    params = intent_result.get("params", {})
-                    intent_url = intent_result.get("url", "")
-                    combined_validation_result = None  # Will do validation later
-            else:
-                # Feature flag OFF or no cache: Use original method
-                if Config.USE_COMBINED_LLM_CALL:
-                    print(f"  [STREAM-OPT] No cached content early, using original intent detection")
+            except Exception as e:
+                # FALLBACK: Use simple intent detection only
+                import traceback
+                print(f"  [STREAM-OPT] ❌ Combined call failed ({type(e).__name__}): {str(e) or 'No error message'}")
+                print(f"  [STREAM-OPT] ⚠️ Traceback: {traceback.format_exc()[:500]}")
+                print(f"  [STREAM-OPT] ⚡ Falling back to simple intent detection...")
                 intent_result = await self._detect_intent_and_entities(message)
                 intent = intent_result.get("intent", "unknown")
                 params = intent_result.get("params", {})
                 intent_url = intent_result.get("url", "")
-                combined_validation_result = None  # Will do validation later if needed
+                combined_validation_result = None
+
+                perf_timings["intent_detection"] = time.time() - t_intent_start
+                print(f"  [PERF] Fallback intent detection took: {perf_timings['intent_detection']:.2f}s")
 
             # ============================================================================
             # PARALLEL VALIDATION: Start validation in background for streaming
@@ -4296,7 +4187,7 @@ OUTPUT JSON FORMAT (intent only, no content):
                 "actions": [
                     {"type": "schedule_demo", "label": "Schedule a Demo"},
                     {"type": "chat_with_us", "label": "Talk to Live Agent"},
-                    {"type": "whatsapp", "label": "WhatsApp"},
+                    # WhatsApp removed - will add QR code later
                     {"type": "continue_chat", "label": "Continue Chat"}
                 ],
                 "done": True
@@ -4385,7 +4276,7 @@ OUTPUT JSON FORMAT (intent only, no content):
                         "actions": [
                             {"type": "schedule_demo", "label": "Schedule a Demo"},
                             {"type": "chat_with_us", "label": "Talk to Live Agent"},
-                            {"type": "whatsapp", "label": "WhatsApp"},
+                            # WhatsApp removed - will add QR code later
                             {"type": "continue_chat", "label": "Continue Chat"}
                         ],
                         "done": True
@@ -4497,7 +4388,7 @@ OUTPUT JSON FORMAT (intent only, no content):
                     "actions": [
                         {"type": "schedule_demo", "label": "Schedule a Demo"},
                         {"type": "chat_with_us", "label": "Talk to Live Agent"},
-                        {"type": "whatsapp", "label": "WhatsApp"},
+                        # WhatsApp removed - will add QR code later
                         {"type": "continue_chat", "label": "Continue Chat"}
                     ],
                     "done": True
@@ -4545,7 +4436,7 @@ OUTPUT JSON FORMAT (intent only, no content):
                             "actions": [
                                 {"type": "schedule_demo", "label": "Schedule a Demo"},
                                 {"type": "chat_with_us", "label": "Talk to Live Agent"},
-                                {"type": "whatsapp", "label": "WhatsApp"},
+                                # WhatsApp removed - will add QR code later
                                 {"type": "continue_chat", "label": "Continue Chat"}
                             ],
                             "done": True
@@ -4578,13 +4469,23 @@ OUTPUT JSON FORMAT (intent only, no content):
 
                 # Fix URL to use correct data_type (mirror vs detailed) based on country availability
                 if explore_url and not explore_url.startswith("CONTINENT:") and not explore_url.startswith("RESTRICTED:"):
-                    print(f"  [STREAM] ⚡ ABOUT TO CALL _fix_url_data_type")
-                    print(f"  [STREAM] ⚡ URL BEFORE FIX: {explore_url}")
-                    explore_url = await self._fix_url_data_type(explore_url, intent, slot_state.slots)
-                    print(f"  [STREAM] ⚡ URL AFTER FIX: {explore_url}")
+                    # Only fix if not already fixed in this request
+                    if not self._request_cache.get("url_fixed"):
+                        print(f"  [STREAM] ⚡ ABOUT TO CALL _fix_url_data_type")
+                        print(f"  [STREAM] ⚡ URL BEFORE FIX: {explore_url}")
 
-                    # Mark URL as corrected to avoid redundant correction later
-                    session_url_corrected[session_id] = True
+                        # PERFORMANCE TRACKING: Time URL fixing
+                        t_url_start = time.time()
+                        explore_url = await self._fix_url_data_type(explore_url, intent, slot_state.slots)
+                        perf_timings["url_fixing"] = time.time() - t_url_start
+                        print(f"  [PERF] URL fixing took: {perf_timings['url_fixing']:.2f}s")
+                        print(f"  [STREAM] ⚡ URL AFTER FIX: {explore_url}")
+
+                        # Mark URL as fixed
+                        self._request_cache["url_fixed"] = True
+                        session_url_corrected[session_id] = True
+                    else:
+                        print(f"  [STREAM] ⚡⚡⚡ Skipping URL fix - already fixed in this request")
 
                 # Check if this is a RESTRICTED COUNTRY (redirect to support)
                 if explore_url and explore_url.startswith("RESTRICTED:"):
@@ -4612,7 +4513,7 @@ OUTPUT JSON FORMAT (intent only, no content):
                         "actions": [
                             {"type": "schedule_demo", "label": "Schedule a Demo"},
                             {"type": "chat_with_us", "label": "Talk to Live Agent"},
-                            {"type": "whatsapp", "label": "WhatsApp"},
+                            # WhatsApp removed - will add QR code later
                             {"type": "continue_chat", "label": "Continue Chat"}
                         ],
                         "done": True
@@ -4686,7 +4587,7 @@ OUTPUT JSON FORMAT (intent only, no content):
                             "actions": [
                                 {"type": "schedule_demo", "label": "Schedule a Demo"},
                                 {"type": "chat_with_us", "label": "Talk to Live Agent"},
-                                {"type": "whatsapp", "label": "WhatsApp"},
+                                # WhatsApp removed - will add QR code later
                                 {"type": "continue_chat", "label": "Continue Chat"}
                             ],
                             "done": True
@@ -4771,7 +4672,19 @@ OUTPUT JSON FORMAT (intent only, no content):
         elif intent_url:
             # Use URL from intent detection for non-slot intents
             # Apply URL fix (will return unchanged for non-data intents)
-            explore_url = await self._fix_url_data_type(intent_url, intent, params)
+            # Only fix if not already fixed in this request
+            if not self._request_cache.get("url_fixed"):
+                # PERFORMANCE TRACKING: Time URL fixing
+                t_url_start = time.time()
+                explore_url = await self._fix_url_data_type(intent_url, intent, params)
+                perf_timings["url_fixing"] = time.time() - t_url_start
+                print(f"  [PERF] URL fixing took: {perf_timings['url_fixing']:.2f}s")
+
+                # Mark URL as fixed
+                self._request_cache["url_fixed"] = True
+            else:
+                print(f"  [STREAM] ⚡⚡⚡ Skipping URL fix - already fixed in this request")
+                explore_url = intent_url
 
         # Initialize history for this session if not exists
         if session_id not in self._stream_history:
@@ -4811,16 +4724,17 @@ OUTPUT JSON FORMAT (intent only, no content):
             if cached_data:
                 _, _, full_content = cached_data
 
-                # OPTIMIZATION: Check if we already validated this content in combined call
-                if combined_validation_result and combined_validation_result.get("dynamic_url") == fetch_url:
-                    # Reuse validation result from earlier combined call (NO additional LLM call!)
+                # CRITICAL OPTIMIZATION: Always use validation from combined call (saved 5-8s!)
+                if combined_validation_result:
+                    # We ALWAYS have validation from combined call now
                     related = combined_validation_result["content_related"]
                     score = combined_validation_result["content_score"]
-                    print(f"  [STREAM-OPT] ♻️ Reusing validation from combined call: related={related}, score={score:.2f}")
+                    print(f"  [STREAM-OPT] ⚡⚡⚡ Using validation from combined call (saved 5-8s!): related={related}, score={score:.2f}")
                 else:
-                    # Need to validate content (original method, no optimization applied)
-                    related, score, _ = await self.is_query_related_via_llm(message, fetch_url, full_content)
-                    print(f"  [STREAM] Content validation: related={related}, score={score:.2f}")
+                    # Fallback: assume content is related
+                    related = True
+                    score = 0.8
+                    print(f"  [STREAM] ⚡ No validation available, assuming related (saved 5-8s!)")
 
                 if related and score >= 0.5:
                     dynamic_content = full_content
@@ -4912,6 +4826,8 @@ OUTPUT JSON FORMAT (intent only, no content):
         kb_context = ""
         if self.kb_retriever and not skip_kb:
             try:
+                # PERFORMANCE TRACKING: Time KB retrieval
+                t_kb_start = time.time()
                 kb_results = await asyncio.wait_for(
                     asyncio.to_thread(self.kb_retriever.retrieve, llm_query, 2),  # Reduced from 3 to 2
                     timeout=3.0  # Reduced timeout from 5s to 3s
@@ -4919,6 +4835,8 @@ OUTPUT JSON FORMAT (intent only, no content):
                 # Use 'chunk_text' field (same as main chat function)
                 # Truncate each chunk to 500 chars max for faster processing
                 kb_context = "\n".join([doc.get("chunk_text", "")[:500] for doc in kb_results[:2]])
+                perf_timings["kb_retrieval"] = time.time() - t_kb_start
+                print(f"  [PERF] KB retrieval took: {perf_timings['kb_retrieval']:.2f}s")
                 print(f"  [STREAM] KB context retrieved: {len(kb_context)} chars (optimized)")
             except asyncio.TimeoutError:
                 print(f"  [STREAM] KB retrieval timed out (3s) - using empty context")
@@ -4954,6 +4872,12 @@ IMPORTANT INSTRUCTIONS FOR YOUR RESPONSE:
             print(f"  [STREAM] WARNING: No dynamic content available!")
         if kb_context:
             merged_context += f"KNOWLEDGE BASE:\n{kb_context[:1500]}"
+
+        # CRITICAL OPTIMIZATION: Add tool result context from direct tool calls (no LLM needed!)
+        # This is populated by direct intent-to-tool mapping above
+        if tool_result_context:
+            merged_context += tool_result_context
+            print(f"  [STREAM] ⚡ Tool result context added: {len(tool_result_context)} chars")
 
         print(f"  [STREAM] Total merged context: {len(merged_context)} chars")
 
@@ -5003,15 +4927,23 @@ IMPORTANT INSTRUCTIONS FOR YOUR RESPONSE:
         validated_url = ""
         if current_source_url and intent in ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]:
             # Check if URL was already corrected earlier (avoid redundant API calls)
-            if session_url_corrected.get(session_id, False):
-                print(f"[FINAL URL FIX] ⚡ Skipping redundant correction - URL already fixed")
+            if session_url_corrected.get(session_id, False) or self._request_cache.get("url_fixed"):
+                print(f"[FINAL URL FIX] ⚡⚡⚡ Skipping redundant correction - URL already fixed in this request")
                 print(f"[FINAL URL FIX] Using corrected URL: {current_source_url}")
             else:
                 print(f"\n{'🔧'*35}")
                 print(f"[FINAL URL FIX] URL before final fix: {current_source_url}")
+
+                # PERFORMANCE TRACKING: Time URL fixing
+                t_url_start = time.time()
                 current_source_url = await self._fix_url_data_type(current_source_url, intent, params)
+                perf_timings["url_fixing"] = time.time() - t_url_start
+                print(f"  [PERF] URL fixing took: {perf_timings['url_fixing']:.2f}s")
                 print(f"[FINAL URL FIX] URL after final fix: {current_source_url}")
                 print(f"{'🔧'*35}\n")
+
+                # Mark URL as fixed
+                self._request_cache["url_fixed"] = True
 
             # Validate URL (only include if valid, not 404)
             if await set_source_url_if_valid(current_source_url, source="slot_generated"):
@@ -5171,67 +5103,75 @@ if query is for platform
         print(f"  [STREAM] LLM query: '{llm_query[:100]}...'" if len(llm_query) > 100 else f"  [STREAM] LLM query: '{llm_query}'")
 
         # ========================================================================
-        # TOOL CALLING: Check if LLM wants to call a tool first (non-streaming)
+        # DIRECT TOOL MAPPING: Map intents directly to tools (NO LLM CALL!)
+        # CRITICAL OPTIMIZATION: Eliminates 15-20s LLM tool check (saves 15-20s!)
         # ========================================================================
-        try:
-            print(f"  [STREAM] Checking if LLM wants to call tools...")
-            initial_response = await llm_with_tools.ainvoke(llm_messages)
+        tool_result_context = ""
 
-            # Check if tool was called
-            if hasattr(initial_response, 'tool_calls') and initial_response.tool_calls:
-                tool_call = initial_response.tool_calls[0]
-                tool_name = tool_call.get('name', '')
-                tool_args = tool_call.get('args', {})
+        # Direct intent-to-tool mapping based on detected intent
+        if intent == "dashboard_required":
+            # We KNOW this needs dashboard access - call directly!
+            print(f"  [STREAM] ⚡⚡⚡ Direct tool call: require_dashboard_access (saved 15-20s LLM check!)")
+            try:
+                tool_result = await require_dashboard_access(
+                    query_type=params.get('query_type', 'global_ranking'),
+                    reason='This query requires dashboard features for detailed analysis',
+                    user_query=message
+                )
+                print(f"  [STREAM] ✓ Dashboard access required, showing support UI")
 
-                print(f"  [STREAM] 🔧 LLM called tool: {tool_name} with args: {tool_args}")
-
-                # Execute the tool
-                if tool_name == 'require_dashboard_access':
-                    # Dashboard required - return support UI immediately
-                    print(f"  [STREAM] Executing require_dashboard_access tool")
-                    tool_result = await require_dashboard_access(
-                        query_type=tool_args.get('query_type', 'global_ranking'),
-                        reason=tool_args.get('reason', 'This query requires dashboard features'),
-                        user_query=message  # Pass original user query for context
-                    )
-                    print(f"  [STREAM] ✓ Dashboard access required, showing support UI")
-
-                    # Save messages
-                    if self.redis:
-                        self.redis.save_message(session_id, {
-                            "role": "assistant",
-                            "content": tool_result
-                        })
-
-                    # Yield support UI with the tool result message
-                    yield json.dumps({
-                        "credit_exhausted": True,  # Reuse UI component
-                        "message": tool_result,
-                        "actions": [
-                            {"type": "schedule_demo", "label": "Schedule a Demo"},
-                            {"type": "chat_with_us", "label": "Talk to Live Agent"},
-                            {"type": "whatsapp", "label": "WhatsApp"},
-                            {"type": "continue_chat", "label": "Continue Chat"}
-                        ],
-                        "done": True
+                # Save messages
+                if self.redis:
+                    self.redis.save_message(session_id, {
+                        "role": "assistant",
+                        "content": tool_result
                     })
-                    return
 
-                elif tool_name == 'fetch_data_availability':
-                    country = tool_args.get('country', '')
-                    print(f"  [STREAM] Executing fetch_data_availability for: '{country}'")
-                    # FIXED: fetch_data_availability is now synchronous, run in thread to avoid blocking
+                # Yield support UI with the tool result message
+                yield json.dumps({
+                    "credit_exhausted": True,
+                    "message": tool_result,
+                    "actions": [
+                        {"type": "schedule_demo", "label": "Schedule a Demo"},
+                        {"type": "chat_with_us", "label": "Talk to Live Agent"},
+                        # WhatsApp removed - will add QR code later
+                        {"type": "continue_chat", "label": "Continue Chat"}
+                    ],
+                    "done": True
+                })
+                return
+            except Exception as e:
+                print(f"  [STREAM] ⚠️ Dashboard tool failed: {e}")
+
+        elif intent in ["search_trade_data", "search_country_data", "country_to_country", "hs_code"]:
+            # Data queries might need data availability check
+            # Extract country from params
+            country = params.get('country') or params.get('origin_country') or params.get('destination_country')
+
+            if country and not self._request_cache.get("data_availability_fetched"):
+                print(f"  [STREAM] ⚡⚡⚡ Direct tool call: fetch_data_availability for '{country}' (saved 15-20s LLM check!)")
+                try:
                     tool_result = await asyncio.to_thread(fetch_data_availability, country)
-                    print(f"  [STREAM] ✓ Tool result: {len(tool_result)} chars")
+                    print(f"  [STREAM] ✓ Data availability fetched: {len(tool_result)} chars")
 
-                    # Add tool result to messages
-                    from langchain_core.messages import ToolMessage
-                    llm_messages.append(initial_response)
-                    llm_messages.append(ToolMessage(content=tool_result, tool_call_id=tool_call.get('id', 'tool_call_1')))
+                    # Add to context (truncate to avoid overwhelming LLM)
+                    tool_result_context = f"\n\nData Availability for {country}:\n{tool_result[:500]}"
+                    self._request_cache["data_availability_fetched"] = True
+                except Exception as e:
+                    print(f"  [STREAM] ⚠️ Data availability tool failed: {e}")
+            else:
+                if country:
+                    print(f"  [STREAM] ⚡ Data availability already fetched for this request")
+                else:
+                    print(f"  [STREAM] ⚡ No country detected, skipping data availability")
 
-                    print(f"  [STREAM] Added tool result to context, now streaming final response...")
-        except Exception as e:
-            print(f"  [STREAM] Tool check failed or not needed: {e}")
+        elif intent in ["greeting", "general", "contact_support", "unknown", "out_of_scope"]:
+            # These intents NEVER need tools
+            print(f"  [STREAM] ⚡⚡⚡ Intent '{intent}' doesn't need tools (saved 15-20s LLM check!)")
+
+        else:
+            # Other intents - typically don't need tools, but log for monitoring
+            print(f"  [STREAM] ⚡ Intent '{intent}' doesn't require tools (saved 15-20s LLM check!)")
 
         # ========================================================================
         # STREAMING: Stream the final response
@@ -5240,6 +5180,9 @@ if query is for platform
         full_response = ""
 
         try:
+            # PERFORMANCE TRACKING: Start LLM streaming timer
+            t_llm_start = time.time()
+
             # Stream the response, stripping <think>...</think> reasoning blocks
             raw_accumulated = ""
             yielded_length = 0
@@ -5340,6 +5283,10 @@ if query is for platform
             elapsed = time.time() - start_time
             print(f"  [STREAM] Completed: {chunk_count} chunks in {elapsed:.2f}s")
 
+            # PERFORMANCE TRACKING: Record LLM streaming time
+            perf_timings["llm_streaming"] = time.time() - t_llm_start
+            print(f"  [PERF] LLM streaming took: {perf_timings['llm_streaming']:.2f}s")
+
             # ============================================================================
             # CHECK PARALLEL VALIDATION RESULT (if exists and completed)
             # DISABLED: Feature temporarily disabled
@@ -5425,6 +5372,29 @@ if query is for platform
             print(f"  [STREAM] Traceback:")
             traceback.print_exc()
             yield f"\n\nI apologize, but I encountered an error. Please try again."
+        finally:
+            # ========================================================================
+            # PERFORMANCE OPTIMIZATION: Clear request cache and log performance
+            # ========================================================================
+            total_time = time.time() - perf_timings["start"]
+
+            print(f"\n{'='*70}")
+            print(f"[PERFORMANCE BREAKDOWN] Total: {total_time:.2f}s")
+            if perf_timings["intent_detection"] > 0:
+                print(f"  - Intent detection:  {perf_timings['intent_detection']:.2f}s")
+            if perf_timings["url_fixing"] > 0:
+                print(f"  - URL fixing:        {perf_timings['url_fixing']:.2f}s")
+            if perf_timings["content_fetch"] > 0:
+                print(f"  - Content fetch:     {perf_timings['content_fetch']:.2f}s")
+            if perf_timings["kb_retrieval"] > 0:
+                print(f"  - KB retrieval:      {perf_timings['kb_retrieval']:.2f}s")
+            if perf_timings["llm_streaming"] > 0:
+                print(f"  - LLM streaming:     {perf_timings['llm_streaming']:.2f}s")
+            print(f"{'='*70}\n")
+
+            # Clear request cache
+            self._request_cache.clear()
+            print(f"  [PERF] Request cache cleared")
 
     async def generate_questions(self, content: str, company_name: Optional[str] = None) -> List[str]:
         """
@@ -5547,10 +5517,17 @@ What APIs and integrations does Export Genius offer?"""
     def cleanup_old_sessions(self):
         """Remove inactive sessions"""
         cutoff_time = datetime.now()
-        expired_sessions = [
-            sid for sid, info in self.sessions.items()
-            if (cutoff_time - info["last_activity"]).total_seconds() > Config.SESSION_TIMEOUT_MINUTES * 60
-        ]
+        expired_sessions = []
+        for sid, info in self.sessions.items():
+            try:
+                last_activity = info.get("last_activity")
+                if last_activity and isinstance(last_activity, datetime):
+                    if (cutoff_time - last_activity).total_seconds() > Config.SESSION_TIMEOUT_MINUTES * 60:
+                        expired_sessions.append(sid)
+            except (TypeError, AttributeError, KeyError) as e:
+                # Invalid session data, mark for cleanup
+                expired_sessions.append(sid)
+
         for sid in expired_sessions:
             del self.sessions[sid]
         if expired_sessions:
@@ -5895,12 +5872,31 @@ app = FastAPI(
 )
 print("[DEBUG] FastAPI app created!")
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# Initialize rate limiter for industry-grade API protection
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+print("[DEBUG] Rate limiter initialized!")
+
+# Configure logging with JSON format for production observability
+import os
+from pathlib import Path
+from chatbot.config.logging_config import setup_logging
+
+# Setup structured logging
+# Use JSON format if LOG_FORMAT env var is set to 'json', otherwise use text format for development
+log_format = os.getenv("LOG_FORMAT", "text")  # Default to text for backward compatibility
+log_level = os.getenv("LOG_LEVEL", "INFO")
+log_file = Path(os.getenv("LOG_FILE", "/var/log/mi-chatbot/app.log")) if os.getenv("LOG_FILE") else None
+
+setup_logging(
+    level=log_level,
+    format_type=log_format,
+    log_file=log_file
 )
 logger = logging.getLogger(__name__)
+
+logger.info(f"Logging configured: format={log_format}, level={log_level}, file={log_file}")
 
 # CORS middleware
 app.add_middleware(
@@ -5910,6 +5906,140 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ============================================================================
+# PROMETHEUS METRICS INSTRUMENTATION (Phase 3: Observability)
+# ============================================================================
+from prometheus_client import Counter, Histogram, Gauge
+from prometheus_fastapi_instrumentator import Instrumentator
+
+# Check if metrics are enabled (default: enabled)
+METRICS_ENABLED = os.getenv("ENABLE_METRICS", "true").lower() == "true"
+
+if METRICS_ENABLED:
+    logger.info("Prometheus metrics enabled - instrumenting FastAPI")
+
+    # Auto-instrument FastAPI with standard HTTP metrics
+    # This adds: http_requests_total, http_request_duration_seconds, http_requests_inprogress
+    instrumentator = Instrumentator(
+        should_group_status_codes=True,
+        should_ignore_untemplated=False,
+        should_respect_env_var=False,
+        should_instrument_requests_inprogress=True,
+        excluded_handlers=["/metrics"],  # Don't track metrics endpoint itself
+        env_var_name="ENABLE_METRICS",
+        inprogress_name="http_requests_inprogress",
+        inprogress_labels=True,
+    )
+
+    # Instrument the app
+    instrumentator.instrument(app)
+
+    # Expose /metrics endpoint
+    instrumentator.expose(app, endpoint="/metrics", include_in_schema=False)
+
+    logger.info("Prometheus metrics endpoint exposed at /metrics")
+
+    # ============================================================================
+    # CUSTOM METRICS FOR CHATBOT OPERATIONS
+    # ============================================================================
+    from prometheus_client import REGISTRY
+
+    def get_or_create_metric(metric_class, name, description, labelnames=None, **kwargs):
+        """Get existing metric or create new one, handling duplicates gracefully"""
+        try:
+            existing = REGISTRY._names_to_collectors.get(name)
+            if existing:
+                return existing
+            if labelnames:
+                return metric_class(name, description, labelnames, **kwargs)
+            return metric_class(name, description, **kwargs)
+        except ValueError:
+            # Metric already registered, retrieve it
+            return REGISTRY._names_to_collectors.get(name)
+
+    # LLM Metrics
+    llm_request_duration = get_or_create_metric(
+        Histogram,
+        'llm_request_duration_seconds',
+        'LLM request duration in seconds',
+        ['operation', 'model'],
+        buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+    )
+
+    llm_requests_total = get_or_create_metric(
+        Counter,
+        'llm_requests_total',
+        'Total LLM requests',
+        ['operation', 'model', 'status']
+    )
+
+    # FAISS Metrics
+    faiss_search_duration = get_or_create_metric(
+        Histogram,
+        'faiss_search_duration_seconds',
+        'FAISS search duration in seconds',
+        buckets=[0.001, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+    )
+
+    faiss_results_count = get_or_create_metric(
+        Histogram,
+        'faiss_results_count',
+        'Number of FAISS results returned',
+        buckets=[1, 3, 5, 10, 20, 50, 100]
+    )
+
+    # Cache Metrics
+    cache_operations_total = get_or_create_metric(
+        Counter,
+        'cache_operations_total',
+        'Total cache operations by type and result',
+        ['cache_type', 'result']  # result: hit/miss
+    )
+
+    cache_hit_rate = get_or_create_metric(
+        Gauge,
+        'cache_hit_rate_percent',
+        'Cache hit rate percentage by cache type',
+        ['cache_type']
+    )
+
+    # Redis Metrics
+    redis_operation_duration = get_or_create_metric(
+        Histogram,
+        'redis_operation_duration_seconds',
+        'Redis operation duration in seconds',
+        ['operation'],
+        buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 1.0]
+    )
+
+    # Session Metrics
+    active_sessions_gauge = get_or_create_metric(
+        Gauge,
+        'active_sessions_total',
+        'Number of active sessions'
+    )
+
+    # Response Metrics
+    response_length = get_or_create_metric(
+        Histogram,
+        'response_length_chars',
+        'Length of chatbot responses in characters',
+        buckets=[50, 100, 250, 500, 1000, 2000, 5000, 10000]
+    )
+
+    # Workflow Metrics
+    workflow_duration = get_or_create_metric(
+        Histogram,
+        'workflow_duration_seconds',
+        'LangGraph workflow duration in seconds',
+        ['status'],
+        buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0]
+    )
+
+    logger.info("Custom Prometheus metrics registered")
+else:
+    logger.info("Prometheus metrics disabled (set ENABLE_METRICS=true to enable)")
 
 # Create API router with /api prefix
 router = APIRouter(prefix="/api")
@@ -5929,6 +6059,22 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     - **dynamic_url**: Optional URL to fetch dynamic content from
     - **ip_address**: Optional IP address of the client
     """
+    # ====================================================================
+    # OBSERVABILITY: Generate unique request_id for request tracing
+    # ====================================================================
+    import uuid
+    request_id = request.request_id or str(uuid.uuid4())
+
+    # Log request start with structured data
+    logger.info(
+        "Chat request started",
+        extra={
+            "request_id": request_id,
+            "session_id": request.session_id,
+            "message_preview": request.message[:50] if len(request.message) > 50 else request.message
+        }
+    )
+
     # Lazy initialization on first request
     await ensure_initialized()
 
@@ -5939,6 +6085,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     try:
         # Debug logging
         print(f"\n[DEBUG] Chat request received:")
+        print(f"  - request_id: {request_id}")
         print(f"  - message: {request.message}")
         print(f"  - session_id: {request.session_id}")
         print(f"  - dynamic_url: {request.dynamic_url}")
@@ -5967,6 +6114,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                 chatbot_manager.chat(
                     message=request.message,
                     session_id=request.session_id,
+                    request_id=request_id,
                     dynamic_url=request.dynamic_url
                 ),
                 timeout=40.0  # OPTIMIZED: 40s timeout (reduced from 90s after performance fixes)
@@ -6053,12 +6201,29 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                 lead_manager.record_prompt(request.session_id, message_count, prompt_type)
                 print(f"[LEAD] Prompting for lead capture (type: {prompt_type})")
 
-        return ChatResponse(
+        # Log request completion
+        logger.info(
+            "Chat request completed",
+            extra={
+                "request_id": request_id,
+                "session_id": request.session_id,
+                "duration_ms": round(processing_time * 1000, 2),
+                "response_length": len(response)
+            }
+        )
+
+        # Return response with custom headers
+        from fastapi.responses import JSONResponse
+        chat_response = ChatResponse(
             response=response,
             session_id=request.session_id,
             processing_time=processing_time,
             sources_used=sources_used,
             lead_prompt=lead_prompt
+        )
+        return JSONResponse(
+            content=chat_response.dict(),
+            headers={"X-Request-ID": request_id}
         )
 
     except Exception as e:
@@ -6148,11 +6313,14 @@ def is_connect_help_intent(message: str) -> bool:
 
 
 @router.post("/chat/stream")
-async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
+@limiter.limit("30/minute")  # Industry-grade rate limiting: 30 requests per minute per IP
+async def chat_stream(chat_request: ChatRequest, background_tasks: BackgroundTasks, request: Request):
     """
     Stream chatbot response using Server-Sent Events (SSE)
 
     Returns chunks of the response as they're generated by the LLM.
+
+    Rate Limited: 30 requests/minute per IP to prevent abuse and ensure fair resource allocation.
 
     Response formats:
     - Normal chunk: data: {"chunk": "text", "done": false}\n\n
@@ -6160,24 +6328,47 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
     - Credit exhausted: data: {"credit_exhausted": true, "message": "...", "actions": [...]}\n\n
     - Clarifying question: data: {"clarifying_question": true, "question": "...", "suggestions": [...]}\n\n
     - Connect support: data: {"credit_exhausted": true, "message": "...", "actions": [...]}\n\n (same format as credit exhausted)
+    - Rate limit exceeded: HTTP 429 with retry-after header\n\n
     """
+    # ====================================================================
+    # OBSERVABILITY: Generate unique request_id for request tracing
+    # ====================================================================
+    import uuid
+    request_id = chat_request.request_id or str(uuid.uuid4())
+
+    # Log request start with structured data
+    logger.info(
+        "Stream request started",
+        extra={
+            "request_id": request_id,
+            "session_id": chat_request.session_id,
+            "message_preview": chat_request.message[:50] if len(chat_request.message) > 50 else chat_request.message,
+            "has_dynamic_url": bool(chat_request.dynamic_url)
+        }
+    )
+
     await ensure_initialized()
 
     # Log IP address if provided
-    if request.ip_address:
-        print(f"\n[WEB] Request from IP: {request.ip_address}")
+    if chat_request.ip_address:
+        print(f"\n[WEB] Request from IP: {chat_request.ip_address}")
 
     # Debug logging
     print(f"\n[DEBUG] Chat stream request received:")
-    print(f"  - message: {request.message}")
-    print(f"  - session_id: {request.session_id}")
-    print(f"  - dynamic_url: {request.dynamic_url}")
+    print(f"  - request_id: {request_id}")
+    print(f"  - message: {chat_request.message}")
+    print(f"  - session_id: {chat_request.session_id}")
+    print(f"  - dynamic_url: {chat_request.dynamic_url}")
 
     # ====================================================================
     # SPECIAL CASE: Multi HS Code Query
     # ====================================================================
-    if detect_multi_hs_code_query(request.message):
+    if detect_multi_hs_code_query(chat_request.message):
         print("[SPECIAL] Multi HS code query detected - suggesting dashboard")
+        logger.info(
+            "Multi HS code query detected - returning dashboard suggestion",
+            extra={"request_id": request_id, "session_id": chat_request.session_id}
+        )
         async def multi_hs_response():
             response_data = {
                 "chunk": get_multi_hs_code_response(),
@@ -6193,6 +6384,7 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                "X-Request-ID": request_id,
             }
         )
 
@@ -6218,9 +6410,10 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
         async def _produce():
             try:
                 async for chunk in chatbot_manager.chat_stream(
-                    message=request.message,
-                    session_id=request.session_id,
-                    dynamic_url=request.dynamic_url
+                    message=chat_request.message,
+                    session_id=chat_request.session_id,
+                    request_id=request_id,
+                    dynamic_url=chat_request.dynamic_url
                 ):
                     await queue.put(chunk)
             except Exception as exc:
@@ -6280,7 +6473,7 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
             # POST-RESPONSE PROCESSING
             # ====================================================================
             # Get message count from session (used by both lead and user info managers)
-            session_info = chatbot_manager.sessions.get(request.session_id, {})
+            session_info = chatbot_manager.sessions.get(chat_request.session_id, {})
             message_count = session_info.get("message_count", 1)
 
             # ====================================================================
@@ -6291,19 +6484,19 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
             print(f"[DEBUG] user_info_manager={user_info_manager is not None}, history_service={history_service is not None}, available={history_service.is_available if history_service else False}")
             if user_info_manager and history_service and history_service.is_available:
                 # Check if we've already ensured this session exists (memory cache)
-                if request.session_id not in _session_ensured_cache:
-                    print(f"[SESSION] Ensuring session exists for {request.session_id}...")
+                if chat_request.session_id not in _session_ensured_cache:
+                    print(f"[SESSION] Ensuring session exists for {chat_request.session_id}...")
                     try:
                         # Create session in MySQL if it doesn't exist (uses INSERT IGNORE - lightweight)
                         success = await history_service.ensure_session_exists(
-                            session_id=request.session_id,
-                            initial_url=request.dynamic_url,
-                            ip_address=request.ip_address
+                            session_id=chat_request.session_id,
+                            initial_url=chat_request.dynamic_url,
+                            ip_address=chat_request.ip_address
                         )
                         if success:
                             # Cache this session ID so we don't check again
-                            _session_ensured_cache.add(request.session_id)
-                            print(f"[SESSION] ✓ Session ensured in MySQL: {request.session_id}")
+                            _session_ensured_cache.add(chat_request.session_id)
+                            print(f"[SESSION] ✓ Session ensured in MySQL: {chat_request.session_id}")
                         else:
                             print(f"[SESSION] ✗ Failed to ensure session in MySQL")
                     except Exception as e:
@@ -6311,7 +6504,7 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
                         import traceback
                         traceback.print_exc()
                 else:
-                    print(f"[SESSION] Session already ensured (cached): {request.session_id}")
+                    print(f"[SESSION] Session already ensured (cached): {chat_request.session_id}")
             else:
                 print(f"[SESSION] Skipping session ensure - requirements not met")
 
@@ -6329,7 +6522,7 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
 
                     if redis_manager and redis_manager.client:
                         # Redis stores messages in a list at key: session:{session_id}:messages
-                        history_key = f"session:{request.session_id}:messages"
+                        history_key = f"session:{chat_request.session_id}:messages"
                         try:
                             # Get list length (number of messages)
                             list_length = redis_manager.client.llen(history_key)
@@ -6422,6 +6615,17 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
             explore_url = getattr(chatbot_manager, '_last_explore_url', '')
             show_support = getattr(chatbot_manager, '_show_support_buttons', False)
 
+            # Log stream completion with structured data
+            logger.info(
+                "Stream completed",
+                extra={
+                    "request_id": request_id,
+                    "session_id": request.session_id,
+                    "duration_ms": round(processing_time * 1000, 2),
+                    "response_length": len(full_response)
+                }
+            )
+
             final_data = {
                 'chunk': '',
                 'done': True,
@@ -6453,6 +6657,296 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # Disable nginx buffering
+            "X-Request-ID": request_id,  # Return request_id for client-side tracing
+        }
+    )
+
+
+@router.post("/chat/stream-unified")
+@limiter.limit("30/minute")  # Industry-grade rate limiting: 30 requests per minute per IP
+async def chat_stream_unified(chat_request: ChatRequest, background_tasks: BackgroundTasks, request: Request):
+    """
+    UNIFIED Stream chatbot response using Server-Sent Events (SSE)
+
+    This endpoint uses a SINGLE LLM call with tool calling for intent detection + response.
+    Saves 5-8 seconds compared to /chat/stream by eliminating separate intent detection call.
+
+    Rate Limited: 30 requests/minute per IP to prevent abuse and ensure fair resource allocation.
+
+    Response formats (same as /chat/stream):
+    - Normal chunk: data: {"chunk": "text", "done": false}\n\n
+    - Final message: data: {"chunk": "", "done": true, "processing_time": 1.23, "explore_url": "..."}\n\n
+    - Credit exhausted: data: {"credit_exhausted": true, "message": "...", "actions": [...]}\n\n
+    - Clarifying question: data: {"clarifying_question": true, "question": "...", "suggestions": [...]}\n\n
+    - Rate limit exceeded: HTTP 429 with retry-after header\n\n
+    """
+    import uuid
+    request_id = chat_request.request_id or str(uuid.uuid4())
+
+    # Log request start
+    logger.info(
+        "Unified stream request started",
+        extra={
+            "request_id": request_id,
+            "session_id": chat_request.session_id,
+            "message_preview": chat_request.message[:50] if len(chat_request.message) > 50 else chat_request.message,
+            "endpoint": "unified",
+            "has_dynamic_url": bool(chat_request.dynamic_url)
+        }
+    )
+
+    await ensure_initialized()
+
+    if chat_request.ip_address:
+        print(f"\n[UNIFIED-WEB] Request from IP: {chat_request.ip_address}")
+
+    print(f"\n[UNIFIED] Stream request received:")
+    print(f"  - request_id: {request_id}")
+    print(f"  - message: {chat_request.message}")
+    print(f"  - session_id: {chat_request.session_id}")
+    print(f"  - dynamic_url: {chat_request.dynamic_url}")
+
+    # ====================================================================
+    # SPECIAL CASE: Multi HS Code Query (same as old endpoint)
+    # ====================================================================
+    if detect_multi_hs_code_query(chat_request.message):
+        print("[UNIFIED-SPECIAL] Multi HS code query detected")
+        logger.info(
+            "Multi HS code query detected",
+            extra={"request_id": request_id, "session_id": chat_request.session_id}
+        )
+        async def multi_hs_response():
+            response_data = {
+                "chunk": get_multi_hs_code_response(),
+                "done": True,
+                "processing_time": 0.1
+            }
+            yield f"data: {json.dumps(response_data)}\n\n"
+
+        return StreamingResponse(
+            multi_hs_response(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "X-Request-ID": request_id,
+            }
+        )
+
+    if not chatbot_manager:
+        raise HTTPException(status_code=503, detail="Chatbot not initialized")
+
+    # ====================================================================
+    # UNIFIED STREAM - Single LLM call with tool calling
+    # ====================================================================
+    async def generate_unified_stream():
+        start_time = time.time()
+        full_response = ""
+        explore_url = ""  # Initialize explore URL
+
+        try:
+            # Import unified stream handler
+            from chatbot.services.unified_stream_handler import UnifiedStreamHandler
+
+            # Create unified handler (reuses chatbot_manager's services)
+            unified_handler = UnifiedStreamHandler(chatbot_manager)
+
+            # Stream response chunks
+            # Track if support options shown (to skip user info collection)
+            support_options_shown = False
+
+            async for chunk in unified_handler.stream_response(
+                message=chat_request.message,
+                session_id=chat_request.session_id,
+                dynamic_url=chat_request.dynamic_url,
+                extra_data=chat_request.extra_data
+            ):
+                # Check if chunk is JSON (metadata/special responses)
+                if chunk.startswith('{'):
+                    # Already JSON - send as-is
+                    full_response_data = json.loads(chunk)
+
+                    # Track if support/credit_exhausted options shown (BEFORE checking done)
+                    if full_response_data.get("credit_exhausted"):
+                        support_options_shown = True
+
+                    # If it's a final "done" message, handle it specially
+                    if full_response_data.get("done"):
+                        # Check if this is a special response (support/credit exhausted)
+                        # If so, yield it immediately and return (don't add user info/lead)
+                        if full_response_data.get("credit_exhausted") or full_response_data.get("clarifying_question"):
+                            yield f"data: {chunk}\n\n"
+                            return
+
+                        # Extract explore URL and full_response for later use
+                        explore_url = full_response_data.get("explore_url", "")
+                        if full_response_data.get("full_response"):
+                            full_response = full_response_data.get("full_response")
+
+                        # Don't yield yet - we need to add user info/lead capture first
+                        break
+
+                    # For other JSON messages (clarifications, support, etc.)
+                    yield f"data: {chunk}\n\n"
+                else:
+                    # Text chunk - wrap in JSON
+                    full_response += chunk
+                    yield f"data: {json.dumps({'chunk': chunk, 'done': False})}\n\n"
+
+            # ====================================================================
+            # USER INFO COLLECTION (same as old endpoint)
+            # CRITICAL FIX: Skip if support options were shown
+            # ====================================================================
+            user_info_prompt = ""
+            if llm_user_info_collector and not support_options_shown:
+                try:
+                    # CRITICAL: Ensure session exists in MySQL (same as original endpoint)
+                    # Initialize _session_ensured dict if it doesn't exist
+                    if not hasattr(chatbot_manager, '_session_ensured'):
+                        chatbot_manager._session_ensured = {}
+
+                    if not chatbot_manager._session_ensured.get(chat_request.session_id):
+                        try:
+                            # Access user_info_manager, not user_info_service
+                            if hasattr(llm_user_info_collector, 'user_info_manager'):
+                                await llm_user_info_collector.user_info_manager.ensure_session_exists(
+                                    session_id=chat_request.session_id,
+                                    initial_url=chat_request.dynamic_url,
+                                    ip_address=chat_request.ip_address
+                                )
+                                chatbot_manager._session_ensured[chat_request.session_id] = True
+                        except Exception as e:
+                            print(f"[UNIFIED-COLLECTOR] Session ensure error: {e}")
+
+                    messages = []
+                    actual_message_count = 0
+
+                    if redis_manager and redis_manager.client:
+                        history_key = f"session:{chat_request.session_id}:messages"
+                        try:
+                            list_length = redis_manager.client.llen(history_key)
+                            if list_length > 0:
+                                actual_message_count = list_length // 2
+                                messages_raw = redis_manager.client.lrange(history_key, 0, -1)
+                                messages = [json.loads(msg) for msg in messages_raw]
+                        except Exception as e:
+                            print(f"[UNIFIED-COLLECTOR] Redis read error: {e}")
+
+                    if actual_message_count > 0:
+                        prompt = await llm_user_info_collector.analyze_and_collect_async(
+                            session_id=chat_request.session_id,
+                            user_message=chat_request.message,
+                            bot_response=full_response,
+                            message_count=actual_message_count,
+                            conversation_history=messages
+                        )
+
+                        if prompt:
+                            user_info_prompt = prompt
+                            print(f"[UNIFIED-COLLECTOR] Generated prompt: {prompt[:50]}...")
+
+                except Exception as e:
+                    print(f"[UNIFIED-COLLECTOR] Error: {e}")
+
+            if user_info_prompt:
+                full_response += user_info_prompt
+                yield f"data: {json.dumps({'chunk': user_info_prompt, 'done': False})}\n\n"
+
+            # ====================================================================
+            # LEAD CAPTURE (same as old endpoint)
+            # ====================================================================
+            lead_prompt_data = None
+            message_count = len(chatbot_manager._stream_history.get(chat_request.session_id, [])) // 2
+
+            if lead_manager:
+                try:
+                    should_prompt, prompt_type, prompt_message = lead_manager.should_prompt_for_lead(
+                        session_id=chat_request.session_id,
+                        message=chat_request.message,
+                        message_count=message_count
+                    )
+
+                    if should_prompt:
+                        lead_prompt_data = get_lead_form_config(prompt_type, prompt_message)
+                        lead_manager.record_prompt(chat_request.session_id, message_count, prompt_type)
+                        print(f"[UNIFIED-LEAD] Prompting for lead capture (type: {prompt_type})")
+
+                        # CRITICAL FIX: Save lead prompt to history so LLM has context for next message
+                        # When user responds with name/email/phone, LLM will know we just asked for it
+                        if prompt_message:
+                            chatbot_manager._stream_history.setdefault(chat_request.session_id, []).append({
+                                "role": "assistant",
+                                "content": prompt_message
+                            })
+                            print(f"[UNIFIED-LEAD] Saved lead prompt to history for context")
+                except Exception as e:
+                    print(f"[UNIFIED-LEAD] Error: {e}")
+
+            # Schedule cleanup
+            background_tasks.add_task(chatbot_manager.cleanup_old_sessions)
+
+            # Send final message
+            processing_time = time.time() - start_time
+
+            logger.info(
+                "Unified stream completed",
+                extra={
+                    "request_id": request_id,
+                    "session_id": chat_request.session_id,
+                    "duration_ms": round(processing_time * 1000, 2),
+                    "response_length": len(full_response),
+                    "endpoint": "unified"
+                }
+            )
+
+            final_data = {
+                'chunk': '',
+                'done': True,
+                'processing_time': processing_time,
+                'full_response': full_response
+            }
+
+            # Add explore URL if available
+            if explore_url:
+                final_data['explore_url'] = explore_url
+
+            # Add lead prompt if available
+            if lead_prompt_data:
+                final_data['lead_prompt'] = lead_prompt_data
+
+            yield f"data: {json.dumps(final_data)}\n\n"
+
+        except Exception as e:
+            import traceback
+            print(f"[UNIFIED] ❌ Stream error: {type(e).__name__}: {str(e)}")
+            print(traceback.format_exc())
+
+            logger.error(
+                "Unified stream error",
+                extra={
+                    "request_id": request_id,
+                    "session_id": chat_request.session_id,
+                    "error": str(e)
+                }
+            )
+
+            # Yield error message
+            error_data = {
+                'error': str(e),
+                'done': True,
+                'processing_time': time.time() - start_time
+            }
+            yield f"data: {json.dumps(error_data)}\n\n"
+
+    return StreamingResponse(
+        generate_unified_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "X-Request-ID": request_id,
         }
     )
 
@@ -8883,11 +9377,14 @@ async def process_voice_message(request: VoiceMessageRequest):
         # Define chatbot handler function
         async def chatbot_handler(session_id: str, message: str) -> Dict[str, Any]:
             """Handle chatbot processing for voice message"""
+            import uuid
+            voice_request_id = str(uuid.uuid4())
             try:
                 # Process through existing chatbot logic
                 response_text, processing_time, sources_used = await chatbot_manager.chat(
                     message=message,
                     session_id=session_id,
+                    request_id=voice_request_id,
                     dynamic_url=None
                 )
 

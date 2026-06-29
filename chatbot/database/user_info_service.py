@@ -278,6 +278,68 @@ class UserInfoService:
                 "error": str(e)
             }
 
+    async def update_user_info(
+        self,
+        session_id: str,
+        updates: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Update specific fields in user_info table.
+        Used for updating rejection counts and other metadata.
+
+        Args:
+            session_id: Session identifier
+            updates: Dict of field_name -> value to update
+
+        Returns:
+            Dict with 'success' bool and info
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        if not self._available:
+            return {"success": False, "error": "MySQL not available"}
+
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    # Build UPDATE query
+                    update_fields = []
+                    params = []
+
+                    for field_name, value in updates.items():
+                        # Convert lists to JSON strings
+                        if isinstance(value, list):
+                            value = json.dumps(value)
+
+                        update_fields.append(f"{field_name} = %s")
+                        params.append(value)
+
+                    if not update_fields:
+                        return {"success": False, "error": "No fields to update"}
+
+                    # Add updated_at timestamp
+                    update_fields.append("updated_at = CURRENT_TIMESTAMP")
+                    params.append(session_id)
+
+                    query = f"""
+                        UPDATE user_info
+                        SET {', '.join(update_fields)}
+                        WHERE session_id = %s
+                    """
+                    await cur.execute(query, params)
+
+                    print(f"[UserInfoService] Updated user_info for session {session_id}: {list(updates.keys())}")
+                    return {
+                        "success": True,
+                        "session_id": session_id,
+                        "updated_fields": list(updates.keys())
+                    }
+
+        except Exception as e:
+            print(f"[UserInfoService] Update error: {e}")
+            return {"success": False, "error": str(e)}
+
     async def get_user_info(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
         Get user info for a session.

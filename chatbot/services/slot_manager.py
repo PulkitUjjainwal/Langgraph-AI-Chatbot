@@ -702,7 +702,7 @@ class SlotManager:
             "actions": [
                 {"type": "schedule_demo", "label": "Schedule a Demo"},
                 {"type": "chat_with_us", "label": "Talk to Live Agent"},
-                {"type": "whatsapp", "label": "WhatsApp"},
+                # WhatsApp removed - will add QR code later
                 {"type": "continue_chat", "label": "Continue Chat"}
             ]
         }

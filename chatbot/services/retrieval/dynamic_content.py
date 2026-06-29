@@ -467,6 +467,7 @@ class DynamicContentManager:
         faiss.normalize_L2(embeddings_array)
 
         # Store in Redis (with full content)
+        # 1. Session cache (for this user)
         self.redis.save_embeddings(
             session_id=session_id,
             dynamic_url=url,
@@ -476,9 +477,73 @@ class DynamicContentManager:
         )
 
         logger.info(
-            f"Embeddings stored: {len(chunks)} chunks, {embeddings_array.shape}",
+            f"Embeddings stored in session cache: {len(chunks)} chunks, {embeddings_array.shape}",
             extra={"session_id": session_id, "url": url}
         )
+
+        # 2. Global cache (for all users) - OPTIMIZATION for popular URLs
+        if self._should_cache_globally(url):
+            try:
+                # Use save_embeddings_global for longer TTL (7 days vs 2 days)
+                self.redis.save_embeddings_global(
+                    dynamic_url=url,
+                    embeddings=embeddings_array,
+                    chunks=chunks,
+                    full_content=content,
+                    ttl_days=7  # Longer TTL for shared cache
+                )
+                logger.info(f"✓ Saved to global cache: {url[:80]}... (reusable across all users, 7 day TTL)")
+            except AttributeError:
+                # Fallback if save_embeddings_global doesn't exist
+                logger.warning("save_embeddings_global not available, using session-based global cache")
+                self.redis.save_embeddings(
+                    session_id="global",
+                    dynamic_url=url,
+                    embeddings=embeddings_array,
+                    chunks=chunks,
+                    full_content=content
+                )
+
+    def _should_cache_globally(self, url: str) -> bool:
+        """
+        Determine if URL should be cached globally.
+
+        Strategy: Cache all company/country URLs (reusable across users)
+        Don't cache: User-specific queries, one-off searches
+
+        Args:
+            url: URL to check
+
+        Returns:
+            True if should cache globally, False otherwise
+        """
+        if not url:
+            return False
+
+        url_lower = url.lower()
+
+        # Cache company profiles (high reuse)
+        if '/company/' in url_lower or '/profile/' in url_lower:
+            return True
+
+        # Cache country pages (high reuse)
+        if '/country/' in url_lower or '/cntry/' in url_lower:
+            return True
+
+        # Cache HS code pages (medium reuse)
+        if '/chapter/' in url_lower or '/hs-code/' in url_lower:
+            return True
+
+        # Cache search-data pages (medium reuse)
+        if '/search-data/' in url_lower:
+            return True
+
+        # Don't cache generic searches (user-specific)
+        if '/search?' in url_lower:
+            return False
+
+        # Default: cache it (better safe than sorry)
+        return True
 
     async def get_embeddings_from_redis(
         self,
@@ -486,7 +551,8 @@ class DynamicContentManager:
         session_id: str
     ) -> Optional[tuple]:
         """
-        Get embeddings from Redis cache
+        Get embeddings from Redis cache.
+        Checks session cache first, then global cache.
 
         Args:
             url: URL to fetch embeddings for
@@ -495,7 +561,37 @@ class DynamicContentManager:
         Returns:
             Tuple of (embeddings, chunks, full_content) or None if not found
         """
-        return self.redis.get_embeddings(session_id, url)
+        # 1. Check session cache first (most recent, user-specific)
+        cached = self.redis.get_embeddings(session_id, url)
+        if cached:
+            logger.info(f"⚡ Session cache hit: {url[:80]}...")
+            return cached
+
+        # 2. Check global cache (shared across all users) - OPTIMIZATION
+        try:
+            # Use get_embeddings_global for proper global cache lookup
+            global_cached = self.redis.get_embeddings_global(url)
+            if global_cached:
+                logger.info(f"⚡⚡ Global cache hit: {url[:80]}... (saved 10-20s embedding generation!)")
+
+                # Copy to session cache for faster future access
+                embeddings, chunks, full_content = global_cached
+                self.redis.save_embeddings(session_id, url, embeddings, chunks, full_content)
+
+                return global_cached
+        except AttributeError:
+            # Fallback if get_embeddings_global doesn't exist
+            logger.warning("get_embeddings_global not available, using session-based lookup")
+            global_cached = self.redis.get_embeddings("global", url)
+            if global_cached:
+                logger.info(f"⚡⚡ Global cache hit (fallback): {url[:80]}...")
+                embeddings, chunks, full_content = global_cached
+                self.redis.save_embeddings(session_id, url, embeddings, chunks, full_content)
+                return global_cached
+
+        # 3. No cache found
+        logger.debug(f"Cache miss: {url[:80]}...")
+        return None
 
     def clear_cache(self):
         """Clear the in-memory content cache"""

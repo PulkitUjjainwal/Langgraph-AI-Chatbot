@@ -277,13 +277,13 @@ INSERT INTO faq (page_id, question, answer, question_type, priority, keywords) V
 
 ((SELECT id FROM pages WHERE page_key = 'search_data'),
  'I need to check country coverage',
- 'We cover 100+ countries with varying data depth. Major markets include USA, China, India, EU countries, and Latin America. Check our coverage page for country-specific details and data availability.',
+ 'We cover 100+ countries with varying data depth. Major markets include USA, China, United Kingdom, EU countries, and Latin America. Check our coverage page for country-specific details and data availability.',
  'suggested', 99, 'coverage,country,countries,available'),
 
 ((SELECT id FROM pages WHERE page_key = 'search_data'),
  'Which Asian countries are covered?',
- 'Our Asian coverage includes China, India, Vietnam, Indonesia, Thailand, Malaysia, Philippines, South Korea, Japan, Taiwan, Bangladesh, Pakistan, and Sri Lanka. Import and export data availability varies by country.',
- 'suggested', 98, 'Asia,Asian,China,India,Vietnam'),
+ 'Our Asian coverage includes China, Vietnam, Indonesia, Thailand, Malaysia, Philippines, South Korea, Japan, Taiwan, Bangladesh, Pakistan, and Sri Lanka. Import and export data availability varies by country.',
+ 'suggested', 98, 'Asia,Asian,China,Vietnam'),
 
 ((SELECT id FROM pages WHERE page_key = 'search_data'),
  'Which African markets are available?',
